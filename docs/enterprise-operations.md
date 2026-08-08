@@ -195,7 +195,22 @@ CI secret 应设为 masked/protected，且通行证消费步骤紧邻生产部�
 - OIDC、Redis 和 metrics secret 由部署平台重新注入；
 - CI Gate 对旧令牌继续失败关闭。
 
-file 模式备份必须把 `dbguard.json`、回滚迁移证据侧车和 `.required` 标记作为一个不可拆分的恢复单元。`deploy/production/changeguard-backup.sh` 会对三者执行稳定副本重试，校验侧车自摘要，并确认数据文件 SHA-256 匹配侧车的 current 或 previous 快照；只恢复主 JSON、遗漏侧车的操作应被视为无效备份。
+file 模式备份必须把 `dbguard.json`、回滚迁移证据侧车和 `.required` 标记作为一个不可拆分的恢复单元。`deploy/production/changeguard-backup.sh` 会对三者执行稳定副本重试，校验侧车自摘要，并确认数据文件 SHA-256 匹配侧车的 current 或 previous 快照；只恢复主 JSON、遗漏侧车的操作应被视为无效备份。脚本优先读取 `/etc/changeguard/core.env`，迁移前可回退到 legacy release 的 `.env`，也可通过 `CHANGEGUARD_CORE_ENV_FILE` 和 `CHANGEGUARD_CORE_DATA_FILE` 显式指定只读来源；备份 metadata 会固定核心数据、环境、witness 和 marker 摘要。
+
+恢复不得直接覆盖生产目录。`deploy/production/changeguard-restore.sh` 只支持两步：
+
+```bash
+CHANGEGUARD_BACKUP_DIR=/opt/changeguard/backups \
+  ./changeguard-restore.sh verify /opt/changeguard/backups/snapshot-YYYYMMDD-HHMMSS
+
+CHANGEGUARD_BACKUP_DIR=/opt/changeguard/backups \
+CHANGEGUARD_RESTORE_ROOT=/opt/changeguard/restore-staging \
+  ./changeguard-restore.sh stage \
+  /opt/changeguard/backups/snapshot-YYYYMMDD-HHMMSS \
+  /opt/changeguard/restore-staging/restore-YYYYMMDD-HHMMSS
+```
+
+`verify` 会拒绝越界/软链快照、不安全 manifest 路径、未被 manifest 覆盖的文件、过宽的环境文件权限、无效 JSON、断裂的 Agent 审计链、无签名指标 checkpoint，以及不完整、篡改或无法与主 JSON 配对的 migration witness。`stage` 先复制到受限临时目录，重新执行全部验证，写入 `changeguard-restore/v1` 报告和独立 restore manifest，再原子移动到隔离恢复目录。它不提供“直接恢复到 `/opt/changeguard/data`”的模式；生产激活仍必须由专用账号权限、规范环境、preflight、`--check-config`、隔离启动和显式流量切换共同完成。
 
 ## 10. 升级与回滚
 
@@ -210,6 +225,7 @@ file 模式备份必须把 `dbguard.json`、回滚迁移证据侧车和 `.requir
 7. file 模式确认侧车与 `.required` 标记被备份、回滚旧核心不会删除它们，再次前滚的启动日志显示 `external-state-rehydrated` 和实际恢复计数。
 8. 将规范配置安装到 root 所有、`changeguard` 组只读的 `/etc/changeguard/core.env`，运行候选 `--check-config`；任何重复键、占位符、inherited override 或 production profile 缺项都必须阻断。
 9. 以专用 `changeguard` 用户运行 `changeguard-core-preflight.sh`，要求 release 全量哈希、数据目录权限和 witness pair 全部通过；不得用 root 执行核心来绕过权限问题。
+10. 对最新快照运行 restore `verify` 和 `stage`，从 staged core 数据副本启动候选并核对业务身份、状态、witness、readiness 与清理结果；只通过 `manifest.sha256` 而未实际启动恢复数据，不算恢复演练完成。
 
 滚动升级时先观察 readiness 和错误率，再扩大实例范围。旧二进制能够启动不等于回滚安全：只有往返状态收敛才允许灰度。file 模式回滚必须保留迁移证据侧车；PostgreSQL 模式的应用回滚不能自动回滚已执行的数据迁移，数据库恢复与向后兼容方案必须单独验证。
 

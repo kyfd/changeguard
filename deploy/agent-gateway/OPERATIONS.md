@@ -93,6 +93,13 @@ availability and latency objectives, upstream errors, and audit-file growth.
   rollback migration witness, and its `.required` marker as one recovery unit.
   It rejects a snapshot unless the JSON hash matches the witness current or
   previous state and the witness self-digest verifies.
+- Verify every retained snapshot with
+  `deploy/production/changeguard-restore.sh verify` and stage it under a
+  dedicated restore root before a release. The restore tool rejects symlinks,
+  path traversal, manifest coverage gaps, broad secret-file permissions,
+  broken audit/metrics checkpoints, and incomplete witness pairs. It never
+  writes directly to the live core data directory; a restored copy must pass
+  candidate startup and business-state checks before any explicit activation.
 - Alert at 256 MiB and plan a chain-aware archive before the active audit file
   reaches that threshold. Until an archive verifier/checkpoint format is
   deployed, retain the complete active chain.

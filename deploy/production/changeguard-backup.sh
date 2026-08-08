@@ -6,7 +6,35 @@ retention="${CHANGEGUARD_BACKUP_RETENTION:-30}"
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 staging="$backup_root/.staging-$stamp"
 snapshot="$backup_root/snapshot-$stamp"
-core_data="/opt/changeguard/data/dbguard.json"
+core_data="${CHANGEGUARD_CORE_DATA_FILE:-/opt/changeguard/data/dbguard.json}"
+core_environment="${CHANGEGUARD_CORE_ENV_FILE:-}"
+
+case "$backup_root" in
+  /*) ;;
+  *) printf 'backup root must be absolute: %s\n' "$backup_root" >&2; exit 1 ;;
+esac
+case "$(readlink -m -- "$backup_root")" in
+  /|/opt|/opt/changeguard|/etc|/usr|/var) printf 'backup root is unsafe: %s\n' "$backup_root" >&2; exit 1 ;;
+esac
+[ ! -L "$backup_root" ] || { printf 'backup root must not be a symlink: %s\n' "$backup_root" >&2; exit 1; }
+
+if [ -z "$core_environment" ]; then
+  if [ -r /etc/changeguard/core.env ]; then
+    core_environment="/etc/changeguard/core.env"
+  else
+    core_environment="/opt/changeguard/current/.env"
+  fi
+fi
+case "$core_data" in
+  /*) ;;
+  *) printf 'core data backup path must be absolute: %s\n' "$core_data" >&2; exit 1 ;;
+esac
+case "$core_environment" in
+  /*) ;;
+  *) printf 'core environment backup path must be absolute: %s\n' "$core_environment" >&2; exit 1 ;;
+esac
+[ -f "$core_data" ] && [ ! -L "$core_data" ] || { printf 'core data must be a regular non-symlink file: %s\n' "$core_data" >&2; exit 1; }
+[ -f "$core_environment" ] && [ ! -L "$core_environment" ] || { printf 'core environment must be a regular non-symlink file: %s\n' "$core_environment" >&2; exit 1; }
 
 if ! [[ "$retention" =~ ^[0-9]+$ ]] || [ "$retention" -lt 7 ] || [ "$retention" -gt 365 ]; then
   printf 'invalid CHANGEGUARD_BACKUP_RETENTION=%s (expected 7..365)\n' "$retention" >&2
@@ -49,10 +77,10 @@ copy_optional() {
   fi
 }
 
-copy_required /opt/changeguard/current/.env "$staging/core/changeguard.env"
+copy_required "$core_environment" "$staging/core/changeguard.env"
 chmod 0600 "$staging/core/changeguard.env"
 
-configured_witness="$(python3 - /opt/changeguard/current/.env <<'PY'
+configured_witness="$(python3 - "$core_environment" <<'PY'
 import pathlib
 import sys
 
@@ -81,6 +109,10 @@ for attempt in 1 2 3; do
   marker_exists=0
   [ -f "$migration_witness" ] && witness_exists=1
   [ -f "$migration_marker" ] && marker_exists=1
+  if [ -L "$migration_witness" ] || [ -L "$migration_marker" ]; then
+    printf 'migration witness and marker must not be symlinks\n' >&2
+    exit 1
+  fi
   if [ "$witness_exists" -ne "$marker_exists" ]; then
     sleep 2
     continue
@@ -163,6 +195,14 @@ PY
   break
 done
 [ "$core_copied" -eq 1 ] || { printf 'core JSON/witness backup validation failed\n' >&2; exit 1; }
+core_data_sha256="$(sha256sum "$staging/core/dbguard.json" | awk '{print $1}')"
+core_environment_sha256="$(sha256sum "$staging/core/changeguard.env" | awk '{print $1}')"
+migration_witness_sha256=""
+migration_marker_sha256=""
+if [ "$witness_exists" -eq 1 ]; then
+  migration_witness_sha256="$(sha256sum "$staging/core/dbguard.rollback-witness.json" | awk '{print $1}')"
+  migration_marker_sha256="$(sha256sum "$staging/core/dbguard.rollback-witness.required" | awk '{print $1}')"
+fi
 
 copy_required /etc/changeguard-agent-gateway.env "$staging/agent/changeguard-agent-gateway.env"
 chmod 0600 "$staging/agent/changeguard-agent-gateway.env"
@@ -208,7 +248,17 @@ printf '%s\n' "$core_release" > "$staging/config/core-release.txt"
 curl -fsS --max-time 5 http://127.0.0.1:18081/health/ready > "$staging/agent/ready.json"
 curl -fsS --max-time 5 http://127.0.0.1:18081/health/slo > "$staging/agent/slo.json"
 
-python3 - "$staging/metadata.json" "$stamp" "$core_release" "$agent_release" "$ui_release" <<'PY'
+python3 - \
+  "$staging/metadata.json" \
+  "$stamp" \
+  "$core_release" \
+  "$agent_release" \
+  "$ui_release" \
+  "$core_data_sha256" \
+  "$core_environment_sha256" \
+  "$witness_exists" \
+  "$migration_witness_sha256" \
+  "$migration_marker_sha256" <<'PY'
 import datetime
 import json
 import pathlib
@@ -222,6 +272,14 @@ payload = {
     "core_release": sys.argv[3],
     "agent_release": sys.argv[4],
     "ui_release": sys.argv[5],
+    "scope": "full",
+    "core": {
+        "data_sha256": sys.argv[6],
+        "environment_sha256": sys.argv[7],
+        "migration_witness_present": sys.argv[8] == "1",
+        "migration_witness_sha256": sys.argv[9],
+        "migration_marker_sha256": sys.argv[10],
+    },
 }
 path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY

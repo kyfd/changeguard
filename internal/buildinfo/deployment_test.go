@@ -69,6 +69,22 @@ func TestProductionCoreServiceFailsClosedBeforeRunning(t *testing.T) {
 		"DBGUARD_METRICS_TOKEN=REPLACE_ME",
 		"DBGUARD_OPERATIONS_WEBHOOK_TOKEN=REPLACE_ME",
 	})
+	assertMarkers(t, filepath.Join(production, "changeguard-backup.sh"), []string{
+		"CHANGEGUARD_CORE_ENV_FILE",
+		"CHANGEGUARD_CORE_DATA_FILE",
+		`"scope": "full"`,
+		`"migration_witness_present"`,
+		"manifest.sha256",
+	})
+	assertMarkers(t, filepath.Join(production, "changeguard-restore.sh"), []string{
+		"changeguard-restore-verification/v1",
+		"snapshot_outside_backup_root",
+		"manifest coverage mismatch",
+		"migration witness payload digest mismatch",
+		"restore_destination_outside_restore_root",
+		"restore-manifest.sha256",
+		"restore_status=",
+	})
 }
 
 func TestCoreGovernanceAlertRulesCoverOperationalOutcomes(t *testing.T) {
