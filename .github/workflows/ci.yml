@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Test, lint, race and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify runtime artifacts are ignored and untracked
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for probe in .env tmp/.changeguard-probe bin/.changeguard-probe data/.changeguard-probe; do
+            if ! git check-ignore --quiet --no-index "$probe"; then
+              echo "::error file=.gitignore::Expected $probe to be ignored"
+              exit 1
+            fi
+          done
+
+          tracked=$(git ls-files -- .env 'tmp/**' 'bin/**' 'data/**')
+          if [ -n "$tracked" ]; then
+            echo "::error::Runtime artifacts must not be committed:"
+            echo "$tracked"
+            exit 1
+          fi
+
+      - name: Check frontend JavaScript syntax
+        run: |
+          node --check internal/httpapi/web/api-adapter.js
+          node --check internal/httpapi/web/app.js
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Run Go vet
+        run: go vet ./...
+
+      - name: Run Linux race detector
+        run: go test -race ./...
+
+      - name: Build container image
+        run: docker build -t changeguard:ci .

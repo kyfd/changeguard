@@ -1,0 +1,43 @@
+[Unit]
+Description=ChangeGuard protected Agent gateway
+Documentation=file:/opt/changeguard-agent/current/OPERATIONS.md
+After=network-online.target changeguard.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=changeguard-agent
+Group=changeguard-agent
+WorkingDirectory=/opt/changeguard-agent/current
+EnvironmentFile=/etc/changeguard-agent-gateway.env
+ExecStart=/opt/changeguard-agent/current/changeguard-agent-gateway
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+KillSignal=SIGTERM
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+ReadWritePaths=/opt/changeguard-agent/data
+LimitNOFILE=4096
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=changeguard-agent-gateway
+
+[Install]
+WantedBy=multi-user.target

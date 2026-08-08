@@ -1,0 +1,27 @@
+stages:
+  - gate
+  - deploy
+
+variables:
+  # Configure both as protected/masked project variables.
+  CHANGEGUARD_URL: "https://changeguard.example.com"
+  CHANGEGUARD_MANIFEST: "examples/ci-demo/.changeguard.json"
+
+changeguard_gate:
+  stage: gate
+  image: your-registry/changeguard-gate:1
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - changeguard-gate digest -manifest "$CHANGEGUARD_MANIFEST"
+    - changeguard-gate verify -manifest "$CHANGEGUARD_MANIFEST" -consumer "$CI_PIPELINE_ID"
+    - changeguard-gate consume -manifest "$CHANGEGUARD_MANIFEST" -consumer "$CI_PIPELINE_ID"
+  environment:
+    name: production
+
+deploy_orders:
+  stage: deploy
+  needs: [changeguard_gate]
+  image: bitnami/kubectl:1.31
+  script:
+    - kubectl apply -f examples/ci-demo/deploy/orders.yaml

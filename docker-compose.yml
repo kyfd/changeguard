@@ -1,0 +1,124 @@
+services:
+  primary-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dbguard
+      POSTGRES_PASSWORD: ${DBGUARD_POSTGRES_PASSWORD:-dbguard}
+      POSTGRES_DB: dbguard
+    volumes:
+      - primary-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbguard -d dbguard"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  shadow-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shadow_admin
+      POSTGRES_PASSWORD: shadow_admin
+      POSTGRES_DB: shadow
+    volumes:
+      - shadow-data:/var/lib/postgresql/data
+      - ./deploy/shadow-init.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shadow_admin -d shadow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  dbguard:
+    build: .
+    environment:
+      PORT: "8080"
+      DBGUARD_STORE_MODE: postgres
+      DBGUARD_PRIMARY_DSN: postgres://dbguard:${DBGUARD_POSTGRES_PASSWORD:-dbguard}@primary-postgres:5432/dbguard?sslmode=disable
+      DBGUARD_DB_MAX_CONNS: ${DBGUARD_DB_MAX_CONNS:-20}
+      DBGUARD_DB_MIN_CONNS: ${DBGUARD_DB_MIN_CONNS:-2}
+      DBGUARD_SESSION_MODE: redis
+      DBGUARD_REDIS_URL: redis://redis:6379/0
+      DBGUARD_WORKERS: "2"
+      DBGUARD_AUTH_MODE: ${DBGUARD_AUTH_MODE:-local}
+      DBGUARD_ENABLE_DEMO_ACCOUNTS: ${DBGUARD_ENABLE_DEMO_ACCOUNTS:-false}
+      DBGUARD_ENABLE_DEMO_DATA: ${DBGUARD_ENABLE_DEMO_DATA:-false}
+      DBGUARD_PUBLIC_URL: ${DBGUARD_PUBLIC_URL:-http://localhost:8080}
+      DBGUARD_AUTH_SESSION_TTL: ${DBGUARD_AUTH_SESSION_TTL:-12h}
+      DBGUARD_AUTH_SECURE_COOKIE: ${DBGUARD_AUTH_SECURE_COOKIE:-}
+      DBGUARD_TRUST_PROXY_HEADERS: "true"
+      DBGUARD_OIDC_ISSUER: ${DBGUARD_OIDC_ISSUER:-}
+      DBGUARD_OIDC_CLIENT_ID: ${DBGUARD_OIDC_CLIENT_ID:-}
+      DBGUARD_OIDC_CLIENT_SECRET: ${DBGUARD_OIDC_CLIENT_SECRET:-}
+      DBGUARD_OIDC_REDIRECT_URL: ${DBGUARD_OIDC_REDIRECT_URL:-http://localhost:8080/auth/callback}
+      DBGUARD_OIDC_SCOPES: ${DBGUARD_OIDC_SCOPES:-openid,profile,email,groups}
+      DBGUARD_OIDC_ROLE_CLAIM: ${DBGUARD_OIDC_ROLE_CLAIM:-groups}
+      DBGUARD_OIDC_OWNER_VALUES: ${DBGUARD_OIDC_OWNER_VALUES:-}
+      DBGUARD_OIDC_REVIEWER_VALUES: ${DBGUARD_OIDC_REVIEWER_VALUES:-}
+      DBGUARD_OIDC_ALLOWED_VALUES: ${DBGUARD_OIDC_ALLOWED_VALUES:-}
+      DBGUARD_OIDC_ALLOWED_DOMAINS: ${DBGUARD_OIDC_ALLOWED_DOMAINS:-}
+      DBGUARD_OIDC_TOKEN_AUTH_METHOD: ${DBGUARD_OIDC_TOKEN_AUTH_METHOD:-client_secret_post}
+      DBGUARD_EXPERIMENT_MODE: ${DBGUARD_EXPERIMENT_MODE:-postgres}
+      DBGUARD_SHADOW_DSN: postgres://dbguard_runner:dbguard_runner@shadow-postgres:5432/shadow?sslmode=disable
+      DBGUARD_PASSPORT_HMAC_SECRET: ${DBGUARD_PASSPORT_HMAC_SECRET:?set a random secret of at least 32 bytes}
+      DBGUARD_PASSPORT_TTL: ${DBGUARD_PASSPORT_TTL:-10m}
+      DBGUARD_LLM_BASE_URL: ${DBGUARD_LLM_BASE_URL:-}
+      DBGUARD_LLM_API_KEY: ${DBGUARD_LLM_API_KEY:-}
+      DBGUARD_LLM_MODEL: ${DBGUARD_LLM_MODEL:-deepseek-chat}
+      DBGUARD_LLM_MAX_TOKENS: ${DBGUARD_LLM_MAX_TOKENS:-700}
+      DBGUARD_LLM_DAILY_ANALYSIS_LIMIT: ${DBGUARD_LLM_DAILY_ANALYSIS_LIMIT:-20}
+      DBGUARD_LLM_HTTP_TIMEOUT: ${DBGUARD_LLM_HTTP_TIMEOUT:-15s}
+      DBGUARD_LLM_MAX_RETRIES: ${DBGUARD_LLM_MAX_RETRIES:-1}
+      DBGUARD_LLM_RETRY_BACKOFF: ${DBGUARD_LLM_RETRY_BACKOFF:-200ms}
+      DBGUARD_LLM_CIRCUIT_FAILURES: ${DBGUARD_LLM_CIRCUIT_FAILURES:-3}
+      DBGUARD_LLM_CIRCUIT_COOLDOWN: ${DBGUARD_LLM_CIRCUIT_COOLDOWN:-1m}
+      DBGUARD_GITLAB_SIGNING_TOKEN: ${DBGUARD_GITLAB_SIGNING_TOKEN:-}
+      DBGUARD_GITLAB_WEBHOOK_SECRET: ${DBGUARD_GITLAB_WEBHOOK_SECRET:-}
+      DBGUARD_GITLAB_ORGANIZATION_ID: ${DBGUARD_GITLAB_ORGANIZATION_ID:-org_demo}
+      DBGUARD_JENKINS_WEBHOOK_TOKEN: ${DBGUARD_JENKINS_WEBHOOK_TOKEN:-}
+      DBGUARD_JENKINS_ORGANIZATION_ID: ${DBGUARD_JENKINS_ORGANIZATION_ID:-org_demo}
+      DBGUARD_OPERATIONS_WEBHOOK_TOKEN: ${DBGUARD_OPERATIONS_WEBHOOK_TOKEN:-}
+      DBGUARD_OPERATIONS_ORGANIZATION_ID: ${DBGUARD_OPERATIONS_ORGANIZATION_ID:-org_demo}
+      DBGUARD_METRICS_TOKEN: ${DBGUARD_METRICS_TOKEN:-}
+    depends_on:
+      primary-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      shadow-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      dbguard:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  primary-data:
+  redis-data:
+  shadow-data:

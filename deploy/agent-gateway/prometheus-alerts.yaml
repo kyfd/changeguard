@@ -1,0 +1,83 @@
+groups:
+  - name: changeguard-agent-gateway
+    interval: 30s
+    rules:
+      - alert: ChangeGuardAgentGatewayDown
+        expr: up{job="changeguard-agent-gateway"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: changeguard-agent-gateway
+        annotations:
+          summary: ChangeGuard Agent gateway is unavailable
+          description: Prometheus has been unable to scrape the Agent gateway for two minutes.
+
+      - alert: ChangeGuardAgentAuditChainUnverified
+        expr: changeguard_agent_gateway_audit_chain_verified == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: changeguard-agent-gateway
+        annotations:
+          summary: ChangeGuard Agent audit chain verification failed
+          description: Stop protected Agent operations and investigate audit-file integrity before restoring service.
+
+      - alert: ChangeGuardAgentMetricsStateUnverified
+        expr: changeguard_agent_gateway_metrics_state_verified == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: changeguard-agent-gateway
+        annotations:
+          summary: ChangeGuard Agent metrics checkpoint verification failed
+          description: The fixed SLO window is no longer trustworthy; inspect metrics.json and restore a verified checkpoint.
+
+      - alert: ChangeGuardAgentUpstreamUnavailable
+        expr: changeguard_agent_gateway_upstream_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: changeguard-agent-gateway
+        annotations:
+          summary: ChangeGuard core upstream is unavailable to the Agent gateway
+          description: Protected Agent requests cannot be served while the loopback core readiness check is failing.
+
+      - alert: ChangeGuardAgentAvailabilitySLOBreach
+        expr: changeguard_agent_gateway_slo_availability_percent < changeguard_agent_gateway_slo_availability_target_percent
+        for: 5m
+        labels:
+          severity: warning
+          service: changeguard-agent-gateway
+        annotations:
+          summary: ChangeGuard Agent availability is below its configured objective
+          description: Service failures in the current fixed SLO window have consumed the availability objective.
+
+      - alert: ChangeGuardAgentLatencySLOBreach
+        expr: changeguard_agent_gateway_slo_p95_duration_milliseconds > changeguard_agent_gateway_slo_p95_target_milliseconds
+        for: 5m
+        labels:
+          severity: warning
+          service: changeguard-agent-gateway
+        annotations:
+          summary: ChangeGuard Agent P95 latency is above its configured objective
+          description: Inspect upstream model latency, retries, tool calls, and core saturation before increasing the target.
+
+      - alert: ChangeGuardAgentUpstreamErrors
+        expr: increase(changeguard_agent_gateway_upstream_errors_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          service: changeguard-agent-gateway
+        annotations:
+          summary: ChangeGuard Agent gateway observed upstream errors
+          description: At least one protected request failed because the core upstream returned an error or could not be reached.
+
+      - alert: ChangeGuardAgentAuditFileLarge
+        expr: changeguard_agent_gateway_audit_file_bytes > 268435456
+        for: 15m
+        labels:
+          severity: warning
+          service: changeguard-agent-gateway
+        annotations:
+          summary: ChangeGuard Agent audit file exceeds 256 MiB
+          description: Follow the chain-aware archive runbook; do not truncate or use ordinary logrotate on the active JSONL chain.

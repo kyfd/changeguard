@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f7f9fc">
+  <title>ChangeGuard</title>
+    <link rel="stylesheet" href="/styles.css?v=20260808-enterprise-agent3">
+</head>
+<body>
+<div class="auth-gate" id="authGate" hidden></div>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 2.7 20 6v5.2c0 5.1-3.3 8.6-8 10.1-4.7-1.5-8-5-8-10.1V6l8-3.3Z"/><path d="m8.5 12 2.1 2.1 4.9-5"/></svg>
+        </div>
+        <div><strong>ChangeGuard</strong><span>变更管理</span></div>
+      </div>
+      <nav class="nav-list" id="navList" aria-label="主导航"></nav>
+      <div class="sidebar-footer">
+        <div class="service-state"><i></i><div><strong>服务正常</strong><span>以健康检查与任务队列为准</span></div></div>
+        <div class="workspace"><span class="avatar avatar-blue">CG</span><div><strong id="workspaceName">当前企业</strong><span id="workspaceMode">工作区</span></div><button class="icon-button" title="企业设置" data-route="enterprise">•••</button></div>
+      </div>
+    </aside>
+
+    <div class="mobile-backdrop" id="mobileBackdrop"></div>
+    <section class="workspace-shell">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button menu-button" id="menuButton" aria-label="打开菜单">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+          <div><div class="breadcrumb">ChangeGuard / <span id="breadcrumb">概览</span></div><h1 id="pageTitle">概览</h1></div>
+        </div>
+        <div class="topbar-actions">
+          <label class="global-search">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+            <input id="globalSearch" placeholder="搜索变更、服务、负责人">
+          </label>
+          <div class="topbar-notify-wrap">
+            <button class="icon-button notification-button" id="notificationButton" type="button" title="待办通知" aria-haspopup="true" aria-expanded="false">
+              <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
+              <i id="notificationDot" hidden></i>
+            </button>
+            <div class="notify-panel" id="notifyPanel" hidden>
+              <header><strong>待办</strong><button type="button" class="button button-text button-small" data-notify-close>关闭</button></header>
+              <div id="notifyPanelBody" class="notify-panel-body"></div>
+            </div>
+          </div>
+          <!-- 演示模式：可切换成员；登录后显示只读身份，避免 disabled 下拉看起来像坏了 -->
+          <label class="actor-select-wrap" id="actorSelectWrap">
+            <span class="avatar" id="headerAvatar">刘</span>
+            <select id="actorSelect" aria-label="切换演示成员"></select>
+          </label>
+          <div class="user-chip is-hidden" id="userChip" title="当前登录身份">
+            <span class="avatar" id="userChipAvatar">刘</span>
+            <div class="user-chip-meta">
+              <strong id="userChipName">—</strong>
+              <small id="userChipRole">—</small>
+            </div>
+          </div>
+          <button class="button button-secondary logout-button is-hidden" id="logoutButton" type="button" title="退出当前企业账号">
+            <svg viewBox="0 0 24 24"><path d="M10 5H5v14h5M14 8l4 4-4 4M8 12h10"/></svg>退出
+          </button>
+          <button class="button button-primary" id="createButton" type="button">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新建变更
+          </button>
+        </div>
+      </header>
+      <main class="main-content" id="mainContent">
+        <div class="page-loading">
+          <div class="skeleton skeleton-title"></div>
+          <div class="skeleton-grid"><i></i><i></i><i></i><i></i></div>
+          <div class="skeleton skeleton-panel"></div>
+        </div>
+      </main>
+    </section>
+  </div>
+
+  <div class="modal-layer" id="createModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-modal></div>
+    <section class="modal modal-large" role="dialog" aria-modal="true" aria-labelledby="createTitle">
+      <header class="modal-header"><div><span class="eyebrow">变更单</span><h2 id="createTitle">新建变更</h2><p>填写服务、环境、仓库与变更材料，提交后走规则检查与审批。</p></div><button class="icon-button" data-close-modal aria-label="关闭">×</button></header>
+      <form id="createForm">
+        <div class="modal-body form-layout">
+          <div class="form-section">
+            <h3>基本信息</h3>
+            <div class="form-grid">
+              <label class="field field-wide"><span>变更标题 <b>*</b></span><input name="title" required maxlength="120" placeholder="例如：订单服务 V2.8 幂等能力灰度发布"></label>
+              <label class="field"><span>所属服务 <b>*</b></span><select name="application_id" id="applicationSelect" required></select></label>
+              <label class="field"><span>变更类型</span><select name="change_type"><option>混合发布</option><option>代码发布</option><option>配置变更</option><option>Kubernetes 发布</option><option>API 变更</option><option>数据库变更</option><option>紧急修复</option></select></label>
+              <label class="field"><span>目标环境</span><select name="environment"><option>预发布环境</option><option>测试环境</option><option>生产环境</option></select></label>
+              <label class="field"><span>计划执行时间</span><input type="datetime-local" name="planned_at"><small class="field-hint">默认错开同服务 90 分钟保护窗，避免窗口冲突阻断</small></label>
+              <label class="field field-wide"><span>代码仓库</span><input name="repository_url" maxlength="500" placeholder="https://git.example.com/commerce/order-service"></label>
+              <label class="field"><span>分支</span><input name="branch" maxlength="120" placeholder="release/v2.8" value="main"></label>
+              <label class="field"><span>Commit SHA</span><input name="commit_sha" minlength="7" maxlength="64" pattern="[0-9a-fA-F]{7,64}" placeholder="8f2c1ab"><small>填写 7–64 位十六进制提交标识。</small></label>
+              <label class="field field-wide"><span>业务说明</span><textarea name="description" rows="3" placeholder="说明需求来源、影响范围、预期结果和观察指标"></textarea></label>
+            </div>
+          </div>
+          <div class="form-section">
+            <h3>变更制品与 Diff</h3>
+            <p class="form-section-hint">至少填写一类证据。平台只保存审核所需 Diff 和清单，不保存仓库令牌、生产密钥或集群凭据。</p>
+            <div class="artifact-form-grid">
+              <label class="field"><span>代码 Diff</span><textarea class="code-input" name="code_diff" rows="7" spellcheck="false" placeholder="+func CreateOrder(ctx context.Context, requestID string) error { ... }"></textarea><small>检查 panic、Fatal、危险 TLS 配置和高风险代码路径。</small></label>
+              <label class="field"><span>配置 Diff</span><textarea class="code-input" name="config_diff" rows="7" spellcheck="false" placeholder="debug: false&#10;feature_flags: ..."></textarea><small>检查明文密钥、生产调试模式和高风险开关。</small></label>
+              <label class="field"><span>Kubernetes 清单</span><textarea class="code-input" name="kubernetes_manifest" rows="8" spellcheck="false" placeholder="image: registry.example.com/order:v2.8.0&#10;resources: ..."></textarea><small>检查镜像版本、特权容器、资源限制和健康探针。</small></label>
+              <label class="field"><span>API / OpenAPI Diff</span><textarea class="code-input" name="api_diff" rows="8" spellcheck="false" placeholder="+ /v2/orders: ..."></textarea><small>识别接口、字段和必填约束的破坏性修改。</small></label>
+              <label class="field field-wide"><span>数据库 SQL</span><textarea class="code-input" name="sql" rows="7" spellcheck="false" placeholder="CREATE INDEX CONCURRENTLY ...;"></textarea><small>存在数据库变更时进入 SQL 规则检查与影子库演练。</small></label>
+            </div>
+          </div>
+          <div class="form-section">
+            <h3>回滚与发布策略</h3>
+            <div class="form-grid">
+              <label class="field field-wide"><span>整体回滚方案 <b>*</b></span><textarea name="rollback_plan" rows="4" required maxlength="8000" placeholder="说明镜像回退、配置恢复、流量切换、数据库回滚和数据补偿步骤"></textarea></label>
+              <label class="field field-wide"><span>数据库回滚 SQL</span><textarea class="code-input" name="rollback_sql" rows="5" spellcheck="false" placeholder="DROP INDEX CONCURRENTLY IF EXISTS ...;"></textarea></label>
+              <label class="field"><span>发布策略</span><select name="deployment_strategy"><option>金丝雀发布</option><option>蓝绿发布</option><option>分批发布</option><option>全量发布</option></select></label>
+              <label class="field"><span>首批流量比例</span><input type="number" name="canary_percent" min="0" max="100" value="10"></label>
+              <label class="field"><span>观察窗口（分钟）</span><input type="number" name="observation_minutes" min="1" max="1440" value="30"></label>
+              <label class="field field-wide"><span>成功判定指标 <b>*</b></span><input name="success_metrics" value="HTTP 5xx, P99 延迟, 核心业务成功率" placeholder="用逗号分隔，至少一项" required><small class="field-hint">规则要求非空；生产环境请避免「全量发布」</small></label>
+              <label class="enterprise-switch field-wide"><input type="checkbox" name="auto_rollback" checked><span><strong>指标异常时允许自动中止发布</strong><small>平台只输出控制决策；实际回滚由配置的流水线或发布系统执行。</small></span></label>
+            </div>
+          </div>
+        </div>
+        <footer class="modal-footer"><span><i class="secure-dot"></i>所有操作都会写入审计日志</span><div><button type="button" class="button button-secondary" data-close-modal>取消</button><button class="button button-primary" type="submit" id="saveChangeButton">保存变更单</button></div></footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-layer" id="reviewModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-review></div>
+    <section class="modal modal-small" role="dialog" aria-modal="true">
+      <header class="modal-header"><div><span class="eyebrow" id="reviewEyebrow">人工审批</span><h2 id="reviewTitle">审批变更</h2><p id="reviewDescription">请核对规则、演练和分析证据。</p></div><button class="icon-button" data-close-review>×</button></header>
+      <form id="reviewForm"><div class="modal-body"><label class="field"><span>审批意见</span><textarea name="comment" rows="5" placeholder="填写审批依据、执行要求或驳回原因"></textarea></label></div><footer class="modal-footer"><span>审批人与提交人必须分离</span><div><button type="button" class="button button-secondary" data-close-review>取消</button><button class="button button-primary" id="reviewSubmitButton">确认</button></div></footer></form>
+    </section>
+  </div>
+
+
+  <div class="modal-layer" id="policyModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-policy></div>
+    <section class="modal modal-large" role="dialog" aria-modal="true" aria-labelledby="policyModalTitle">
+      <header class="modal-header"><div><span class="eyebrow">风险规则中心</span><h2 id="policyModalTitle">新建自定义规则</h2><p id="policyModalDescription">使用 Go 正则表达式定义可复用的 SQL 检查策略。</p></div><button class="icon-button" data-close-policy aria-label="关闭">×</button></header>
+      <form id="policyForm">
+        <div class="modal-body">
+          <div class="form-grid policy-form-grid">
+            <label class="field"><span>规则编码 <b>*</b></span><input name="code" required maxlength="64" placeholder="例如：SELECT_STAR"><small>大写字母、数字和下划线，创建后不可修改。</small></label>
+            <label class="field"><span>风险等级 <b>*</b></span><select name="severity"><option value="HIGH">高风险</option><option value="MEDIUM" selected>中风险</option><option value="LOW">低风险</option></select></label>
+            <label class="field field-wide"><span>规则名称 <b>*</b></span><input name="name" required maxlength="80" placeholder="例如：禁止直接查询全部字段"></label>
+            <label class="field field-wide"><span>规则说明 <b>*</b></span><textarea name="description" rows="3" required maxlength="500" placeholder="说明该模式在真实业务中的风险和适用场景"></textarea></label>
+            <label class="field field-wide"><span>SQL 正则表达式 <b>*</b></span><input name="pattern" required maxlength="500" placeholder="例如：(?i)\bSELECT\s+\*\s+FROM\b"><small id="policyPatternHint">采用 Go RE2 语法，不支持反向引用和环视。</small></label>
+            <label class="field field-wide"><span>整改建议 <b>*</b></span><textarea name="suggestion" rows="3" required maxlength="500" placeholder="给出可以直接执行的修改建议"></textarea></label>
+            <label class="field"><span>作用环境</span><input name="environments" placeholder="生产环境，预发布环境"><small>留空表示全部环境，使用逗号分隔。</small></label>
+            <label class="field"><span>变更类型</span><input name="change_types" placeholder="代码发布，配置变更，DDL"><small>留空表示全部类型，使用逗号分隔。</small></label>
+            <label class="field field-wide"><span>制品范围</span><input name="artifact_kinds" placeholder="CODE，CONFIG，KUBERNETES，API，DATABASE"><small>留空表示全部制品，使用逗号分隔。</small></label>
+            <div class="field field-wide policy-checks">
+              <label><input type="checkbox" name="blocking"><span><strong>命中后阻断提交</strong><small>必须完成风险整改并重新提交检查。</small></span></label>
+              <label><input type="checkbox" name="enabled" checked><span><strong>保存后立即启用</strong><small>停用规则仍保留版本和历史命中记录。</small></span></label>
+            </div>
+          </div>
+        </div>
+        <footer class="modal-footer"><span><i class="secure-dot"></i>所有规则变更写入审计日志</span><div><button type="button" class="button button-secondary" data-close-policy>取消</button><button type="submit" class="button button-primary" id="savePolicyButton">创建并启用规则</button></div></footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-layer" id="findingModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-finding></div>
+    <section class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="findingTitle">
+      <header class="modal-header"><div><span class="eyebrow">风险整改闭环</span><h2 id="findingTitle">处理风险项</h2><p id="findingDescription">派单、整改和复核过程都会写入审计日志。</p></div><button class="icon-button" data-close-finding aria-label="关闭">×</button></header>
+      <form id="findingForm">
+        <div class="modal-body">
+          <div class="form-grid">
+            <label class="field field-wide" id="findingOwnerField"><span>整改负责人 <b>*</b></span><select id="findingOwner" name="owner_id"></select></label>
+            <label class="field field-wide" id="findingDueField"><span>整改期限 <b>*</b></span><input type="datetime-local" id="findingDueAt" name="due_at"></label>
+            <label class="field field-wide" id="findingContentField"><span id="findingContentLabel">处理说明 <b>*</b></span><textarea id="findingContent" name="content" rows="5" maxlength="1000" placeholder="说明实际处理方式、验证结果和剩余风险"></textarea></label>
+          </div>
+        </div>
+        <footer class="modal-footer"><span><i class="secure-dot"></i>整改人与复核人必须分离</span><div><button type="button" class="button button-secondary" data-close-finding>取消</button><button class="button button-primary" type="submit" id="findingSubmitButton">确认</button></div></footer>
+      </form>
+    </section>
+  </div>
+
+<div class="modal-layer" id="appModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-app></div>
+    <section class="modal modal-large" role="dialog" aria-modal="true" aria-labelledby="appModalTitle">
+      <header class="modal-header"><div><span class="eyebrow">企业服务目录</span><h2 id="appModalTitle">纳管业务服务</h2><p>登记服务、仓库、依赖和资源元数据；生产令牌、密钥与集群凭据不会进入 ChangeGuard。</p></div><button class="icon-button" data-close-app aria-label="关闭">×</button></header>
+      <form id="appForm">
+        <div class="modal-body"><div class="form-grid">
+          <label class="field"><span>服务名称 <b>*</b></span><input name="name" required maxlength="80" placeholder="例如：订单服务"></label>
+          <label class="field"><span>业务负责人/团队 <b>*</b></span><input name="owner" required maxlength="80" placeholder="例如：交易研发组"></label>
+          <label class="field"><span>服务类型</span><select name="kind"><option>后端服务</option><option>平台服务</option><option>前端应用</option><option>数据服务</option><option>基础服务</option><option>批处理任务</option></select></label>
+          <label class="field"><span>运行时 / 技术栈</span><input name="runtime" maxlength="120" placeholder="Go 1.24 / Gin / PostgreSQL"></label>
+          <label class="field field-wide"><span>代码仓库</span><input name="repository_url" maxlength="500" placeholder="https://git.example.com/commerce/order-service"></label>
+          <label class="field"><span>服务等级</span><select name="tier"><option value="核心">核心服务</option><option value="重要" selected>重要服务</option><option value="一般">一般服务</option></select></label>
+          <label class="field"><span>生命周期</span><select name="lifecycle"><option>生产运行</option><option>建设中</option><option>维护期</option><option>已下线</option></select></label>
+          <label class="field"><span>数据库名称（可选）</span><input name="database" maxlength="80" placeholder="order_db"></label>
+          <label class="field"><span>Schema（可选）</span><input name="schema" maxlength="80" placeholder="public"></label>
+          <label class="field field-wide"><span>治理环境</span><input name="environment" maxlength="120" value="生产环境" placeholder="生产环境"></label>
+          <label class="field"><span>依赖服务</span><select name="dependencies" class="dependency-select" multiple size="5" aria-describedby="dependencyHint"></select><small id="dependencyHint" class="field-hint">按 Ctrl / Command 可多选，只能选择当前企业已纳管的服务。</small></label>
+          <label class="field"><span>标签</span><input name="tags" maxlength="500" placeholder="交易链路，核心服务"></label>
+          <label class="field field-wide"><span>业务说明</span><textarea name="description" rows="4" maxlength="500" placeholder="说明服务职责、上下游依赖、核心资源和发布风险边界"></textarea></label>
+        </div></div>
+        <footer class="modal-footer"><span><i class="secure-dot"></i>服务元数据按企业隔离并写入审计日志</span><div><button type="button" class="button button-secondary" data-close-app>取消</button><button type="submit" class="button button-primary" id="saveAppButton">确认纳管</button></div></footer>
+      </form>
+    </section>
+  </div>
+
+<div class="modal-layer" id="inviteModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-invite></div>
+    <section class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="inviteModalTitle">
+      <header class="modal-header"><div><span class="eyebrow">企业成员管理</span><h2 id="inviteModalTitle">邀请员工加入</h2><p>分配职责后生成一次性邀请链接，可复制到企业沟通工具中发送。</p></div><button class="icon-button" data-close-invite aria-label="关闭">×</button></header>
+      <form id="inviteForm">
+        <div class="modal-body">
+          <div class="form-grid">
+            <label class="field field-wide"><span>员工邮箱 <b>*</b></span><input name="email" type="email" required placeholder="employee@company.com"></label>
+            <label class="field"><span>企业职责 <b>*</b></span><select name="role" required><option value="后端开发">后端开发</option><option value="数据库审核人">发布审核人</option><option value="技术负责人">技术负责人</option></select></label>
+            <label class="field"><span>有效期</span><select name="expires_in"><option value="24">24 小时</option><option value="72" selected>3 天</option><option value="168">7 天</option><option value="720">30 天</option></select></label>
+            <div class="invite-result field-wide" id="inviteResult" hidden>
+              <span>邀请链接已生成</span>
+              <div><input id="inviteURL" readonly><button class="button button-secondary button-small" type="button" data-copy-invite>复制</button></div>
+              <small>出于安全考虑，关闭弹窗后不能再次查看完整令牌；如丢失请撤销后重建。</small>
+            </div>
+          </div>
+        </div>
+        <footer class="modal-footer"><span><i class="secure-dot"></i>邀请与角色变更均写入企业审计日志</span><div><button type="button" class="button button-secondary" data-close-invite>取消</button><button type="submit" class="button button-primary" id="createInviteButton">生成邀请链接</button></div></footer>
+      </form>
+    </section>
+  </div>
+
+  <div class="modal-layer" id="memberModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-member></div>
+    <section class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="memberModalTitle">
+      <header class="modal-header"><div><span class="eyebrow">职责与访问控制</span><h2 id="memberModalTitle">管理成员</h2><p id="memberModalEmail">—</p></div><button class="icon-button" data-close-member aria-label="关闭">×</button></header>
+      <form id="memberForm">
+        <div class="modal-body">
+          <div class="form-grid">
+            <label class="field field-wide"><span>业务角色</span><select id="memberRole" name="role"><option value="后端开发">后端开发</option><option value="数据库审核人">发布审核人</option><option value="技术负责人">技术负责人</option></select><small>角色决定变更提交、整改、复核和批准权限。</small></label>
+            <label class="enterprise-switch field-wide"><input id="memberActive" name="active" type="checkbox"><span><strong>允许登录和参与流程</strong><small>停用后现有会话会失效，历史审计记录仍保留。</small></span></label>
+            <label class="enterprise-switch field-wide"><input id="memberEnterpriseAdmin" name="enterprise_admin" type="checkbox"><span><strong>授予企业管理员权限</strong><small>可邀请员工、分配角色并维护企业 SSO 策略；至少保留一名管理员。</small></span></label>
+            <div class="member-admin-hint field-wide" id="memberAdminHint"></div>
+            <div class="field field-wide"><span>应用数据权限</span><small>按应用分配可见范围，并区分提交与审核权限。</small><div class="member-app-grants" id="memberApplicationGrants"></div></div>
+          </div>
+        </div>
+        <footer class="modal-footer"><span><i class="secure-dot"></i>企业必须至少保留一名启用的管理员</span><div><button type="button" class="button button-secondary" data-close-member>取消</button><button type="submit" class="button button-primary" id="saveMemberButton">保存成员设置</button></div></footer>
+      </form>
+    </section>
+  </div>
+  <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+  <script src="/app.js?v=20260808-enterprise-agent3" defer></script>
+</body>
+</html>

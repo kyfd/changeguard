@@ -1,0 +1,13 @@
+[Unit]
+Description=Run ChangeGuard Agent health and SLO monitor every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+RandomizedDelaySec=10s
+Persistent=true
+Unit=changeguard-agent-monitor.service
+
+[Install]
+WantedBy=timers.target

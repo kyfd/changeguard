@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "environment": "production",
+  "change_type": "database-and-kubernetes",
+  "artifacts": [
+    {
+      "kind": "KUBERNETES",
+      "name": "orders deployment",
+      "source": "examples/ci-demo/deploy/orders.yaml",
+      "language": "YAML",
+      "path": "deploy/orders.yaml"
+    }
+  ],
+  "sql_path": "migrations/20260804_add_orders_index.sql",
+  "rollback_sql_path": "migrations/20260804_add_orders_index.down.sql",
+  "rollback_plan": "暂停订单写入，执行 down.sql，确认索引状态后再恢复流量。"
+}

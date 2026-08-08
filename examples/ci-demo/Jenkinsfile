@@ -1,0 +1,50 @@
+pipeline {
+  agent any
+
+  environment {
+    CHANGEGUARD_URL = credentials('changeguard-url')
+    CHANGEGUARD_TOKEN = credentials('changeguard-token')
+    CHANGEGUARD_MANIFEST = 'examples/ci-demo/.changeguard.json'
+  }
+
+  stages {
+    stage('ChangeGuard Gate') {
+      steps {
+        sh 'changeguard-gate digest -manifest "$CHANGEGUARD_MANIFEST"'
+        sh 'changeguard-gate verify -manifest "$CHANGEGUARD_MANIFEST" -consumer "$BUILD_TAG"'
+        sh 'changeguard-gate consume -manifest "$CHANGEGUARD_MANIFEST" -consumer "$BUILD_TAG"'
+      }
+    }
+    stage('Deploy') {
+      steps {
+        sh 'kubectl apply -f examples/ci-demo/deploy/orders.yaml'
+      }
+    }
+  }
+
+  post {
+    always {
+      script {
+        withCredentials([string(credentialsId: 'changeguard-webhook-token', variable: 'CG_WEBHOOK_TOKEN')]) {
+          def payload = groovy.json.JsonOutput.toJson([
+            change_id: env.CHANGEGUARD_CHANGE_ID ?: '',
+            job_name: env.JOB_NAME,
+            build_number: env.BUILD_NUMBER as Integer,
+            build_url: env.BUILD_URL,
+            status: currentBuild.currentResult,
+            commit_sha: env.GIT_COMMIT ?: '',
+            environment: 'production'
+          ])
+          httpRequest(
+            httpMode: 'POST',
+            contentType: 'APPLICATION_JSON',
+            customHeaders: [[name: 'Authorization', value: 'Bearer ' + env.CG_WEBHOOK_TOKEN, maskValue: true]],
+            requestBody: payload,
+            url: env.CHANGEGUARD_URL + '/api/integrations/jenkins/events',
+            validResponseCodes: '200:299'
+          )
+        }
+      }
+    }
+  }
+}

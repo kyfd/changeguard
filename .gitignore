@@ -1,0 +1,29 @@
+# Runtime state and local secrets
+.env
+.env.*
+!.env.example
+data/
+tmp/
+bin/
+*.log
+
+# Build and test outputs
+dist/
+coverage.out
+*.exe
+*.EXE
+
+# Local screenshots and UI test captures
+screenshots/
+screenshot/
+*screenshot*.png
+*Screenshot*.png
+*截图*.png
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Deployment secrets
+deploy/k8s/secret.yaml

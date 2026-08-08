@@ -1,0 +1,24 @@
+.git
+.github
+
+# Local secrets and runtime state
+.env
+.env.*
+data
+tmp
+bin
+*.log
+
+# Local build/test artifacts
+dist
+coverage.out
+*.exe
+*.EXE
+screenshots
+screenshot
+*screenshot*.png
+*Screenshot*.png
+*截图*.png
+
+# Documentation is not required in the runtime image
+docs
