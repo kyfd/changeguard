@@ -1,0 +1,52 @@
+[Unit]
+Description=ChangeGuard production change governance core
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=changeguard
+Group=changeguard
+WorkingDirectory=/opt/changeguard/current
+Environment=DBGUARD_ENV_FILE=/etc/changeguard/core.env
+Environment=DBGUARD_ENV_PROFILE=production
+EnvironmentFile=/etc/changeguard/core.env
+ExecStartPre=/usr/local/libexec/changeguard/changeguard-core-preflight.sh /etc/changeguard/core.env /opt/changeguard/current /opt/changeguard/data/dbguard.json /opt/changeguard/data/dbguard.json.rollback-witness.json changeguard /opt/changeguard/releases
+ExecStartPre=/opt/changeguard/current/dbguard --check-config
+ExecStart=/opt/changeguard/current/dbguard
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=60
+TimeoutStopSec=15
+KillSignal=SIGTERM
+LimitNOFILE=65536
+UMask=0077
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/opt/changeguard/releases /etc/changeguard
+ReadWritePaths=/opt/changeguard/data
+
+[Install]
+WantedBy=multi-user.target

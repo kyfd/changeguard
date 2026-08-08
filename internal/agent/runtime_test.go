@@ -2,15 +2,35 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/liufengxi/dbguard/internal/model"
 )
+
+func TestSanitizeLLMErrorClassifiesTypedTimeoutWithoutLeakingURL(t *testing.T) {
+	err := &url.Error{
+		Op:  "Post",
+		URL: "https://model.example.com/chat?api_key=must-not-leak",
+		Err: context.DeadlineExceeded,
+	}
+	if got := sanitizeLLMError(err); got != "模型调用超时" {
+		t.Fatalf("timeout classification = %q", got)
+	}
+}
+
+func TestSanitizeLLMErrorRedactsAuthenticationFailure(t *testing.T) {
+	got := sanitizeLLMError(errors.New("HTTP 401 invalid API key sk-must-not-leak"))
+	if got != "API Key 无效或未授权（HTTP 401），请在企业「接入 AI」中更新密钥" {
+		t.Fatalf("authentication classification = %q", got)
+	}
+}
 
 func TestFallbackAnalysisUsesEvidence(t *testing.T) {
 	t.Setenv("DBGUARD_LLM_API_KEY", "")

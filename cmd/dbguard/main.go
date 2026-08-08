@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -20,14 +19,27 @@ import (
 	"github.com/liufengxi/dbguard/internal/experiment"
 	"github.com/liufengxi/dbguard/internal/httpapi"
 	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/liufengxi/dbguard/internal/runtimeconfig"
 	"github.com/liufengxi/dbguard/internal/service"
 	"github.com/liufengxi/dbguard/internal/store"
 )
 
 func main() {
-	_ = loadDotEnv(".env")
 	logger := log.New(os.Stdout, "[DBGuard] ", log.LstdFlags|log.Lmicroseconds)
 	logger.Printf("build %s", buildinfo.Current())
+	configuration, err := runtimeconfig.Load()
+	if err != nil {
+		logger.Fatalf("environment configuration rejected: %v", err)
+	}
+	logger.Printf("environment profile=%s canonical_file=%s assignments=%d", configuration.Profile, configuration.Path, configuration.Assignments)
+	checkOnly, err := startupMode(os.Args[1:])
+	if err != nil {
+		logger.Fatalf("invalid command line: %v", err)
+	}
+	if checkOnly {
+		logger.Printf("configuration check passed")
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	dataPath := envOr("DBGUARD_DATA_FILE", "./data/dbguard.json")
@@ -102,6 +114,16 @@ func workerCountFromEnvironment() (int, error) {
 	return workers, nil
 }
 
+func startupMode(arguments []string) (bool, error) {
+	if len(arguments) == 0 {
+		return false, nil
+	}
+	if len(arguments) == 1 && arguments[0] == "--check-config" {
+		return true, nil
+	}
+	return false, fmt.Errorf("supported invocation is dbguard [--check-config]")
+}
+
 // storeAgentData exposes only the read-only business queries required by the
 // allow-listed Agent tools. The runtime cannot mutate approvals or releases.
 type storeAgentData struct {
@@ -144,35 +166,4 @@ func (d storeAgentData) Application(organizationID, applicationID string) (model
 		}
 	}
 	return model.Application{}, false
-}
-
-func loadDotEnv(path string) error {
-	file, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		key = strings.TrimSpace(key)
-		value = strings.Trim(strings.TrimSpace(value), "\""+"'")
-		if key == "" {
-			continue
-		}
-		if _, exists := os.LookupEnv(key); !exists {
-			_ = os.Setenv(key, value)
-		}
-	}
-	return scanner.Err()
 }

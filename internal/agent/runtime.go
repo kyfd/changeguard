@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -215,7 +216,7 @@ func (r *Runtime) Analyze(ctx context.Context, change model.ChangeRequest) model
 	if err != nil {
 		r.recordModelFailure(time.Now())
 		r.addMetric(func(metrics *RuntimeMetrics) { metrics.ModelFailureTotal++ })
-		return fallbackResult("模型服务不可用，已降级为本地证据归纳：" + sanitizeLLMError(err.Error()))
+		return fallbackResult("模型服务不可用，已降级为本地证据归纳：" + sanitizeLLMError(err))
 	}
 	r.recordModelSuccess()
 	r.addMetric(func(metrics *RuntimeMetrics) {
@@ -226,7 +227,17 @@ func (r *Runtime) Analyze(ctx context.Context, change model.ChangeRequest) model
 }
 
 // sanitizeLLMError 避免把密钥片段或冗长 HTTP body 直接暴露到变更单。
-func sanitizeLLMError(raw string) string {
+// 超时必须按错误类型识别；不同 Go 版本和调度压力下的 net/http 错误
+// 文本并不稳定，不能只依赖字符串中恰好出现 Timeout 或 deadline。
+func sanitizeLLMError(err error) string {
+	if err == nil {
+		return "未知模型错误"
+	}
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+		return "模型调用超时"
+	}
+	raw := err.Error()
 	lower := strings.ToLower(raw)
 	switch {
 	case strings.Contains(lower, "authentication") || strings.Contains(lower, "401") || strings.Contains(lower, "invalid api key") || strings.Contains(lower, "api key"):

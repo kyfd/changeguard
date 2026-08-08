@@ -35,3 +35,34 @@ func TestWorkerCountFromEnvironment(t *testing.T) {
 		})
 	}
 }
+
+func TestStartupMode(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments []string
+		checkOnly bool
+		wantErr   bool
+	}{
+		{name: "serve"},
+		{name: "check config", arguments: []string{"--check-config"}, checkOnly: true},
+		{name: "unknown flag", arguments: []string{"--version"}, wantErr: true},
+		{name: "extra argument", arguments: []string{"--check-config", "extra"}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := startupMode(test.arguments)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected command-line validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.checkOnly {
+				t.Fatalf("checkOnly = %t, want %t", got, test.checkOnly)
+			}
+		})
+	}
+}

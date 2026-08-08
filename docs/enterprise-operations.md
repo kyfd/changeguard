@@ -72,6 +72,8 @@ docker compose down
 | 变量 | 用途 | 生产建议 |
 | --- | --- | --- |
 | PORT | HTTP 监听端口 | 由容器或平台注入 |
+| DBGUARD_ENV_FILE | 核心自行复核的规范环境文件 | 由 systemd 外部设置为 `/etc/changeguard/core.env`，不得放在可写发布目录 |
+| DBGUARD_ENV_PROFILE | development、staging 或 production | 生产 unit 固定为 production，启用失败关闭校验 |
 | DBGUARD_STORE_MODE | file 或 postgres | postgres |
 | DBGUARD_DATA_FILE | file 模式主状态文件 | 使用持久卷中的绝对路径 |
 | DBGUARD_MIGRATION_WITNESS_FILE | file 模式回滚迁移证据侧车；默认 `<DBGUARD_DATA_FILE>.rollback-witness.json` | 使用与主状态同一持久卷的绝对路径，不得单独删除 |
@@ -95,6 +97,18 @@ docker compose down
 | DBGUARD_WORKERS | SQL 影子验证 Outbox worker 数；`0` 显式禁用后台协调与消费 | 生产按验证并发与影子库容量设置；只读迁移预演使用 `0` |
 
 不要把 DSN、OIDC client secret、Redis 凭据、metrics/Operations token 或变更通行证写入镜像、Git、日志和工单正文。
+
+生产核心会再次读取 `DBGUARD_ENV_FILE`，而不是只信任 systemd 已展开的进程环境。重复键、非法行、缺失的显式文件以及与规范文件不一致的 inherited override 都会在组件初始化前失败关闭。`DBGUARD_ENV_PROFILE=production` 还会拒绝 root 迁移阶段常见的隐患，包括 demo accounts/data、`demo_only` 实验、memory session、非 HTTPS 公网地址、非 Secure Cookie、缺失的 Redis/影子库/metrics/Operations/通行证凭据、相对 file 路径、占位符 secret 和零 worker。检查命令不会连接业务依赖，也不会输出 secret：
+
+~~~bash
+DBGUARD_ENV_FILE=/etc/changeguard/core.env \
+DBGUARD_ENV_PROFILE=production \
+/opt/changeguard/current/dbguard --check-config
+~~~
+
+规范模板为 `deploy/production/changeguard-core.env.example`。模板中的 `REPLACE_ME` 会被 production profile 主动拒绝，不能直接作为线上配置。
+
+专用低权限 unit 为 `deploy/production/changeguard.service`。它使用 `changeguard:changeguard`、`UMask=0077`、空 capability 集、`ProtectSystem=strict` 和只允许 `/opt/changeguard/data` 写入的沙箱。第一个 `ExecStartPre` 以运行账号校验：服务不是 root、环境文件不可写、当前发布位于 release root、完整 `SHA256SUMS` 通过、数据目录可写、迁移侧车与 required 标记成对存在；第二个 `ExecStartPre` 调用同一候选二进制的 `--check-config`。只有两层门禁均通过才启动 HTTP 服务。
 
 文件状态升级必须可重复执行：旧 demo 制品补全仅在显式启用 demo 数据时执行；demo 制品和组织默认策略补全使用基于业务作用域的确定性迁移 ID。候选在同一数据副本上连续启动两次后，第二次不得继续改变规范化后的 JSON。
 
@@ -194,11 +208,16 @@ file 模式备份必须把 `dbguard.json`、回滚迁移证据侧车和 `.requir
 5. 确认 SQL 仅接受真实 PostgreSQL 影子事务证据，旧模拟 experiment/Agent 输出不会被误当作放行依据；
 6. 对生产数据副本执行“新候选 → 当前生产旧核心 → 新候选”回滚往返，要求业务记录、自定义策略、制品 ID、脱敏前摘要以及最终规范化 JSON 全部收敛；
 7. file 模式确认侧车与 `.required` 标记被备份、回滚旧核心不会删除它们，再次前滚的启动日志显示 `external-state-rehydrated` 和实际恢复计数。
+8. 将规范配置安装到 root 所有、`changeguard` 组只读的 `/etc/changeguard/core.env`，运行候选 `--check-config`；任何重复键、占位符、inherited override 或 production profile 缺项都必须阻断。
+9. 以专用 `changeguard` 用户运行 `changeguard-core-preflight.sh`，要求 release 全量哈希、数据目录权限和 witness pair 全部通过；不得用 root 执行核心来绕过权限问题。
 
 滚动升级时先观察 readiness 和错误率，再扩大实例范围。旧二进制能够启动不等于回滚安全：只有往返状态收敛才允许灰度。file 模式回滚必须保留迁移证据侧车；PostgreSQL 模式的应用回滚不能自动回滚已执行的数据迁移，数据库恢复与向后兼容方案必须单独验证。
 
 ## 11. 生产上线清单
 
+- 核心使用专用 `changeguard` 用户，release/env 对运行用户只读，只有数据目录可写；
+- `DBGUARD_ENV_FILE=/etc/changeguard/core.env` 且 `DBGUARD_ENV_PROFILE=production`；
+- `dbguard --check-config` 与 `changeguard-core-preflight.sh` 均通过；
 - DBGUARD_ENABLE_DEMO_ACCOUNTS=false；
 - OIDC issuer、client、回调和角色映射已验证；
 - HTTPS、Secure Cookie、可信代理边界正确；
