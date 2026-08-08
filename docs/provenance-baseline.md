@@ -13,6 +13,7 @@ Future core candidates must be built by `deploy/production/build-core-git-releas
 - a clean Git worktree with no untracked source files;
 - an annotated release tag that resolves exactly to `HEAD`;
 - a verification evidence JSON file whose version, annotated tag, commit, source digest, and Linux target match the candidate exactly;
+- an explicit, pre-populated absolute `CHANGEGUARD_GOMODCACHE`; release builds clear inherited proxy variables and force `GOPROXY=off` so assembly cannot fetch new dependencies;
 - a stable source digest over `cmd`, `internal`, `go.mod`, and `go.sum`;
 - embedded version, commit, commit time, source digest, and Go version;
 - an external release directory containing the binary, verified Git bundle, source archive, dependency list, binary build metadata, verification evidence, build log, and SHA-256 manifest. An interrupted build is retained with a `.incomplete` marker for inspection and is never reported as a release.

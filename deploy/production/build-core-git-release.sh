@@ -7,11 +7,22 @@ version="${CHANGEGUARD_VERSION:?CHANGEGUARD_VERSION is required}"
 release_tag="${CHANGEGUARD_RELEASE_TAG:?CHANGEGUARD_RELEASE_TAG is required}"
 release_directory="${CHANGEGUARD_RELEASE_DIRECTORY:?CHANGEGUARD_RELEASE_DIRECTORY is required}"
 verification_source="${CHANGEGUARD_VERIFICATION_EVIDENCE:?CHANGEGUARD_VERIFICATION_EVIDENCE is required}"
+gomodcache="${CHANGEGUARD_GOMODCACHE:?CHANGEGUARD_GOMODCACHE is required}"
 
 command -v git >/dev/null 2>&1 || { printf 'git is required\n' >&2; exit 1; }
 command -v go >/dev/null 2>&1 || { printf 'go is required\n' >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { printf 'python3 is required\n' >&2; exit 1; }
 git -C "$repository" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { printf 'repository is not a Git worktree\n' >&2; exit 1; }
+[ "${gomodcache#/}" != "$gomodcache" ] || { printf 'CHANGEGUARD_GOMODCACHE must be absolute\n' >&2; exit 1; }
+[ -d "$gomodcache" ] || { printf 'CHANGEGUARD_GOMODCACHE does not exist\n' >&2; exit 1; }
+
+offline_go=(
+  env
+  -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY
+  -u ALL_PROXY -u all_proxy
+  GOMODCACHE="$gomodcache"
+  GOPROXY=off
+)
 
 worktree_status="$(git -C "$repository" status --porcelain=v1 --untracked-files=all)"
 [ -z "$worktree_status" ] || { printf 'release worktree is not clean:\n%s\n' "$worktree_status" >&2; exit 1; }
@@ -81,7 +92,7 @@ commit_epoch="$(git -C "$repository" show -s --format=%ct "$commit")"
 built_at="$(date -u -d "@$commit_epoch" +%Y-%m-%dT%H:%M:%SZ)"
 artifact="$release_directory/dbguard"
 
-env \
+"${offline_go[@]}" \
   CHANGEGUARD_VERSION="$version" \
   CHANGEGUARD_COMMIT="$commit" \
   CHANGEGUARD_BUILT_AT="$built_at" \
@@ -94,7 +105,7 @@ git -C "$repository" bundle verify "$release_directory/source.bundle" > "$releas
 git -C "$repository" archive --format=tar.gz --output="$release_directory/source.tar.gz" "$commit"
 (
   cd "$repository"
-  go list -m all > "$release_directory/modules.txt"
+  "${offline_go[@]}" go list -m all > "$release_directory/modules.txt"
 )
 go version -m "$artifact" > "$release_directory/binary-buildinfo.txt"
 cp "$verification_source" "$release_directory/verification.json"
@@ -109,7 +120,7 @@ bundle_verify_sha256="$(sha256sum "$release_directory/bundle-verify.txt" | awk '
 build_log_sha256="$(sha256sum "$release_directory/build.log" | awk '{print $1}')"
 go_mod_sha256="$(sha256sum "$repository/go.mod" | awk '{print $1}')"
 go_sum_sha256="$(sha256sum "$repository/go.sum" | awk '{print $1}')"
-go_version="$(go version | awk '{print $3}')"
+go_version="$("${offline_go[@]}" go version | awk '{print $3}')"
 
 RELEASE_VERSION="$version" RELEASE_TAG="$release_tag" RELEASE_COMMIT="$commit" \
 RELEASE_BUILT_AT="$built_at" RELEASE_SOURCE_SHA256="$source_sha256" \
@@ -134,6 +145,10 @@ manifest = {
     "go_version": os.environ["RELEASE_GO_VERSION"],
     "target": "linux/amd64",
     "cgo_enabled": False,
+    "module_resolution": {
+        "goproxy": "off",
+        "network_access": False,
+    },
     "files": {
         "dbguard": os.environ["RELEASE_ARTIFACT_SHA256"],
         "source.bundle": os.environ["RELEASE_BUNDLE_SHA256"],
