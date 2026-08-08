@@ -29,19 +29,6 @@ worktree_status="$(git -C "$repository" status --porcelain=v1 --untracked-files=
 git -C "$repository" diff --check --cached
 git -C "$repository" diff --check
 
-(
-  cd "$repository"
-  "${offline_go[@]}" go mod download all
-)
-module_verify_output="$(
-  cd "$repository"
-  "${offline_go[@]}" go mod verify
-)"
-modules="$(
-  cd "$repository"
-  "${offline_go[@]}" go list -m all
-)"
-
 commit="$(git -C "$repository" rev-parse --verify HEAD^{commit})"
 tag_commit="$(git -C "$repository" rev-list -n 1 "$release_tag" 2>/dev/null || true)"
 [ "$tag_commit" = "$commit" ] || { printf 'release tag does not resolve to HEAD\n' >&2; exit 1; }
@@ -90,6 +77,19 @@ for command in commands:
     if not isinstance(command, dict) or command.get("status") != "passed" or not command.get("command"):
         raise SystemExit("verification evidence contains an invalid command result")
 PY
+
+(
+  cd "$repository"
+  "${offline_go[@]}" go mod download all
+)
+module_verify_output="$(
+  cd "$repository"
+  "${offline_go[@]}" go mod verify
+)"
+modules="$(
+  cd "$repository"
+  "${offline_go[@]}" go list -m all
+)"
 
 install -d -m 0755 "$release_directory"
 incomplete_marker="$release_directory/.incomplete"
