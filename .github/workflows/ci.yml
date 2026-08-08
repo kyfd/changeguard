@@ -49,6 +49,12 @@ jobs:
           node --check internal/httpapi/web/api-adapter.js
           node --check internal/httpapi/web/app.js
 
+      - name: Lock and verify the complete Go module graph
+        run: |
+          go mod download all
+          go mod verify
+          git diff --exit-code -- go.mod go.sum
+
       - name: Run Go tests
         run: go test ./...
 

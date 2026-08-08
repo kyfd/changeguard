@@ -29,6 +29,19 @@ worktree_status="$(git -C "$repository" status --porcelain=v1 --untracked-files=
 git -C "$repository" diff --check --cached
 git -C "$repository" diff --check
 
+(
+  cd "$repository"
+  "${offline_go[@]}" go mod download all
+)
+module_verify_output="$(
+  cd "$repository"
+  "${offline_go[@]}" go mod verify
+)"
+modules="$(
+  cd "$repository"
+  "${offline_go[@]}" go list -m all
+)"
+
 commit="$(git -C "$repository" rev-parse --verify HEAD^{commit})"
 tag_commit="$(git -C "$repository" rev-list -n 1 "$release_tag" 2>/dev/null || true)"
 [ "$tag_commit" = "$commit" ] || { printf 'release tag does not resolve to HEAD\n' >&2; exit 1; }
@@ -103,10 +116,8 @@ artifact="$release_directory/dbguard"
 git -C "$repository" bundle create "$release_directory/source.bundle" "$release_tag"
 git -C "$repository" bundle verify "$release_directory/source.bundle" > "$release_directory/bundle-verify.txt" 2>&1
 git -C "$repository" archive --format=tar.gz --output="$release_directory/source.tar.gz" "$commit"
-(
-  cd "$repository"
-  "${offline_go[@]}" go list -m all > "$release_directory/modules.txt"
-)
+printf '%s\n' "$modules" > "$release_directory/modules.txt"
+printf '%s\n' "$module_verify_output" > "$release_directory/module-verify.txt"
 go version -m "$artifact" > "$release_directory/binary-buildinfo.txt"
 cp "$verification_source" "$release_directory/verification.json"
 
@@ -115,6 +126,7 @@ bundle_sha256="$(sha256sum "$release_directory/source.bundle" | awk '{print $1}'
 archive_sha256="$(sha256sum "$release_directory/source.tar.gz" | awk '{print $1}')"
 verification_sha256="$(sha256sum "$release_directory/verification.json" | awk '{print $1}')"
 modules_sha256="$(sha256sum "$release_directory/modules.txt" | awk '{print $1}')"
+module_verify_sha256="$(sha256sum "$release_directory/module-verify.txt" | awk '{print $1}')"
 binary_buildinfo_sha256="$(sha256sum "$release_directory/binary-buildinfo.txt" | awk '{print $1}')"
 bundle_verify_sha256="$(sha256sum "$release_directory/bundle-verify.txt" | awk '{print $1}')"
 build_log_sha256="$(sha256sum "$release_directory/build.log" | awk '{print $1}')"
@@ -127,6 +139,7 @@ RELEASE_BUILT_AT="$built_at" RELEASE_SOURCE_SHA256="$source_sha256" \
 RELEASE_ARTIFACT_SHA256="$artifact_sha256" RELEASE_BUNDLE_SHA256="$bundle_sha256" \
 RELEASE_ARCHIVE_SHA256="$archive_sha256" RELEASE_VERIFICATION_SHA256="$verification_sha256" \
 RELEASE_MODULES_SHA256="$modules_sha256" RELEASE_BINARY_BUILDINFO_SHA256="$binary_buildinfo_sha256" \
+RELEASE_MODULE_VERIFY_SHA256="$module_verify_sha256" \
 RELEASE_BUNDLE_VERIFY_SHA256="$bundle_verify_sha256" RELEASE_BUILD_LOG_SHA256="$build_log_sha256" \
 RELEASE_GO_MOD_SHA256="$go_mod_sha256" RELEASE_GO_SUM_SHA256="$go_sum_sha256" \
 RELEASE_GO_VERSION="$go_version" python3 - "$release_directory/release-manifest.json" <<'PY'
@@ -155,6 +168,7 @@ manifest = {
         "source.tar.gz": os.environ["RELEASE_ARCHIVE_SHA256"],
         "verification.json": os.environ["RELEASE_VERIFICATION_SHA256"],
         "modules.txt": os.environ["RELEASE_MODULES_SHA256"],
+        "module-verify.txt": os.environ["RELEASE_MODULE_VERIFY_SHA256"],
         "binary-buildinfo.txt": os.environ["RELEASE_BINARY_BUILDINFO_SHA256"],
         "bundle-verify.txt": os.environ["RELEASE_BUNDLE_VERIFY_SHA256"],
         "build.log": os.environ["RELEASE_BUILD_LOG_SHA256"],
@@ -169,11 +183,11 @@ PY
 
 (
   cd "$release_directory"
-  sha256sum dbguard source.bundle source.tar.gz modules.txt binary-buildinfo.txt bundle-verify.txt verification.json build.log release-manifest.json > SHA256SUMS
+  sha256sum dbguard source.bundle source.tar.gz modules.txt module-verify.txt binary-buildinfo.txt bundle-verify.txt verification.json build.log release-manifest.json > SHA256SUMS
   sha256sum --check SHA256SUMS
 )
 chmod 0755 "$artifact"
-chmod 0644 "$release_directory"/{source.bundle,source.tar.gz,modules.txt,binary-buildinfo.txt,bundle-verify.txt,verification.json,build.log,release-manifest.json,SHA256SUMS}
+chmod 0644 "$release_directory"/{source.bundle,source.tar.gz,modules.txt,module-verify.txt,binary-buildinfo.txt,bundle-verify.txt,verification.json,build.log,release-manifest.json,SHA256SUMS}
 rm -f -- "$incomplete_marker"
 
 printf 'git_release_status=ok\n'
