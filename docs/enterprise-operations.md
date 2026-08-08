@@ -94,6 +94,8 @@ docker compose down
 
 不要把 DSN、OIDC client secret、Redis 凭据、metrics/Operations token 或变更通行证写入镜像、Git、日志和工单正文。
 
+文件状态升级必须可重复执行：旧 demo 制品补全仅在显式启用 demo 数据时执行；demo 制品和组织默认策略补全使用基于业务作用域的确定性迁移 ID。候选在同一数据副本上连续启动两次后，第二次不得继续改变规范化后的 JSON。
+
 ## 5. 健康检查与指标
 
 ~~~bash

@@ -181,31 +181,35 @@ func normalizeState(data *state) {
 		change.RollbackSQL = changegate.Redact(change.RollbackSQL)
 		change.RollbackPlan = changegate.Redact(change.RollbackPlan)
 		change.Description = changegate.Redact(change.Description)
-		if change.OrganizationID == "org_demo" && len(change.Artifacts) <= 1 {
+		if demoDataEnabled() && change.OrganizationID == "org_demo" && len(change.Artifacts) <= 1 {
 			switch change.ID {
 			case "chg_20260730_001":
 				change.ChangeType, change.RepositoryURL, change.Branch, change.CommitSHA = "联合变更", "https://git.example.com/commerce/order-service", "feature/request-id", "8f2c1ab"
-				change.Artifacts = append([]model.ChangeArtifact{{ID: NewID("artifact_"), Kind: model.ArtifactConfig, Name: "订单幂等开关配置", Source: "config/order.yaml", Language: "YAML", Content: "idempotency:\n  enabled: true\n  key_source: request_id"}, {ID: NewID("artifact_"), Kind: model.ArtifactKubernetes, Name: "订单服务 Deployment", Source: "deploy/order.yaml", Language: "YAML", Content: "image: registry.example.com/order:v2.8.0\nresources:\n  requests:\n    cpu: 500m\n    memory: 512Mi\n  limits:\n    cpu: 2\n    memory: 1Gi\nreadinessProbe:\n  httpGet:\n    path: /health/ready"}}, change.Artifacts...)
+				change.Artifacts = append([]model.ChangeArtifact{{ID: migratedArtifactID(change.ID, "order-config"), Kind: model.ArtifactConfig, Name: "订单幂等开关配置", Source: "config/order.yaml", Language: "YAML", Content: "idempotency:\n  enabled: true\n  key_source: request_id"}, {ID: migratedArtifactID(change.ID, "order-kubernetes"), Kind: model.ArtifactKubernetes, Name: "订单服务 Deployment", Source: "deploy/order.yaml", Language: "YAML", Content: "image: registry.example.com/order:v2.8.0\nresources:\n  requests:\n    cpu: 500m\n    memory: 512Mi\n  limits:\n    cpu: 2\n    memory: 1Gi\nreadinessProbe:\n  httpGet:\n    path: /health/ready"}}, change.Artifacts...)
 				change.RollbackPlan = "将订单服务镜像回退到 v2.7.4，关闭 request_id 写入开关；数据库异常时删除新索引。"
 				change.ReleasePlan = model.ReleasePlan{Strategy: "金丝雀发布", CanaryPercent: 10, ObservationMinutes: 20, AutoRollback: true, SuccessMetrics: []string{"下单成功率", "HTTP 5xx", "P99 延迟"}}
 			case "chg_20260730_002":
 				change.ChangeType, change.RepositoryURL, change.Branch, change.CommitSHA = "Kubernetes 发布", "https://git.example.com/commerce/inventory-service", "release/v3.2", "4b9d0e1"
-				change.Artifacts = []model.ChangeArtifact{{ID: NewID("artifact_"), Kind: model.ArtifactKubernetes, Name: "库存服务 Deployment", Source: "deploy/inventory.yaml", Language: "YAML", Content: "image: registry.example.com/inventory:v3.2.0\nreplicas: 6\nresources:\n  requests:\n    cpu: 400m\n    memory: 512Mi\n  limits:\n    cpu: 1500m\n    memory: 1Gi"}}
+				change.Artifacts = []model.ChangeArtifact{{ID: migratedArtifactID(change.ID, "inventory-kubernetes"), Kind: model.ArtifactKubernetes, Name: "库存服务 Deployment", Source: "deploy/inventory.yaml", Language: "YAML", Content: "image: registry.example.com/inventory:v3.2.0\nreplicas: 6\nresources:\n  requests:\n    cpu: 400m\n    memory: 512Mi\n  limits:\n    cpu: 1500m\n    memory: 1Gi"}}
 				change.SQL, change.RollbackSQL = "", ""
 				change.RollbackPlan = "恢复 inventory:v3.1.6 镜像并将副本数恢复为 4，保留旧 ReplicaSet 30 分钟。"
 				change.ReleasePlan = model.ReleasePlan{Strategy: "金丝雀发布", CanaryPercent: 20, ObservationMinutes: 15, AutoRollback: true, SuccessMetrics: []string{"库存预占成功率", "HTTP 5xx", "Redis 超时率"}}
 			case "chg_20260729_003":
 				change.ChangeType, change.RepositoryURL, change.Branch, change.CommitSHA = "数据库与配置联合变更", "https://git.example.com/finance/payment-service", "release/v5.1", "a61c90d"
-				change.Artifacts = append([]model.ChangeArtifact{{ID: NewID("artifact_"), Kind: model.ArtifactConfig, Name: "退款流量入口配置", Source: "config/refund.yaml", Language: "YAML", Content: "refund_v2:\n  enabled: true\n  rollout_percent: 10"}}, change.Artifacts...)
+				change.Artifacts = append([]model.ChangeArtifact{{ID: migratedArtifactID(change.ID, "refund-config"), Kind: model.ArtifactConfig, Name: "退款流量入口配置", Source: "config/refund.yaml", Language: "YAML", Content: "refund_v2:\n  enabled: true\n  rollout_percent: 10"}}, change.Artifacts...)
 				change.RollbackPlan = "关闭退款 V2 流量入口，恢复旧字段读取逻辑；数据库按已登记 SQL 回退。"
 				change.ReleasePlan = model.ReleasePlan{Strategy: "蓝绿发布", ObservationMinutes: 30, AutoRollback: true, SuccessMetrics: []string{"支付成功率", "退款成功率", "P99 延迟"}}
 			case "chg_20260728_004":
 				change.ChangeType, change.RepositoryURL, change.Branch, change.CommitSHA = "配置变更", "https://git.example.com/platform/member-service", "main", "1d8e77f"
-				change.Artifacts = []model.ChangeArtifact{{ID: NewID("artifact_"), Kind: model.ArtifactConfig, Name: "归档任务配置", Source: "config/archive.yaml", Language: "YAML", Content: "archive:\n  batch_size: 500\n  retention_days: 180\n  enabled: true"}}
+				change.Artifacts = []model.ChangeArtifact{{ID: migratedArtifactID(change.ID, "archive-config"), Kind: model.ArtifactConfig, Name: "归档任务配置", Source: "config/archive.yaml", Language: "YAML", Content: "archive:\n  batch_size: 500\n  retention_days: 180\n  enabled: true"}}
 				change.SQL, change.RollbackSQL = "", ""
 				change.RollbackPlan = "关闭 archive.enabled 并恢复上一版本配置，已归档数据通过归档批次号恢复。"
 				change.ReleasePlan = model.ReleasePlan{Strategy: "分批发布", CanaryPercent: 25, ObservationMinutes: 15, AutoRollback: false, SuccessMetrics: []string{"归档任务失败率", "数据库负载", "任务耗时"}}
 			}
+			for artifactIndex := range change.Artifacts {
+				change.Artifacts[artifactIndex] = changegate.PrepareArtifact(change.Artifacts[artifactIndex])
+			}
+			change.ArtifactSHA256 = changegate.ChangeDigest(change.Environment, change.ChangeType, change.Artifacts, change.SQLSHA256, change.RollbackSHA256, change.RollbackPlan)
 		}
 		if change.Experiment != nil {
 			experiment := change.Experiment
@@ -305,7 +309,7 @@ func normalizeState(data *state) {
 			if existingPolicies[key] {
 				continue
 			}
-			template.ID = NewID("pol_")
+			template.ID = migratedPolicyID(organization.ID, template.Code)
 			template.OrganizationID = organization.ID
 			data.Policies = append(data.Policies, template)
 		}
@@ -347,6 +351,14 @@ func normalizeState(data *state) {
 			}
 		}
 	}
+}
+
+func migratedArtifactID(changeID, role string) string {
+	return "artifact_migrated_" + changegate.SHA256(strings.TrimSpace(changeID) + "|" + strings.TrimSpace(role))[:24]
+}
+
+func migratedPolicyID(organizationID, code string) string {
+	return "pol_migrated_" + changegate.SHA256(strings.TrimSpace(organizationID) + "|" + strings.TrimSpace(code))[:24]
 }
 
 func demoAccountsEnabled() bool {
