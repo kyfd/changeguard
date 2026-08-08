@@ -71,7 +71,7 @@ docker compose down
 
 | 变量 | 用途 | 生产建议 |
 | --- | --- | --- |
-| PORT | HTTP 监听端口 | 由容器或平台注入 |
+| DBGUARD_LISTEN_ADDRESS | HTTP 监听地址 | production 必须显式使用 loopback IP 与端口，例如 `127.0.0.1:8080`；`PORT` 仅保留给开发兼容 |
 | DBGUARD_ENV_FILE | 核心自行复核的规范环境文件 | 由 systemd 外部设置为 `/etc/changeguard/core.env`，不得放在可写发布目录 |
 | DBGUARD_ENV_PROFILE | development、staging 或 production | 生产 unit 固定为 production，启用失败关闭校验 |
 | DBGUARD_STORE_MODE | file 或 postgres | postgres |
@@ -80,7 +80,8 @@ docker compose down
 | DBGUARD_PRIMARY_DSN | PostgreSQL DSN | 从 secret 注入 |
 | DBGUARD_DB_MAX_CONNS | 最大连接数 | 按实例数和数据库容量配置 |
 | DBGUARD_SESSION_MODE | memory 或 redis | 多实例使用 redis |
-| DBGUARD_REDIS_URL | Redis 地址 | 从 secret 注入并限制网络 |
+| DBGUARD_REDIS_URL | Redis 地址 | 必须包含 ACL 用户和至少 16 字节密码；非 loopback 端点必须使用 `rediss://` |
+| DBGUARD_REDIS_PREFIX | Redis key namespace | 每个环境/实例组使用独立、以冒号结尾的 namespace，例如 `changeguard:production:session:` |
 | DBGUARD_AUTH_MODE | local、oidc 或 hybrid | 优先 oidc/hybrid |
 | DBGUARD_ENABLE_DEMO_ACCOUNTS | 是否创建演示凭据 | 必须为 false |
 | DBGUARD_ENABLE_DEMO_DATA | 是否加载演示企业、应用和变更 | 必须为 false |
@@ -98,7 +99,7 @@ docker compose down
 
 不要把 DSN、OIDC client secret、Redis 凭据、metrics/Operations token 或变更通行证写入镜像、Git、日志和工单正文。
 
-生产核心会再次读取 `DBGUARD_ENV_FILE`，而不是只信任 systemd 已展开的进程环境。重复键、非法行、缺失的显式文件以及与规范文件不一致的 inherited override 都会在组件初始化前失败关闭。`DBGUARD_ENV_PROFILE=production` 还会拒绝 root 迁移阶段常见的隐患，包括 demo accounts/data、`demo_only` 实验、memory session、非 HTTPS 公网地址、非 Secure Cookie、缺失的 Redis/影子库/metrics/Operations/通行证凭据、相对 file 路径、占位符 secret 和零 worker。检查命令不会连接业务依赖，也不会输出 secret：
+生产核心会再次读取 `DBGUARD_ENV_FILE`，而不是只信任 systemd 已展开的进程环境。重复键、非法行、缺失的显式文件以及与规范文件不一致的 inherited override 都会在组件初始化前失败关闭。`DBGUARD_ENV_PROFILE=production` 还会拒绝 root 迁移阶段常见的隐患，包括 wildcard HTTP 监听、同时保留含义模糊的 `PORT`、demo accounts/data、`demo_only` 实验、memory session、无 ACL 的 Redis、远程明文 Redis、缺少独立 Redis namespace、非 HTTPS 公网地址、非 Secure Cookie、缺失的影子库/metrics/Operations/通行证凭据、相对 file 路径、占位符 secret 和零 worker。检查命令不会连接业务依赖，也不会输出 secret：
 
 ~~~bash
 DBGUARD_ENV_FILE=/etc/changeguard/core.env \
@@ -107,6 +108,8 @@ DBGUARD_ENV_PROFILE=production \
 ~~~
 
 规范模板为 `deploy/production/changeguard-core.env.example`。模板中的 `REPLACE_ME` 会被 production profile 主动拒绝，不能直接作为线上配置。
+
+先使用 `deploy/production/changeguard-core-host-prepare.sh apply` 安装 `deploy/production/changeguard.sysusers.conf`，创建无登录 `changeguard` 身份、`/etc/changeguard` 和 `/usr/local/libexec/changeguard`。该步骤不会迁移生产数据所有权、创建 canonical env、修改现网 unit、切换 release 或重启服务；完成后用同一脚本的 `check` 模式复核。
 
 专用低权限 unit 为 `deploy/production/changeguard.service`。它使用 `changeguard:changeguard`、`UMask=0077`、空 capability 集、`ProtectSystem=strict` 和只允许 `/opt/changeguard/data` 写入的沙箱。第一个 `ExecStartPre` 以运行账号校验：服务不是 root、环境文件不可写、当前发布位于 release root、完整 `SHA256SUMS` 通过、数据目录可写、迁移侧车与 required 标记成对存在；第二个 `ExecStartPre` 调用同一候选二进制的 `--check-config`。只有两层门禁均通过才启动 HTTP 服务。
 
@@ -159,9 +162,11 @@ PostgreSQL：
 Redis：
 
 - 仅保存会话、限流等可重建或有明确 TTL 的数据；
-- 开启认证、网络隔离和持久化策略；
+- 使用专用 ACL 用户、长随机密码、loopback/私网边界和明确持久化策略；跨主机连接必须使用 TLS；
+- 不同生产环境、集群或演练使用独立数据库及 `DBGUARD_REDIS_PREFIX`，禁止共享默认 `dbguard:` namespace；
 - 不保存原始通行证；
-- Redis 故障时认证相关接口应失败关闭，不能降级成匿名访问。
+- Redis 故障时 readiness、会话读取、登录和注册安全控制返回 503；liveness 可保持 200 以区分“进程存活”和“依赖可用”；
+- 核心重启后原会话必须仍有效；Redis 不可达时新核心必须拒绝启动，不能降级成 memory 或匿名访问。
 
 ## 8. 通行证运维要求
 
@@ -235,10 +240,12 @@ CHANGEGUARD_RESTORE_ROOT=/opt/changeguard/restore-staging \
 5. 确认 SQL 仅接受真实 PostgreSQL 影子事务证据，旧模拟 experiment/Agent 输出不会被误当作放行依据；
 6. 对生产数据副本执行“新候选 → 当前生产旧核心 → 新候选”回滚往返，要求业务记录、自定义策略、制品 ID、脱敏前摘要以及最终规范化 JSON 全部收敛；
 7. file 模式确认侧车与 `.required` 标记被备份、回滚旧核心不会删除它们，再次前滚的启动日志显示 `external-state-rehydrated` 和实际恢复计数。
-8. 将规范配置安装到 root 所有、`changeguard` 组只读的 `/etc/changeguard/core.env`，运行候选 `--check-config`；任何重复键、占位符、inherited override 或 production profile 缺项都必须阻断。
-9. 以专用 `changeguard` 用户运行 `changeguard-core-preflight.sh`，要求 release 全量哈希、数据目录权限和 witness pair 全部通过；不得用 root 执行核心来绕过权限问题。
-10. 对最新快照运行 restore `verify` 和 `stage`，从 staged core 数据副本启动候选并核对业务身份、状态、witness、readiness 与清理结果；只通过 `manifest.sha256` 而未实际启动恢复数据，不算恢复演练完成。
-11. 使用 `changeguard-core-install.sh` 从传输包安装不可变候选；直接解压、手工 chmod 或先改 `current` 后补校验都不属于有效发布流程。
+8. 运行 `changeguard-core-host-prepare.sh apply` 和 `check`，只准备服务身份与支持目录；不得在该步骤隐式 chown 生产数据或重启服务。
+9. 将规范配置安装到 root 所有、`changeguard` 组只读的 `/etc/changeguard/core.env`，运行候选 `--check-config`；任何 wildcard listener、`PORT`、重复键、无认证/远程明文 Redis、共享 namespace、占位符、inherited override 或 production profile 缺项都必须阻断。
+10. 以专用 `changeguard` 用户运行 `changeguard-core-preflight.sh`，要求 release 全量哈希、数据目录权限和 witness pair 全部通过；不得用 root 执行核心来绕过权限问题。
+11. 对最新快照运行 restore `verify` 和 `stage`，从 staged core 数据副本启动候选并核对业务身份、状态、witness、readiness 与清理结果；只通过 `manifest.sha256` 而未实际启动恢复数据，不算恢复演练完成。
+12. 使用带 ACL 的隔离真实 Redis 验证 namespace、登录限流、会话跨核心重启、故障时 readiness/session/login 503，以及 Redis 不可达时启动失败。
+13. 使用 `changeguard-core-install.sh` 从传输包安装不可变候选；直接解压、手工 chmod 或先改 `current` 后补校验都不属于有效发布流程。
 
 滚动升级时先观察 readiness 和错误率，再扩大实例范围。旧二进制能够启动不等于回滚安全：只有往返状态收敛才允许灰度。file 模式回滚必须保留迁移证据侧车；PostgreSQL 模式的应用回滚不能自动回滚已执行的数据迁移，数据库恢复与向后兼容方案必须单独验证。
 
@@ -246,11 +253,13 @@ CHANGEGUARD_RESTORE_ROOT=/opt/changeguard/restore-staging \
 
 - 核心使用专用 `changeguard` 用户，release/env 对运行用户只读，只有数据目录可写；
 - `DBGUARD_ENV_FILE=/etc/changeguard/core.env` 且 `DBGUARD_ENV_PROFILE=production`；
+- `DBGUARD_LISTEN_ADDRESS` 显式绑定 loopback，production 环境中未设置 `PORT`；
 - `dbguard --check-config` 与 `changeguard-core-preflight.sh` 均通过；
 - DBGUARD_ENABLE_DEMO_ACCOUNTS=false；
 - OIDC issuer、client、回调和角色映射已验证；
 - HTTPS、Secure Cookie、可信代理边界正确；
-- PostgreSQL/Redis 使用独立最小权限凭据；
+- PostgreSQL/Redis 使用独立最小权限凭据；Redis 非 loopback 连接启用 TLS，并使用独立 `DBGUARD_REDIS_PREFIX`；
+- Redis 会话跨核心重启、限流、故障 503 和启动失败关闭均通过真实依赖验收；
 - metrics 与 Gate API 有网络限制；
 - Operations webhook 使用独立凭据，事故/回滚/业务 SLI 至少各完成一次受控接入验证；
 - 通行证原子消费和重放测试通过；

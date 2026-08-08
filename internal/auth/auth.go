@@ -203,7 +203,13 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if value, ok := m.sessionData(r); ok {
+		value, ok, sessionErr := m.sessionData(r)
+		if sessionErr != nil {
+			m.logger.Printf("session lookup failed: %v", sessionErr)
+			writeAuthError(w, http.StatusServiceUnavailable, "会话服务暂时不可用，请稍后重试")
+			return
+		}
+		if ok {
 			if !csrfValid(r, value.CSRFToken) {
 				writeAuthError(w, http.StatusForbidden, "请求安全令牌无效，请刷新页面后重试")
 				return
@@ -378,7 +384,12 @@ func (m *Manager) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusMethodNotAllowed, "退出登录必须使用 POST 请求")
 		return
 	}
-	if value, ok := m.sessionData(r); ok {
+	value, ok, sessionErr := m.sessionData(r)
+	if sessionErr != nil {
+		writeAuthError(w, http.StatusServiceUnavailable, "会话服务暂时不可用，请稍后重试")
+		return
+	}
+	if ok {
 		provided := strings.TrimSpace(r.Header.Get("X-CSRF-Token"))
 		if provided == "" {
 			if err := r.ParseForm(); err == nil {
@@ -653,23 +664,29 @@ func (m *Manager) identityFromClaims(claims map[string]any) (model.User, error) 
 	}, nil
 }
 
-func (m *Manager) sessionData(r *http.Request) (session, bool) {
+func (m *Manager) sessionData(r *http.Request) (session, bool, error) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
-		return session{}, false
+		return session{}, false, nil
 	}
 	key := tokenKey(cookie.Value)
 	value, err := m.sessionStore.Get(r.Context(), key)
-	if err != nil || time.Now().After(value.ExpiresAt) {
+	if err != nil {
+		if errors.Is(err, errSessionNotFound) {
+			return session{}, false, nil
+		}
+		return session{}, false, fmt.Errorf("read session repository: %w", err)
+	}
+	if time.Now().After(value.ExpiresAt) {
 		_ = m.sessionStore.Delete(r.Context(), key)
-		return session{}, false
+		return session{}, false, nil
 	}
 	user, err := m.store.User(value.UserID)
 	if err != nil || !user.Active {
 		_ = m.sessionStore.Delete(r.Context(), key)
-		return session{}, false
+		return session{}, false, nil
 	}
-	return value, true
+	return value, true, nil
 }
 
 func csrfValid(r *http.Request, expected string) bool {

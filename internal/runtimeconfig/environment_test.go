@@ -76,6 +76,70 @@ func TestProductionProfileRejectsDemoOnlyExperiment(t *testing.T) {
 	}
 }
 
+func TestProductionProfileRejectsWildcardListener(t *testing.T) {
+	clearEnvironment(t)
+	content := strings.Replace(validProductionEnvironment(), "DBGUARD_LISTEN_ADDRESS=127.0.0.1:8080", "DBGUARD_LISTEN_ADDRESS=0.0.0.0:8080", 1)
+	path := writeEnvironment(t, content)
+	t.Setenv("DBGUARD_ENV_FILE", path)
+	t.Setenv("DBGUARD_ENV_PROFILE", ProfileProduction)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "DBGUARD_LISTEN_ADDRESS must bind to a loopback IP address") {
+		t.Fatalf("expected wildcard listener rejection, got %v", err)
+	}
+}
+
+func TestProductionProfileRejectsLegacyPortAlongsideExplicitListener(t *testing.T) {
+	clearEnvironment(t)
+	path := writeEnvironment(t, validProductionEnvironment()+"PORT=8080\n")
+	t.Setenv("DBGUARD_ENV_FILE", path)
+	t.Setenv("DBGUARD_ENV_PROFILE", ProfileProduction)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "PORT must be unset") {
+		t.Fatalf("expected legacy PORT rejection, got %v", err)
+	}
+}
+
+func TestProductionProfileRejectsUnauthenticatedRedis(t *testing.T) {
+	clearEnvironment(t)
+	content := strings.Replace(validProductionEnvironment(), "redis://session-user:session-password@127.0.0.1:6379/3", "redis://127.0.0.1:6379/3", 1)
+	path := writeEnvironment(t, content)
+	t.Setenv("DBGUARD_ENV_FILE", path)
+	t.Setenv("DBGUARD_ENV_PROFILE", ProfileProduction)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "DBGUARD_REDIS_URL must include a Redis ACL username") {
+		t.Fatalf("expected unauthenticated Redis rejection, got %v", err)
+	}
+}
+
+func TestProductionProfileRejectsPlaintextRemoteRedis(t *testing.T) {
+	clearEnvironment(t)
+	content := strings.Replace(validProductionEnvironment(), "redis://session-user:session-password@127.0.0.1:6379/3", "redis://session-user:session-password@redis.internal.example:6379/3", 1)
+	path := writeEnvironment(t, content)
+	t.Setenv("DBGUARD_ENV_FILE", path)
+	t.Setenv("DBGUARD_ENV_PROFILE", ProfileProduction)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "must use rediss for non-loopback Redis endpoints") {
+		t.Fatalf("expected remote plaintext Redis rejection, got %v", err)
+	}
+}
+
+func TestProductionProfileRejectsUnsafeRedisPrefix(t *testing.T) {
+	clearEnvironment(t)
+	content := strings.Replace(validProductionEnvironment(), "DBGUARD_REDIS_PREFIX=changeguard:production:session:", "DBGUARD_REDIS_PREFIX=shared", 1)
+	path := writeEnvironment(t, content)
+	t.Setenv("DBGUARD_ENV_FILE", path)
+	t.Setenv("DBGUARD_ENV_PROFILE", ProfileProduction)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "DBGUARD_REDIS_PREFIX must be a 4-96 character namespace") {
+		t.Fatalf("expected unsafe Redis prefix rejection, got %v", err)
+	}
+}
+
 func TestProductionProfileRejectsRelativeWitnessPath(t *testing.T) {
 	clearEnvironment(t)
 	content := strings.Replace(validProductionEnvironment(), "/var/lib/changeguard/dbguard.json.rollback-witness.json", "dbguard.json.rollback-witness.json", 1)
@@ -130,10 +194,10 @@ func writeEnvironment(t *testing.T, content string) string {
 func clearEnvironment(t *testing.T) {
 	t.Helper()
 	keys := []string{
-		"DBGUARD_ENV_FILE", "DBGUARD_ENV_PROFILE", "DBGUARD_ENABLE_DEMO_ACCOUNTS", "DBGUARD_ENABLE_DEMO_DATA",
+		"DBGUARD_ENV_FILE", "DBGUARD_ENV_PROFILE", "DBGUARD_LISTEN_ADDRESS", "PORT", "DBGUARD_ENABLE_DEMO_ACCOUNTS", "DBGUARD_ENABLE_DEMO_DATA",
 		"DBGUARD_AUTH_SECURE_COOKIE", "DBGUARD_TRUST_PROXY_HEADERS", "DBGUARD_PUBLIC_URL", "DBGUARD_AUTH_MODE",
 		"DBGUARD_OIDC_ISSUER", "DBGUARD_OIDC_REDIRECT_URL", "DBGUARD_OIDC_CLIENT_ID", "DBGUARD_OIDC_CLIENT_SECRET",
-		"DBGUARD_SESSION_MODE", "DBGUARD_REDIS_URL", "DBGUARD_EXPERIMENT_MODE", "DBGUARD_SHADOW_DSN",
+		"DBGUARD_SESSION_MODE", "DBGUARD_REDIS_URL", "DBGUARD_REDIS_PREFIX", "DBGUARD_EXPERIMENT_MODE", "DBGUARD_SHADOW_DSN",
 		"DBGUARD_PASSPORT_HMAC_SECRET", "DBGUARD_METRICS_TOKEN", "DBGUARD_OPERATIONS_WEBHOOK_TOKEN",
 		"DBGUARD_OPERATIONS_ORGANIZATION_ID", "DBGUARD_STORE_MODE", "DBGUARD_DATA_FILE",
 		"DBGUARD_MIGRATION_WITNESS_FILE", "DBGUARD_PRIMARY_DSN", "DBGUARD_WORKERS",
@@ -156,6 +220,7 @@ func clearEnvironment(t *testing.T) {
 
 func validProductionEnvironment() string {
 	return strings.Join([]string{
+		"DBGUARD_LISTEN_ADDRESS=127.0.0.1:8080",
 		"DBGUARD_AUTH_MODE=local",
 		"DBGUARD_AUTH_SECURE_COOKIE=true",
 		"DBGUARD_TRUST_PROXY_HEADERS=true",
@@ -164,6 +229,7 @@ func validProductionEnvironment() string {
 		"DBGUARD_ENABLE_DEMO_DATA=false",
 		"DBGUARD_SESSION_MODE=redis",
 		"DBGUARD_REDIS_URL=redis://session-user:session-password@127.0.0.1:6379/3",
+		"DBGUARD_REDIS_PREFIX=changeguard:production:session:",
 		"DBGUARD_EXPERIMENT_MODE=postgres",
 		"DBGUARD_SHADOW_DSN=postgres://shadow-user:shadow-password@127.0.0.1:5432/changeguard_shadow?sslmode=require",
 		"DBGUARD_PASSPORT_HMAC_SECRET=passport-secret-at-least-32-bytes-long",

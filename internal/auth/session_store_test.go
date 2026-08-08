@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,6 +62,35 @@ func TestMemorySessionRepositoryLoginFlowIsOneTime(t *testing.T) {
 	}
 	if _, err := repository.TakeLoginFlow(ctx, "state"); err == nil {
 		t.Fatal("OIDC flow must be consumed atomically")
+	}
+}
+
+func TestRedisSessionPrefixUsesConfiguredNamespace(t *testing.T) {
+	t.Setenv("DBGUARD_REDIS_PREFIX", "changeguard:test:session:")
+	if got := redisSessionPrefix(); got != "changeguard:test:session:" {
+		t.Fatalf("Redis prefix = %q", got)
+	}
+	t.Setenv("DBGUARD_REDIS_PREFIX", "")
+	if got := redisSessionPrefix(); got != "dbguard:" {
+		t.Fatalf("default Redis prefix = %q", got)
+	}
+}
+
+func TestMiddlewareReturnsServiceUnavailableWhenSessionBackendFails(t *testing.T) {
+	manager := &Manager{
+		config:       Config{Mode: "local"},
+		logger:       log.New(io.Discard, "", 0),
+		sessionStore: &failedSessionRepository{err: errors.New("Redis unavailable")},
+	}
+	handler := manager.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("request reached protected handler while session backend was unavailable")
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/api/changes", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "existing-session"})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
 	}
 }
 

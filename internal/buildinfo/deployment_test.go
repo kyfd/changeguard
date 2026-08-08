@@ -63,7 +63,9 @@ func TestProductionCoreServiceFailsClosedBeforeRunning(t *testing.T) {
 		"core_preflight=passed",
 	})
 	assertMarkers(t, filepath.Join(production, "changeguard-core.env.example"), []string{
+		"DBGUARD_LISTEN_ADDRESS=127.0.0.1:",
 		"DBGUARD_SESSION_MODE=redis",
+		"DBGUARD_REDIS_PREFIX=changeguard:production:session:",
 		"DBGUARD_EXPERIMENT_MODE=postgres",
 		"DBGUARD_MIGRATION_WITNESS_FILE=/opt/changeguard/data/dbguard.json.rollback-witness.json",
 		"DBGUARD_METRICS_TOKEN=REPLACE_ME",
@@ -93,6 +95,18 @@ func TestProductionCoreServiceFailsClosedBeforeRunning(t *testing.T) {
 		"release checksum coverage mismatch",
 		"installed_release_is_group_or_world_writable",
 		"core_install=passed",
+	})
+	assertMarkers(t, filepath.Join(production, "changeguard-core-host-prepare.sh"), []string{
+		"check|apply",
+		"installer_must_run_as_root",
+		"systemd-sysusers",
+		"service_user_shell_is_interactive",
+		"production_data_untouched=true",
+		"service_untouched=true",
+		"core_host_prepare=passed",
+	})
+	assertMarkers(t, filepath.Join(production, "changeguard.sysusers.conf"), []string{
+		`u changeguard - "ChangeGuard core service" /opt/changeguard/data -`,
 	})
 }
 

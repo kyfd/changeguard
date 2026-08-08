@@ -204,7 +204,11 @@ func (m *Manager) HandleSession(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, http.StatusUnauthorized, "企业工作空间不存在")
 		return
 	}
-	value, _ := m.sessionData(r)
+	value, _, sessionErr := m.sessionData(r)
+	if sessionErr != nil {
+		writeAuthError(w, http.StatusServiceUnavailable, "会话服务暂时不可用，请稍后重试")
+		return
+	}
 	writeAuthJSON(w, http.StatusOK, model.AuthSession{User: user, Organization: organization, CSRFToken: value.CSRFToken})
 }
 

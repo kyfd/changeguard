@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -73,7 +74,10 @@ func main() {
 	}
 	app.Start(ctx, workers)
 
-	address := ":" + envOr("PORT", "8080")
+	address, err := listenAddressFromEnvironment()
+	if err != nil {
+		logger.Fatalf("invalid HTTP listener configuration: %v", err)
+	}
 	server := &http.Server{
 		Addr: address, Handler: httpapi.New(app, authManager, logger, analyzer),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second,
@@ -81,7 +85,7 @@ func main() {
 		WriteTimeout:   60 * time.Second, IdleTimeout: 90 * time.Second,
 	}
 	go func() {
-		logger.Printf("服务已启动: http://localhost%s", address)
+		logger.Printf("HTTP listener started address=%s", address)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatalf("HTTP 服务异常退出: %v", err)
 		}
@@ -93,6 +97,22 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Printf("优雅退出失败: %v", err)
 	}
+}
+
+func listenAddressFromEnvironment() (string, error) {
+	address := strings.TrimSpace(os.Getenv("DBGUARD_LISTEN_ADDRESS"))
+	if address == "" {
+		address = ":" + strings.TrimSpace(envOr("PORT", "8080"))
+	}
+	_, port, err := net.SplitHostPort(address)
+	if err != nil || port == "" {
+		return "", errors.New("DBGUARD_LISTEN_ADDRESS or PORT must resolve to a host:port")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 0 || portNumber > 65535 {
+		return "", errors.New("HTTP listener port must be an integer from 0 to 65535")
+	}
+	return address, nil
 }
 
 func envOr(key, fallback string) string {

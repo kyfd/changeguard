@@ -66,3 +66,39 @@ func TestStartupMode(t *testing.T) {
 		})
 	}
 }
+
+func TestListenAddressFromEnvironment(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		port    string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", want: ":8080"},
+		{name: "legacy port", port: "18080", want: ":18080"},
+		{name: "explicit loopback", address: "127.0.0.1:18080", port: "9999", want: "127.0.0.1:18080"},
+		{name: "explicit IPv6 loopback", address: "[::1]:18080", want: "[::1]:18080"},
+		{name: "invalid address", address: "127.0.0.1", wantErr: true},
+		{name: "invalid port", address: "127.0.0.1:70000", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("DBGUARD_LISTEN_ADDRESS", test.address)
+			t.Setenv("PORT", test.port)
+			got, err := listenAddressFromEnvironment()
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected listener validation error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("listen address = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

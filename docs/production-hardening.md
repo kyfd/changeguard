@@ -1,45 +1,44 @@
 # 生产加固状态（liufengxi.top / 152）
 
 日期：2026-08-08
-当前结论：Agent 生产闭环已运行；核心候选 v7 已通过隔离迁移/回滚验收，但生产核心仍保持 legacy 版本，灰度为 HOLD。
+当前结论：Agent 生产闭环已运行；核心候选链已完成可复现构建、file 数据迁移/legacy 回滚、带 witness 备份恢复、原子安装和真实 Redis 会话验收。生产核心仍保持 legacy 版本，灰度为 HOLD。
 
 ## 已有证据
 
-- 生产核心软链仍为 `/opt/changeguard/releases/20260807-panorama-v3-20260807-110449`，二进制 SHA-256 为 `58d8b72f40e8ec56e82fe5cb2d12fe4079f9692a6ef715fa5cbde3c05723fe6b`。
-- 候选 v7 使用真实 annotated tag/commit 构建，独立重建字节一致，并完成生产数据副本的前向迁移、双启动幂等和 `v7 → legacy → v7` 往返。
-- legacy 在回滚副本上改写 41 个工件字段；v7 通过迁移证据侧车全部恢复，未恢复数为 0。
-- 候选已在 UID 65534、私有网络、worker=0 的隔离 systemd 单元中运行；生产软链、PID、数据和 Nginx 哈希未改变。
-- 生产使用 Redis session，Redis URL 已配置；核心对 Redis 初始化失败会拒绝启动。
+- 生产核心软链仍为 `/opt/changeguard/releases/20260807-panorama-v3-20260807-110449`，PID `2191733`，二进制 SHA-256 为 `58d8b72f40e8ec56e82fe5cb2d12fe4079f9692a6ef715fa5cbde3c05723fe6b`。
+- v8 完成生产数据副本前向迁移、双启动和 `v8 → legacy → v8` 往返；legacy 改写的 41 个工件字段全部收敛，未恢复数为 0。
+- v9 完成真实生产快照恢复、带 witness 的备份/恢复和双启动往返；v10 完成不可信权限归档的原子安装与“已安装发布从真实快照恢复启动”。
+- v11 开发候选使用带密码的隔离真实 Redis，完成 loopback 监听、企业注册、会话跨核心重启、独立 namespace、登录限流和 Redis 故障注入：readiness/session/login 为 503，liveness 为 200，Redis 不可达时新核心退出码为 1。
+- 已以声明式 sysusers 创建 `changeguard:changeguard`（UID/GID 990、`/usr/sbin/nologin`），并创建 `/etc/changeguard` 与 `/usr/local/libexec/changeguard`；该步骤没有 chown 生产数据、创建 canonical env、修改 unit、切换 release 或重启服务。
+- 上述身份准备后，生产核心 PID、二进制、数据、Nginx 和现网 unit 哈希保持不变。
 
 ## 当前生产缺口
 
-- `changeguard.service` 仍为 `User=root`；除 `NoNewPrivileges` 外缺少主要 systemd 沙箱，`systemd-analyze security` 当前观测为 `9.4 UNSAFE`。
-- `/opt/changeguard/data`、主 JSON、当前发布和 `.env` 均归 root；尚未按专用 `changeguard` 账号完成权限迁移与恢复验证。
-- `.env` 有两个 `DBGUARD_EXPERIMENT_MODE`，虽然当前两个值相同，重复配置仍会掩盖变更；实际值为 `demo_only`，不能满足真实 PostgreSQL 影子验证的生产签证要求。
-- 生产 `.env` 未配置 Operations webhook token/organization 和 metrics token，发布后事故、回滚与业务 SLI 仍未进入线上核心闭环。
-- 已部署备份脚本尚未升级，也未从候选前真实快照恢复主 JSON、迁移侧车和 required 标记组合后启动候选。
-- 生产安装版侧车感知备份/隔离恢复启动、Redis session parity、无公网候选 upstream、Nginx 小流量切换和原子回切尚未演练。
+- `changeguard.service` 仍为 `User=root`，现网 `systemd-analyze security` 仍为 `9.4 UNSAFE`；源码 hardened unit 的离线评分为 `3.0 OK`，但尚未安装。
+- `/opt/changeguard/data/dbguard.json` 仍为 `root:root:0600`；正式切换前需把 data/witness/marker 成组迁移给 `changeguard` 并完成恢复验证，不能只改单个文件。
+- 正式 `/etc/changeguard/core.env` 仍不存在。legacy `.env` 有重复 `DBGUARD_EXPERIMENT_MODE`、仍为 `demo_only`，且缺少真实 Redis ACL、独立 namespace、PostgreSQL shadow、metrics、Operations 和组织配置。
+- 主机已有 `changeguard-redis` Docker 容器并绑定 `127.0.0.1:6379`，但当前无认证、rootfs 可写，仅配置 RDB 快照且只在 db0 有少量 TTL key；它不能直接作为已验收的核心 production session 依赖。
+- v9 备份/恢复、v10 安装器和 v11 host prepare 尚未全部安装到正式运维路径、定时任务、审批和周期恢复制度。
+- 候选 Nginx 0% upstream、原子切换/回切、连接排空和观察窗口尚未演练；PostgreSQL 多实例迁移与 PITR 仍未完成。
 
-## 源码中新增的失败关闭基线
+## v11 失败关闭基线
 
-- `internal/runtimeconfig` 严格读取规范环境文件，拒绝重复键、非法行、缺失文件和 inherited override。
-- `DBGUARD_ENV_PROFILE=production` 强制 HTTPS/Secure Cookie、可信代理、Redis session、真实 PostgreSQL 影子验证、非 demo 数据、长随机通行证/metrics/Operations 凭据、绝对 file/witness 路径和非零 worker。
-- `dbguard --check-config` 在打开数据、Redis、HTTP 监听或 worker 前完成静态配置检查，错误信息不输出 secret。
-- `deploy/production/changeguard-core-preflight.sh` 以低权限账号验证 release 全量 SHA-256、环境文件只读、数据目录可写以及 witness pair 完整性。
-- `deploy/production/changeguard.service` 固定使用 `changeguard:changeguard`，启用 systemd hardening，并串联 preflight 与候选自身的配置检查。
-- `deploy/production/changeguard-core.env.example` 提供规范模板；任何 `REPLACE_ME` 占位符会被 production profile 拒绝。
-
-这些资产尚未安装到生产，不能把“源码已具备”表述为“线上已加固”。
+- production 必须显式设置 `DBGUARD_LISTEN_ADDRESS` 为 loopback IP:port；wildcard 地址和同时存在的 `PORT` 被拒绝，避免核心绕过反向代理直接暴露。
+- Redis URL 必须包含 ACL 用户和至少 16 字节非占位密码；非 loopback 明文 `redis://` 被拒绝，远程连接必须使用 `rediss://`。
+- `DBGUARD_REDIS_PREFIX` 在 production 必填，必须是独立且以冒号结尾的 namespace；会话、OIDC flow 和登录限流共享该隔离边界。
+- Redis key 缺失与 Redis 后端故障被区分：前者保持正常未登录语义，后者对受保护请求返回 503，不再误报“会话失效”。
+- 启动时 Redis 不可达继续失败关闭；运行期故障使 readiness 失败，同时保持 liveness，便于编排系统停止导流而不反复误杀进程。
+- `changeguard-core-host-prepare.sh` 只准备声明式身份和支持目录，显式承诺不迁移数据、不修改服务，降低生产账号切换的爆炸半径。
 
 ## 下一次受控执行顺序
 
-1. 生成 `/etc/changeguard/core.env` 的加密离线备份和规范副本，保留每个键一次；明确从 `demo_only` 切换到隔离 PostgreSQL shadow 的 DSN 与最小权限账号。
-2. 在不修改生产软链的候选目录运行 `dbguard --check-config`，记录不含 secret 的结果。
-3. 创建专用 `changeguard` 系统账号；release 与 env 保持 root 所有、运行账号只读，数据目录及 file/witness/marker 成组迁移给运行账号。
-4. 用 `changeguard-core-install.sh` 校验 transport SHA、tar 路径/类型、release manifest 和最终权限；安装器只创建不可变 release，不切换 `current`。
-5. 用 `changeguard-restore.sh verify` 和 `stage` 校验最新快照，在隔离目录启动恢复数据副本；不得直接覆盖生产数据目录。
-6. 安装 preflight 与 hardened unit，在独立端口、无公网 upstream 下启动候选，并验证 Redis session/限流及故障失败关闭。
-7. 安装侧车感知备份脚本，生成候选前快照，在隔离恢复目录启动候选并核对业务状态与完整性摘要。
-8. 建立 Nginx 0% 内部 upstream，完成登录、Gate、metrics、Operations、worker、回滚和观察窗口验收后，再决定是否进入 1%～5% 灰度。
+1. 生成 root 所有、`changeguard` 组只读的 `/etc/changeguard/core.env`，保留每个键一次并注入真实 secret；运行候选 `--check-config`，不得连接监听器或修改数据。
+2. 为核心准备带 ACL、独立 database/namespace、明确 AOF/RDB 策略和监控的 Redis；不得复用当前无认证容器作为 production 通过证据。
+3. 用 v10 安装器安装 v11 不可变 release；安装正式 preflight、backup/restore 和 hardened unit 资产，但仍不切换 `current`。
+4. 从最新正式快照 stage 数据，成组迁移 data/witness/marker 所有权，在 `changeguard` 身份和 0% upstream 下启动候选。
+5. 复跑真实 Redis 会话、限流、重启、故障 503 和启动失败关闭，并验证 Redis key 只落入批准的 database/namespace。
+6. 接入隔离 PostgreSQL shadow，完成真实事务、回滚 SQL、超时/锁等待和失败关闭验收。
+7. 建立 Nginx 0% 内部 upstream，完成 login、Gate、metrics、Operations、worker、原子回切和观察窗口，再决定是否进入 1%～5% 灰度。
+8. PostgreSQL 多实例路线完成向后兼容迁移、并发锁、备份恢复和 PITR 后，才允许扩大实例数。
 
-在 1～8 完成前不替换生产核心；任何门禁失败都保留 legacy upstream 和原数据不变。
+在 1～8 完成前不替换生产核心；任何 provenance、配置、身份、Redis、shadow DB、readiness、数据或回滚门失败都保留 legacy upstream 和原数据不变。

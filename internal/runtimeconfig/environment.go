@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ const (
 )
 
 var environmentKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var redisPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:_-]{2,94}:$`)
 
 type Summary struct {
 	Path        string
@@ -157,6 +159,12 @@ func ValidateProfile(profile string) error {
 }
 
 func validateProductionEnvironment() error {
+	if err := requireLoopbackListenAddress("DBGUARD_LISTEN_ADDRESS"); err != nil {
+		return err
+	}
+	if strings.TrimSpace(os.Getenv("PORT")) != "" {
+		return errors.New("PORT must be unset when DBGUARD_LISTEN_ADDRESS is used in production")
+	}
 	if err := requireFalseOrUnset("DBGUARD_ENABLE_DEMO_ACCOUNTS"); err != nil {
 		return err
 	}
@@ -196,7 +204,10 @@ func validateProductionEnvironment() error {
 	if err := requireExact("DBGUARD_SESSION_MODE", "redis"); err != nil {
 		return err
 	}
-	if err := requireURL("DBGUARD_REDIS_URL", "redis", "rediss"); err != nil {
+	if err := requireRedisURL("DBGUARD_REDIS_URL"); err != nil {
+		return err
+	}
+	if err := requireRedisPrefix("DBGUARD_REDIS_PREFIX"); err != nil {
 		return err
 	}
 	if err := requireExact("DBGUARD_EXPERIMENT_MODE", "postgres"); err != nil {
@@ -246,6 +257,71 @@ func validateProductionEnvironment() error {
 	workers, err := strconv.Atoi(strings.TrimSpace(os.Getenv("DBGUARD_WORKERS")))
 	if err != nil || workers < 1 || workers > 64 {
 		return errors.New("DBGUARD_WORKERS must be an integer from 1 to 64 in production")
+	}
+	return nil
+}
+
+func requireLoopbackListenAddress(key string) error {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fmt.Errorf("%s is required in production", key)
+	}
+	host, port, err := net.SplitHostPort(raw)
+	if err != nil || host == "" || port == "" {
+		return fmt.Errorf("%s must be an explicit loopback host:port in production", key)
+	}
+	parsedPort, err := strconv.Atoi(port)
+	if err != nil || parsedPort < 1 || parsedPort > 65535 {
+		return fmt.Errorf("%s must use a TCP port from 1 to 65535 in production", key)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("%s must bind to a loopback IP address in production", key)
+	}
+	return nil
+}
+
+func requireRedisURL(key string) error {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fmt.Errorf("%s is required in production", key)
+	}
+	if strings.ContainsAny(raw, "<>") || looksLikePlaceholder(raw) {
+		return fmt.Errorf("%s must not use a placeholder value in production", key)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be a valid absolute URL in production", key)
+	}
+	if !strings.EqualFold(parsed.Scheme, "redis") && !strings.EqualFold(parsed.Scheme, "rediss") {
+		return fmt.Errorf("%s must use redis or rediss in production", key)
+	}
+	if parsed.Hostname() == "" || parsed.Port() == "" {
+		return fmt.Errorf("%s must include an explicit host and port in production", key)
+	}
+	if parsed.User == nil || strings.TrimSpace(parsed.User.Username()) == "" {
+		return fmt.Errorf("%s must include a Redis ACL username in production", key)
+	}
+	password, passwordSet := parsed.User.Password()
+	if !passwordSet || len([]byte(password)) < 16 || looksLikePlaceholder(password) {
+		return fmt.Errorf("%s must include a non-placeholder password of at least 16 bytes in production", key)
+	}
+	if strings.EqualFold(parsed.Scheme, "redis") {
+		ip := net.ParseIP(parsed.Hostname())
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("%s must use rediss for non-loopback Redis endpoints in production", key)
+		}
+	}
+	return nil
+}
+
+func requireRedisPrefix(key string) error {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fmt.Errorf("%s is required in production", key)
+	}
+	if looksLikePlaceholder(value) || !redisPrefixPattern.MatchString(value) {
+		return fmt.Errorf("%s must be a 4-96 character namespace ending with a colon in production", key)
 	}
 	return nil
 }

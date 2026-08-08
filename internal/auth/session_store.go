@@ -35,6 +35,8 @@ type loginAttempt struct {
 	ExpiresAt time.Time
 }
 
+var errSessionNotFound = errors.New("session not found")
+
 type memorySessionRepository struct {
 	mu       sync.Mutex
 	sessions map[string]session
@@ -57,7 +59,7 @@ func (r *memorySessionRepository) Get(_ context.Context, key string) (session, e
 	value, ok := r.sessions[key]
 	if !ok || time.Now().After(value.ExpiresAt) {
 		delete(r.sessions, key)
-		return session{}, errors.New("session not found")
+		return session{}, errSessionNotFound
 	}
 	return value, nil
 }
@@ -147,7 +149,7 @@ func newSessionRepository(logger *log.Logger) sessionRepository {
 		return &failedSessionRepository{err: fmt.Errorf("parse redis url: %w", err)}
 	}
 	client := redis.NewClient(options)
-	repository := &redisSessionRepository{client: client, prefix: "dbguard:"}
+	repository := &redisSessionRepository{client: client, prefix: redisSessionPrefix()}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := repository.Health(ctx); err != nil {
@@ -167,6 +169,9 @@ func (r *redisSessionRepository) Put(ctx context.Context, key string, value sess
 func (r *redisSessionRepository) Get(ctx context.Context, key string) (session, error) {
 	payload, err := r.client.Get(ctx, r.prefix+"session:"+key).Bytes()
 	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return session{}, errSessionNotFound
+		}
 		return session{}, err
 	}
 	var value session
@@ -224,6 +229,13 @@ func (r *redisSessionRepository) ResetAttempts(ctx context.Context, key string) 
 func (r *redisSessionRepository) Health(ctx context.Context) error { return r.client.Ping(ctx).Err() }
 func (r *redisSessionRepository) Close() error                     { return r.client.Close() }
 func (r *redisSessionRepository) Mode() string                     { return "redis" }
+
+func redisSessionPrefix() string {
+	if prefix := strings.TrimSpace(os.Getenv("DBGUARD_REDIS_PREFIX")); prefix != "" {
+		return prefix
+	}
+	return "dbguard:"
+}
 
 type failedSessionRepository struct{ err error }
 
