@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -47,7 +48,13 @@ func main() {
 		logger.Fatalf("初始化会话存储失败: %v", err)
 	}
 	healthCancel()
-	workers, _ := strconv.Atoi(envOr("DBGUARD_WORKERS", "2"))
+	workers, err := workerCountFromEnvironment()
+	if err != nil {
+		logger.Fatalf("invalid background worker configuration: %v", err)
+	}
+	if workers == 0 {
+		logger.Printf("background workers disabled by DBGUARD_WORKERS=0")
+	}
 	app.Start(ctx, workers)
 
 	address := ":" + envOr("PORT", "8080")
@@ -77,6 +84,18 @@ func envOr(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func workerCountFromEnvironment() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("DBGUARD_WORKERS"))
+	if raw == "" {
+		return 2, nil
+	}
+	workers, err := strconv.Atoi(raw)
+	if err != nil || workers < 0 || workers > 64 {
+		return 0, fmt.Errorf("DBGUARD_WORKERS must be an integer from 0 to 64")
+	}
+	return workers, nil
 }
 
 // storeAgentData exposes only the read-only business queries required by the

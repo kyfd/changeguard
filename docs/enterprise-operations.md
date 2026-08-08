@@ -90,7 +90,7 @@ docker compose down
 | DBGUARD_PASSPORT_TTL | 通行证默认有效期 | 默认 10m；只允许 1～30m |
 | DBGUARD_EXPERIMENT_MODE | SQL 验证模式 | 生产签证场景使用 postgres；demo_only 不可放行 |
 | DBGUARD_SHADOW_DSN | 隔离 PostgreSQL 影子库 DSN | 与生产完全隔离、最小权限、从 secret 注入 |
-| DBGUARD_WORKERS | SQL 影子验证 Outbox worker 数 | 按验证并发与影子库容量设置 |
+| DBGUARD_WORKERS | SQL 影子验证 Outbox worker 数；`0` 显式禁用后台协调与消费 | 生产按验证并发与影子库容量设置；只读迁移预演使用 `0` |
 
 不要把 DSN、OIDC client secret、Redis 凭据、metrics/Operations token 或变更通行证写入镜像、Git、日志和工单正文。
 

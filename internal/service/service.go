@@ -52,8 +52,8 @@ func New(data *store.Store, runner experiment.Runner, analyzer agent.Analyzer) *
 }
 
 func (s *Service) Start(ctx context.Context, workers int) {
-	if workers < 1 {
-		workers = 1
+	if workers <= 0 {
+		return
 	}
 	_ = s.store.EnsureExperimentOutbox()
 	for i := 0; i < workers; i++ {

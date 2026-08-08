@@ -33,6 +33,56 @@ func (fakeAnalyzer) Analyze(_ context.Context, change model.ChangeRequest) model
 	}
 }
 
+func TestZeroWorkersLeaveQueuedBusinessWorkUntouched(t *testing.T) {
+	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("z", 32))
+	data := store.NewMemory()
+	svc := New(data, fakeRunner{}, fakeAnalyzer{})
+	change, err := svc.Create(model.CreateChangeInput{
+		Title: "staging worker isolation", ApplicationID: "app_order", ChangeType: "DDL",
+		SQL:         "CREATE INDEX CONCURRENTLY idx_staging ON orders(status);",
+		RollbackSQL: "DROP INDEX CONCURRENTLY IF EXISTS idx_staging;",
+		Description: "verify that zero workers do not consume queued work",
+	}, "usr_developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, err = svc.Submit(change.ID, "usr_developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, err = svc.QueueExperiment(change.ID, "usr_developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc.Start(ctx, 0)
+	time.Sleep(100 * time.Millisecond)
+
+	unchanged, err := svc.Change(change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Status != model.StatusExperimentQueued {
+		t.Fatalf("zero workers changed queued status to %s", unchanged.Status)
+	}
+	events := data.OutboxByOrganization(unchanged.OrganizationID, true, 0)
+	found := false
+	for _, event := range events {
+		if event.AggregateID != change.ID {
+			continue
+		}
+		found = true
+		if event.Status != model.OutboxPending || event.Attempts != 0 {
+			t.Fatalf("zero workers consumed event: status=%s attempts=%d", event.Status, event.Attempts)
+		}
+	}
+	if !found {
+		t.Fatal("expected queued outbox evidence")
+	}
+}
+
 func TestWorkflowRequiresDifferentApprover(t *testing.T) {
 	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("p", 32))
 	data := store.NewMemory()
