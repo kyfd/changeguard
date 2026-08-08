@@ -18,6 +18,21 @@ func TestPrepareArtifactHashesOriginalBytesBeforeRedaction(t *testing.T) {
 	}
 }
 
+func TestPrepareStoredArtifactPreservesOriginalHashAcrossRedaction(t *testing.T) {
+	raw := "api_key: actual-secret\n"
+	originalSHA256 := SHA256(raw)
+	first := PrepareStoredArtifact(model.ChangeArtifact{
+		Kind: model.ArtifactConfig, Name: "app.yaml", Content: raw, ContentSHA256: originalSHA256,
+	})
+	second := PrepareStoredArtifact(first)
+	if first.ContentSHA256 != originalSHA256 || second.ContentSHA256 != originalSHA256 {
+		t.Fatalf("stored artifact lost original byte digest: first=%s second=%s", first.ContentSHA256, second.ContentSHA256)
+	}
+	if first.Content != second.Content || strings.Contains(second.Content, "actual-secret") {
+		t.Fatalf("stored artifact redaction is not idempotent: first=%q second=%q", first.Content, second.Content)
+	}
+}
+
 func TestKubernetesRedactsSecretButPreservesConfigMapData(t *testing.T) {
 	raw := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: visible\ndata:\n  password: config-map-value\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: hidden\nstringData:\n  password: secret-value\n  username: demo"
 	artifact := PrepareArtifact(model.ChangeArtifact{Kind: model.ArtifactKubernetes, Content: raw})

@@ -13,13 +13,13 @@ import (
 )
 
 var (
-	secretKeyPattern = regexp.MustCompile("(?i)(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|signing[_-]?key|credential)")
-	assignmentPattern = regexp.MustCompile("^([[:space:]]*[^#:=]+[[:space:]]*[:=][[:space:]]*)(.*)$")
-	jsonSecretPattern = regexp.MustCompile("(?i)(\\\"(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|signing[_-]?key|credential)\\\"[[:space:]]*:[[:space:]]*)\\\"[^\\\"]*\\\"")
-	bearerPattern = regexp.MustCompile("(?i)(authorization[[:space:]]*[:=][[:space:]]*bearer[[:space:]]+)[^[:space:]\\\"']+")
+	secretKeyPattern     = regexp.MustCompile("(?i)(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|signing[_-]?key|credential)")
+	assignmentPattern    = regexp.MustCompile("^([[:space:]]*[^#:=]+[[:space:]]*[:=][[:space:]]*)(.*)$")
+	jsonSecretPattern    = regexp.MustCompile("(?i)(\\\"(password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|signing[_-]?key|credential)\\\"[[:space:]]*:[[:space:]]*)\\\"[^\\\"]*\\\"")
+	bearerPattern        = regexp.MustCompile("(?i)(authorization[[:space:]]*[:=][[:space:]]*bearer[[:space:]]+)[^[:space:]\\\"']+")
 	uriCredentialPattern = regexp.MustCompile("([a-zA-Z][a-zA-Z0-9+.-]*://[^/@[:space:]]+:)[^/@[:space:]]+(@)")
-	privateKeyPattern = regexp.MustCompile("(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
-	awsAccessKeyPattern = regexp.MustCompile("\\b(AKIA|ASIA)[A-Z0-9]{16}\\b")
+	privateKeyPattern    = regexp.MustCompile("(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
+	awsAccessKeyPattern  = regexp.MustCompile("\\b(AKIA|ASIA)[A-Z0-9]{16}\\b")
 )
 
 func SHA256(value string) string {
@@ -91,6 +91,20 @@ func PrepareArtifact(item model.ChangeArtifact) model.ChangeArtifact {
 	item.Source = strings.TrimSpace(item.Source)
 	item.Language = strings.TrimSpace(item.Language)
 	return item
+}
+
+// PrepareStoredArtifact redacts persisted content without replacing the hash
+// that binds the original pre-redaction bytes. Fresh API input must continue
+// to use PrepareArtifact so clients cannot supply or retain a stale digest.
+func PrepareStoredArtifact(item model.ChangeArtifact) model.ChangeArtifact {
+	storedSHA256 := strings.ToLower(strings.TrimSpace(item.ContentSHA256))
+	prepared := PrepareArtifact(item)
+	if len(storedSHA256) == 64 {
+		if _, err := hex.DecodeString(storedSHA256); err == nil {
+			prepared.ContentSHA256 = storedSHA256
+		}
+	}
+	return prepared
 }
 
 func redactKubernetesSecrets(value string) string {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/liufengxi/dbguard/internal/changegate"
 	"github.com/liufengxi/dbguard/internal/model"
 )
 
@@ -133,4 +134,36 @@ func TestDemoEnrichmentRequiresExplicitEnablement(t *testing.T) {
 			t.Fatal("enabled demo data did not apply deterministic enrichment")
 		}
 	})
+}
+
+func TestNormalizeStatePreservesPreRedactionArtifactDigest(t *testing.T) {
+	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "false")
+	raw := "api_key: production-secret\n"
+	originalSHA256 := changegate.SHA256(raw)
+	data := state{
+		Organizations: []model.Organization{{ID: "org_prod", Name: "Production"}},
+		Changes: []model.ChangeRequest{{
+			ID: "chg_secret", OrganizationID: "org_prod", ChangeType: "CONFIG",
+			Artifacts: []model.ChangeArtifact{{
+				ID: "artifact_secret", Kind: model.ArtifactConfig, Content: raw, ContentSHA256: originalSHA256,
+			}},
+		}},
+	}
+	normalizeState(&data)
+	first, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizeState(&data)
+	second, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("secret-bearing stored artifact changed on restart: %s", normalizationDifference(first, second))
+	}
+	artifact := data.Changes[0].Artifacts[0]
+	if artifact.ContentSHA256 != originalSHA256 || strings.Contains(artifact.Content, "production-secret") {
+		t.Fatalf("stored artifact integrity/redaction mismatch: hash=%s content=%q", artifact.ContentSHA256, artifact.Content)
+	}
 }

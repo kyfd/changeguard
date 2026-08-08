@@ -171,7 +171,7 @@ func normalizeState(data *state) {
 			change.RollbackSHA256 = changegate.SHA256(change.RollbackSQL)
 		}
 		for artifactIndex := range change.Artifacts {
-			artifact := changegate.PrepareArtifact(change.Artifacts[artifactIndex])
+			artifact := changegate.PrepareStoredArtifact(change.Artifacts[artifactIndex])
 			change.Artifacts[artifactIndex] = artifact
 		}
 		if change.ArtifactSHA256 == "" {
@@ -207,7 +207,7 @@ func normalizeState(data *state) {
 				change.ReleasePlan = model.ReleasePlan{Strategy: "分批发布", CanaryPercent: 25, ObservationMinutes: 15, AutoRollback: false, SuccessMetrics: []string{"归档任务失败率", "数据库负载", "任务耗时"}}
 			}
 			for artifactIndex := range change.Artifacts {
-				change.Artifacts[artifactIndex] = changegate.PrepareArtifact(change.Artifacts[artifactIndex])
+				change.Artifacts[artifactIndex] = changegate.PrepareStoredArtifact(change.Artifacts[artifactIndex])
 			}
 			change.ArtifactSHA256 = changegate.ChangeDigest(change.Environment, change.ChangeType, change.Artifacts, change.SQLSHA256, change.RollbackSHA256, change.RollbackPlan)
 		}
