@@ -212,6 +212,18 @@ CHANGEGUARD_RESTORE_ROOT=/opt/changeguard/restore-staging \
 
 `verify` 会拒绝越界/软链快照、不安全 manifest 路径、未被 manifest 覆盖的文件、过宽的环境文件权限、无效 JSON、断裂的 Agent 审计链、无签名指标 checkpoint，以及不完整、篡改或无法与主 JSON 配对的 migration witness。`stage` 先复制到受限临时目录，重新执行全部验证，写入 `changeguard-restore/v1` 报告和独立 restore manifest，再原子移动到隔离恢复目录。它不提供“直接恢复到 `/opt/changeguard/data`”的模式；生产激活仍必须由专用账号权限、规范环境、preflight、`--check-config`、隔离启动和显式流量切换共同完成。
 
+候选归档不得直接 `tar -x` 到 release root。Windows/WSL、CI artifact store 或不同 umask 可能把目录权限带成运行用户可写。使用原子安装器并提供从发布证据获得的 transport SHA-256：
+
+```bash
+./changeguard-core-install.sh \
+  /opt/changeguard/uploads/changeguard-core-candidate.tar.gz \
+  EXPECTED_TRANSPORT_SHA256 \
+  /opt/changeguard/releases \
+  2026.08.08-enterprise-candidate.N-shortcommit
+```
+
+安装器只创建不可变 release，不修改 `/opt/changeguard/current`，也不重启服务。它在解压前拒绝归档摘要错误、路径穿越、越界顶层目录、重复成员、软/硬链接、设备/FIFO 和异常展开规模；解压后统一为 root 所有、目录 0755、普通文件 0644、核心二进制 0755，再校验 `SHA256SUMS` 全覆盖、manifest/verification 身份一致和最终目录不可被组/其他用户写入。只有安装器、preflight 和 `--check-config` 均通过，release 才能进入 0% upstream 验收。
+
 ## 10. 升级与回滚
 
 升级前：
@@ -226,6 +238,7 @@ CHANGEGUARD_RESTORE_ROOT=/opt/changeguard/restore-staging \
 8. 将规范配置安装到 root 所有、`changeguard` 组只读的 `/etc/changeguard/core.env`，运行候选 `--check-config`；任何重复键、占位符、inherited override 或 production profile 缺项都必须阻断。
 9. 以专用 `changeguard` 用户运行 `changeguard-core-preflight.sh`，要求 release 全量哈希、数据目录权限和 witness pair 全部通过；不得用 root 执行核心来绕过权限问题。
 10. 对最新快照运行 restore `verify` 和 `stage`，从 staged core 数据副本启动候选并核对业务身份、状态、witness、readiness 与清理结果；只通过 `manifest.sha256` 而未实际启动恢复数据，不算恢复演练完成。
+11. 使用 `changeguard-core-install.sh` 从传输包安装不可变候选；直接解压、手工 chmod 或先改 `current` 后补校验都不属于有效发布流程。
 
 滚动升级时先观察 readiness 和错误率，再扩大实例范围。旧二进制能够启动不等于回滚安全：只有往返状态收敛才允许灰度。file 模式回滚必须保留迁移证据侧车；PostgreSQL 模式的应用回滚不能自动回滚已执行的数据迁移，数据库恢复与向后兼容方案必须单独验证。
 

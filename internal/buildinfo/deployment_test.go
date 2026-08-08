@@ -85,6 +85,15 @@ func TestProductionCoreServiceFailsClosedBeforeRunning(t *testing.T) {
 		"restore-manifest.sha256",
 		"restore_status=",
 	})
+	assertMarkers(t, filepath.Join(production, "changeguard-core-install.sh"), []string{
+		"installer_must_run_as_root",
+		"archive_sha256_mismatch",
+		"archive member contains path traversal",
+		"archive contains links or special files",
+		"release checksum coverage mismatch",
+		"installed_release_is_group_or_world_writable",
+		"core_install=passed",
+	})
 }
 
 func TestCoreGovernanceAlertRulesCoverOperationalOutcomes(t *testing.T) {

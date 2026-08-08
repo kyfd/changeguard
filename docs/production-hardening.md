@@ -36,9 +36,10 @@
 1. 生成 `/etc/changeguard/core.env` 的加密离线备份和规范副本，保留每个键一次；明确从 `demo_only` 切换到隔离 PostgreSQL shadow 的 DSN 与最小权限账号。
 2. 在不修改生产软链的候选目录运行 `dbguard --check-config`，记录不含 secret 的结果。
 3. 创建专用 `changeguard` 系统账号；release 与 env 保持 root 所有、运行账号只读，数据目录及 file/witness/marker 成组迁移给运行账号。
-4. 用 `changeguard-restore.sh verify` 和 `stage` 校验最新快照，在隔离目录启动恢复数据副本；不得直接覆盖生产数据目录。
-5. 安装 preflight 与 hardened unit，在独立端口、无公网 upstream 下启动候选，并验证 Redis session/限流及故障失败关闭。
-6. 安装侧车感知备份脚本，生成候选前快照，在隔离恢复目录启动候选并核对业务状态与完整性摘要。
-7. 建立 Nginx 0% 内部 upstream，完成登录、Gate、metrics、Operations、worker、回滚和观察窗口验收后，再决定是否进入 1%～5% 灰度。
+4. 用 `changeguard-core-install.sh` 校验 transport SHA、tar 路径/类型、release manifest 和最终权限；安装器只创建不可变 release，不切换 `current`。
+5. 用 `changeguard-restore.sh verify` 和 `stage` 校验最新快照，在隔离目录启动恢复数据副本；不得直接覆盖生产数据目录。
+6. 安装 preflight 与 hardened unit，在独立端口、无公网 upstream 下启动候选，并验证 Redis session/限流及故障失败关闭。
+7. 安装侧车感知备份脚本，生成候选前快照，在隔离恢复目录启动候选并核对业务状态与完整性摘要。
+8. 建立 Nginx 0% 内部 upstream，完成登录、Gate、metrics、Operations、worker、回滚和观察窗口验收后，再决定是否进入 1%～5% 灰度。
 
-在 1～7 完成前不替换生产核心；任何门禁失败都保留 legacy upstream 和原数据不变。
+在 1～8 完成前不替换生产核心；任何门禁失败都保留 legacy upstream 和原数据不变。
