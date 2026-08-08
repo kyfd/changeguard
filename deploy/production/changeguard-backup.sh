@@ -6,6 +6,7 @@ retention="${CHANGEGUARD_BACKUP_RETENTION:-30}"
 stamp="$(date -u +%Y%m%d-%H%M%S)"
 staging="$backup_root/.staging-$stamp"
 snapshot="$backup_root/snapshot-$stamp"
+core_data="/opt/changeguard/data/dbguard.json"
 
 if ! [[ "$retention" =~ ^[0-9]+$ ]] || [ "$retention" -lt 7 ] || [ "$retention" -gt 365 ]; then
   printf 'invalid CHANGEGUARD_BACKUP_RETENTION=%s (expected 7..365)\n' "$retention" >&2
@@ -51,16 +52,117 @@ copy_optional() {
 copy_required /opt/changeguard/current/.env "$staging/core/changeguard.env"
 chmod 0600 "$staging/core/changeguard.env"
 
+configured_witness="$(python3 - /opt/changeguard/current/.env <<'PY'
+import pathlib
+import sys
+
+value = ""
+for raw in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, candidate = line.split("=", 1)
+    if key.strip() == "DBGUARD_MIGRATION_WITNESS_FILE":
+        value = candidate.strip().strip("\"'")
+print(value)
+PY
+)"
+migration_witness="${CHANGEGUARD_MIGRATION_WITNESS_FILE:-${configured_witness:-$core_data.rollback-witness.json}}"
+case "$migration_witness" in
+  /*) ;;
+  *) printf 'migration witness backup path must be absolute: %s\n' "$migration_witness" >&2; exit 1 ;;
+esac
+migration_marker="$migration_witness.required"
+
 core_copied=0
 for attempt in 1 2 3; do
-  cp -a -- /opt/changeguard/data/dbguard.json "$staging/core/dbguard.json"
-  if python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$staging/core/dbguard.json" 2>/dev/null; then
-    core_copied=1
-    break
+  rm -f -- "$staging/core/dbguard.json" "$staging/core/dbguard.rollback-witness.json" "$staging/core/dbguard.rollback-witness.required"
+  witness_exists=0
+  marker_exists=0
+  [ -f "$migration_witness" ] && witness_exists=1
+  [ -f "$migration_marker" ] && marker_exists=1
+  if [ "$witness_exists" -ne "$marker_exists" ]; then
+    sleep 2
+    continue
   fi
-  sleep 2
+  data_hash_before="$(sha256sum "$core_data" | awk '{print $1}')"
+  if [ "$witness_exists" -eq 1 ]; then
+    witness_hash_before="$(sha256sum "$migration_witness" | awk '{print $1}')"
+    marker_hash_before="$(sha256sum "$migration_marker" | awk '{print $1}')"
+  fi
+  cp -a -- "$core_data" "$staging/core/dbguard.json"
+  if [ "$witness_exists" -eq 1 ]; then
+    cp -a -- "$migration_witness" "$staging/core/dbguard.rollback-witness.json"
+    cp -a -- "$migration_marker" "$staging/core/dbguard.rollback-witness.required"
+  fi
+  data_hash_after="$(sha256sum "$core_data" | awk '{print $1}')"
+  [ "$data_hash_before" = "$data_hash_after" ] || { sleep 2; continue; }
+  if [ "$witness_exists" -eq 1 ]; then
+    [ "$witness_hash_before" = "$(sha256sum "$migration_witness" | awk '{print $1}')" ] || { sleep 2; continue; }
+    [ "$marker_hash_before" = "$(sha256sum "$migration_marker" | awk '{print $1}')" ] || { sleep 2; continue; }
+  fi
+  if ! python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$staging/core/dbguard.json" 2>/dev/null; then
+    sleep 2
+    continue
+  fi
+  if [ "$witness_exists" -eq 1 ]; then
+    if ! python3 - "$staging/core/dbguard.json" "$staging/core/dbguard.rollback-witness.json" "$staging/core/dbguard.rollback-witness.required" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+data_path, witness_path, marker_path = map(pathlib.Path, sys.argv[1:4])
+if marker_path.read_text(encoding="utf-8") != "changeguard-migration-witness-required/v1\n":
+    raise SystemExit("invalid migration witness marker")
+document = json.loads(witness_path.read_text(encoding="utf-8"))
+if document.get("schema") != "changeguard-migration-witness/v1":
+    raise SystemExit("invalid migration witness schema")
+
+digest = hashlib.sha256()
+def field(value):
+    encoded = str(value).encode("utf-8")
+    digest.update(str(len(encoded)).encode("ascii") + b":" + encoded + b"\n")
+def snapshot(label, value):
+    field(label)
+    field(value["state_sha256"])
+    field(len(value["changes"]))
+    for entry in value["changes"]:
+        field(entry["key"])
+        field(entry["sql_sha256"])
+        field(entry["rollback_sha256"])
+        field(entry["artifact_sha256"])
+    field(len(value["artifacts"]))
+    for entry in value["artifacts"]:
+        field(entry["key"])
+        field(entry["artifact_id"])
+        field(entry["content_sha256"])
+
+field(document["schema"])
+snapshot("current", document["current"])
+if document.get("previous") is None:
+    field("previous:none")
+else:
+    snapshot("previous", document["previous"])
+if digest.hexdigest() != document.get("payload_sha256"):
+    raise SystemExit("migration witness payload digest mismatch")
+data_sha256 = hashlib.sha256(data_path.read_bytes()).hexdigest()
+candidate_states = {document["current"]["state_sha256"]}
+if document.get("previous") is not None:
+    candidate_states.add(document["previous"]["state_sha256"])
+if data_sha256 not in candidate_states:
+    raise SystemExit("data file is not paired with the migration witness")
+print("migration_witness_backup=verified")
+PY
+    then
+      sleep 2
+      continue
+    fi
+  fi
+  core_copied=1
+  break
 done
-[ "$core_copied" -eq 1 ] || { printf 'core JSON backup validation failed\n' >&2; exit 1; }
+[ "$core_copied" -eq 1 ] || { printf 'core JSON/witness backup validation failed\n' >&2; exit 1; }
 
 copy_required /etc/changeguard-agent-gateway.env "$staging/agent/changeguard-agent-gateway.env"
 chmod 0600 "$staging/agent/changeguard-agent-gateway.env"

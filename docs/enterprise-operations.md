@@ -73,6 +73,8 @@ docker compose down
 | --- | --- | --- |
 | PORT | HTTP 监听端口 | 由容器或平台注入 |
 | DBGUARD_STORE_MODE | file 或 postgres | postgres |
+| DBGUARD_DATA_FILE | file 模式主状态文件 | 使用持久卷中的绝对路径 |
+| DBGUARD_MIGRATION_WITNESS_FILE | file 模式回滚迁移证据侧车；默认 `<DBGUARD_DATA_FILE>.rollback-witness.json` | 使用与主状态同一持久卷的绝对路径，不得单独删除 |
 | DBGUARD_PRIMARY_DSN | PostgreSQL DSN | 从 secret 注入 |
 | DBGUARD_DB_MAX_CONNS | 最大连接数 | 按实例数和数据库容量配置 |
 | DBGUARD_SESSION_MODE | memory 或 redis | 多实例使用 redis |
@@ -97,6 +99,8 @@ docker compose down
 文件状态升级必须可重复执行：旧 demo 制品补全仅在显式启用 demo 数据时执行；demo 制品和组织默认策略补全使用基于业务作用域的确定性迁移 ID。候选在同一数据副本上连续启动两次后，第二次不得继续改变规范化后的 JSON。
 
 制品接入时的 `content_sha256` 必须绑定脱敏前原始字节；后续加载已持久化记录时保留该合法摘要，只对展示内容重复执行幂等脱敏，禁止用 `[REDACTED]` 文本覆盖原始完整性证据。
+
+file 模式会在主状态文件旁原子维护回滚迁移证据侧车及 `.required` 标记。侧车只保存当前/上一份候选状态摘要、稳定制品 ID 和脱敏前内容/SQL/回滚摘要，不保存制品正文；候选先落侧车再落主状态，因此进程在两次 rename 之间中断时也能根据主状态 SHA-256 选择正确快照。旧核心回滚后即使丢弃新字段，再次前滚也会按脱敏后内容指纹恢复原始摘要和稳定 ID。标记存在但侧车缺失、格式错误或自校验失败时启动必须失败关闭。该机制当前只保护 file 模式；PostgreSQL 模式仍必须使用向后兼容的表迁移和独立数据库恢复方案。
 
 ## 5. 健康检查与指标
 
@@ -177,6 +181,8 @@ CI secret 应设为 masked/protected，且通行证消费步骤紧邻生产部�
 - OIDC、Redis 和 metrics secret 由部署平台重新注入；
 - CI Gate 对旧令牌继续失败关闭。
 
+file 模式备份必须把 `dbguard.json`、回滚迁移证据侧车和 `.required` 标记作为一个不可拆分的恢复单元。`deploy/production/changeguard-backup.sh` 会对三者执行稳定副本重试，校验侧车自摘要，并确认数据文件 SHA-256 匹配侧车的 current 或 previous 快照；只恢复主 JSON、遗漏侧车的操作应被视为无效备份。
+
 ## 10. 升级与回滚
 
 升级前：
@@ -185,9 +191,11 @@ CI secret 应设为 masked/protected，且通行证消费步骤紧邻生产部�
 2. 阅读数据迁移与 API 兼容说明；
 3. 在测试环境运行 go test、go vet、race、镜像构建和浏览器主流程；
 4. 使用一个测试服务验证 Gate 允许和阻断场景；
-5. 确认 SQL 仅接受真实 PostgreSQL 影子事务证据，旧模拟 experiment/Agent 输出不会被误当作放行依据。
+5. 确认 SQL 仅接受真实 PostgreSQL 影子事务证据，旧模拟 experiment/Agent 输出不会被误当作放行依据；
+6. 对生产数据副本执行“新候选 → 当前生产旧核心 → 新候选”回滚往返，要求业务记录、自定义策略、制品 ID、脱敏前摘要以及最终规范化 JSON 全部收敛；
+7. file 模式确认侧车与 `.required` 标记被备份、回滚旧核心不会删除它们，再次前滚的启动日志显示 `external-state-rehydrated` 和实际恢复计数。
 
-滚动升级时先观察 readiness 和错误率，再扩大实例范围。应用回滚不能自动回滚已执行的数据迁移；数据库恢复方案必须单独验证。
+滚动升级时先观察 readiness 和错误率，再扩大实例范围。旧二进制能够启动不等于回滚安全：只有往返状态收敛才允许灰度。file 模式回滚必须保留迁移证据侧车；PostgreSQL 模式的应用回滚不能自动回滚已执行的数据迁移，数据库恢复与向后兼容方案必须单独验证。
 
 ## 11. 生产上线清单
 
@@ -199,6 +207,7 @@ CI secret 应设为 masked/protected，且通行证消费步骤紧邻生产部�
 - Operations webhook 使用独立凭据，事故/回滚/业务 SLI 至少各完成一次受控接入验证；
 - 通行证原子消费和重放测试通过；
 - 备份恢复演练通过；
+- file 模式的主状态、迁移证据侧车和 required 标记已成组备份，且新旧版本往返收敛测试通过；
 - CI 在所有非 2xx、超时和网络失败时阻断；
 - 日志、报告和审计不泄露 secret；
 - 当前版本的真实 CI 和系统测试结果已记录。

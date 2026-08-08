@@ -89,6 +89,10 @@ availability and latency objectives, upstream errors, and audit-file growth.
   Install it as `/opt/changeguard/backup.sh` only after preserving the previous
   script, then run it once interactively and verify the generated manifest
   before relying on the existing daily cron entry.
+- When the core uses file storage, the same backup treats the main JSON, the
+  rollback migration witness, and its `.required` marker as one recovery unit.
+  It rejects a snapshot unless the JSON hash matches the witness current or
+  previous state and the witness self-digest verifies.
 - Alert at 256 MiB and plan a chain-aware archive before the active audit file
   reaches that threshold. Until an archive verifier/checkpoint format is
   deployed, retain the complete active chain.

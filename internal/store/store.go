@@ -42,21 +42,35 @@ type state struct {
 }
 
 type Store struct {
-	mu        sync.RWMutex
-	path      string
-	data      state
-	backend   stateBackend
-	version   int64
-	persisted []byte
+	mu                         sync.RWMutex
+	path                       string
+	data                       state
+	backend                    stateBackend
+	version                    int64
+	persisted                  []byte
+	migrationWitnessPath       string
+	migrationWitnessMarkerPath string
+	migrationWitness           migrationWitnessSnapshot
+	migrationWitnessStatus     MigrationWitnessStatus
 }
 
 func New(path string) (*Store, error) {
-	s := &Store{path: path}
+	witnessPath, markerPath, err := migrationWitnessPaths(path)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{path: path, migrationWitnessPath: witnessPath, migrationWitnessMarkerPath: markerPath}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
 	content, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		witness, status, witnessErr := loadMigrationWitnessForState(witnessPath, markerPath, nil)
+		if witnessErr != nil {
+			return nil, witnessErr
+		}
+		s.migrationWitness = witness
+		s.migrationWitnessStatus = status
 		s.data = initialState()
 		normalizeState(&s.data)
 		if err := s.saveLocked(); err != nil {
@@ -71,6 +85,13 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 	s.persisted = append([]byte(nil), content...)
+	witness, status, err := loadMigrationWitnessForState(witnessPath, markerPath, content)
+	if err != nil {
+		return nil, err
+	}
+	status.RestoredChanges, status.RestoredArtifacts = rehydrateMigrationWitness(&s.data, witness)
+	s.migrationWitness = witness
+	s.migrationWitnessStatus = status
 	normalizeState(&s.data)
 	if err := s.saveLocked(); err != nil {
 		return nil, err
@@ -162,19 +183,23 @@ func normalizeState(data *state) {
 			change.ReleasePlan.SuccessMetrics = []string{"错误率", "P99 延迟", "核心业务成功率"}
 		}
 		if len(change.Artifacts) == 0 && strings.TrimSpace(change.SQL) != "" {
-			change.Artifacts = []model.ChangeArtifact{{ID: NewID("artifact_"), Kind: model.ArtifactDatabase, Name: "数据库 SQL", Source: "历史变更迁移", Language: "SQL", Content: change.SQL}}
+			change.Artifacts = []model.ChangeArtifact{{ID: migratedArtifactID(change.ID, "database-sql"), Kind: model.ArtifactDatabase, Name: "数据库 SQL", Source: "历史变更迁移", Language: "SQL", Content: change.SQL}}
 		}
-		if change.SQLSHA256 == "" {
+		if !validSHA256(change.SQLSHA256) {
 			change.SQLSHA256 = changegate.SHA256(change.SQL)
 		}
-		if change.RollbackSHA256 == "" {
+		if !validSHA256(change.RollbackSHA256) {
 			change.RollbackSHA256 = changegate.SHA256(change.RollbackSQL)
 		}
 		for artifactIndex := range change.Artifacts {
-			artifact := changegate.PrepareStoredArtifact(change.Artifacts[artifactIndex])
+			artifact := change.Artifacts[artifactIndex]
+			if strings.TrimSpace(artifact.ID) == "" {
+				artifact.ID = deterministicArtifactID(*change, artifact, artifactIndex)
+			}
+			artifact = changegate.PrepareStoredArtifact(artifact)
 			change.Artifacts[artifactIndex] = artifact
 		}
-		if change.ArtifactSHA256 == "" {
+		if !validSHA256(change.ArtifactSHA256) {
 			change.ArtifactSHA256 = changegate.ChangeDigest(change.Environment, change.ChangeType, change.Artifacts, change.SQLSHA256, change.RollbackSHA256, change.RollbackPlan)
 		}
 		change.SQL = changegate.Redact(change.SQL)
@@ -742,15 +767,24 @@ func (s *Store) saveLocked() error {
 		s.restoreLocked()
 		return err
 	}
-	tempPath := s.path + ".tmp"
-	if err := os.WriteFile(tempPath, content, 0o600); err != nil {
+	var witness migrationWitnessSnapshot
+	if s.migrationWitnessPath != "" {
+		witness, err = buildMigrationWitnessSnapshot(s.data, content)
+		if err != nil {
+			s.restoreLocked()
+			return err
+		}
+		if err := persistMigrationWitness(s.migrationWitnessPath, s.migrationWitnessMarkerPath, witness, s.migrationWitness); err != nil {
+			s.restoreLocked()
+			return err
+		}
+	}
+	if err := writePrivateFileAtomic(s.path, content); err != nil {
 		s.restoreLocked()
 		return err
 	}
-	if err := os.Rename(tempPath, s.path); err != nil {
-		_ = os.Remove(tempPath)
-		s.restoreLocked()
-		return err
+	if s.migrationWitnessPath != "" {
+		s.migrationWitness = witness
 	}
 	s.persisted = append(s.persisted[:0], content...)
 	return nil
@@ -781,6 +815,15 @@ func (s *Store) restoreLocked() {
 	var recovered state
 	if json.Unmarshal(content, &recovered) != nil {
 		return
+	}
+	if s.migrationWitnessPath != "" {
+		witness, status, err := loadMigrationWitnessForState(s.migrationWitnessPath, s.migrationWitnessMarkerPath, content)
+		if err != nil {
+			return
+		}
+		status.RestoredChanges, status.RestoredArtifacts = rehydrateMigrationWitness(&recovered, witness)
+		s.migrationWitness = witness
+		s.migrationWitnessStatus = status
 	}
 	normalizeState(&recovered)
 	s.data = recovered

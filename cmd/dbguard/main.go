@@ -36,6 +36,10 @@ func main() {
 		logger.Fatalf("初始化数据存储失败: %v", err)
 	}
 	defer data.Close()
+	if witness := data.MigrationWitnessStatus(); witness.Enabled {
+		logger.Printf("rollback migration witness reconciliation=%s restored_changes=%d restored_artifacts=%d interrupted_save=%t",
+			witness.Reconciliation, witness.RestoredChanges, witness.RestoredArtifacts, witness.InterruptedSaveUsed)
+	}
 	data.StartRefresh(ctx, 2*time.Second)
 	analyzer := agent.NewFromEnvironment()
 	analyzer.SetDataSource(storeAgentData{store: data})
