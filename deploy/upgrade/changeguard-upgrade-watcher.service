@@ -1,0 +1,24 @@
+[Unit]
+Description=ChangeGuard upgrade watcher (root install/rollback)
+Wants=network-online.target
+After=network-online.target changeguard.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/libexec/changeguard/changeguard-upgrade-watcher.sh
+Restart=always
+RestartSec=3
+Environment=DBGUARD_UPGRADE_DIR=/opt/changeguard/upgrades
+Environment=CHANGEGUARD_RELEASE_ROOT=/opt/changeguard/releases
+Environment=CHANGEGUARD_CURRENT_LINK=/opt/changeguard/current
+Environment=CHANGEGUARD_SERVICE=changeguard
+Environment=CHANGEGUARD_HEALTH_URL=http://127.0.0.1:8080/health/ready
+Environment=CHANGEGUARD_HEALTH_TIMEOUT=90
+Environment=CHANGEGUARD_POLL_INTERVAL=2
+NoNewPrivileges=false
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

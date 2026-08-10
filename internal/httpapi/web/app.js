@@ -2177,6 +2177,84 @@ function usageBarHTML(label, used, limit) {
   </div>`;
 }
 
+function renderUpgradeHistory(history) {
+  if (!history || !history.length) return '<div class="upgrade-history-empty">暂无升级记录</div>';
+  return '<div class="table-wrap"><table class="data-table" style="min-width:560px"><thead><tr><th>版本</th><th>结果</th><th>时间</th></tr></thead><tbody>' + history.map(item => '<tr>' +
+    '<td><code>' + escapeHTML(item.version || "") + '</code></td>' +
+    '<td><span class="status ' + (item.state === "success" ? "status-approved" : item.state === "failed" ? "status-failed" : "status-draft") + '"><i></i>' + escapeHTML(item.state || "") + '</span><small class="table-subtext" style="display:block">' + escapeHTML(item.message || "") + '</small></td>' +
+    '<td>' + formatDate(item.applied_at) + '</td>' +
+  '</tr>').join("") + '</tbody></table></div>';
+}
+function bindUpgradeEvents() {
+  const fileInput = document.querySelector("#upgradeFileInput");
+  const fileName = document.querySelector("#upgradeFileName");
+  const uploadBtn = document.querySelector("#upgradeUploadButton");
+  const applyBtn = document.querySelector("#upgradeApplyButton");
+  const abortBtn = document.querySelector("#upgradeAbortButton");
+  if (!fileInput || !uploadBtn) return;
+  let selectedFile = null;
+  const refreshState = () => {
+    if (!applyBtn || !abortBtn) return;
+    applyBtn.hidden = true; abortBtn.hidden = true;
+  };
+  fileInput.addEventListener("change", () => {
+    selectedFile = fileInput.files?.[0] || null;
+    if (fileName) fileName.textContent = selectedFile ? selectedFile.name + "（" + (selectedFile.size / 1024 / 1024).toFixed(1) + "MB）" : "";
+    uploadBtn.disabled = !selectedFile;
+  });
+  uploadBtn.addEventListener("click", async () => {
+    if (!selectedFile) return;
+    uploadBtn.disabled = true;
+    if (uploadBtn.dataset.label === undefined) uploadBtn.dataset.label = uploadBtn.textContent;
+    uploadBtn.textContent = "上传中…";
+    try {
+      const form = new FormData();
+      form.append("archive", selectedFile);
+      const status = await api("/api/upgrade/upload", { method: "POST", body: form });
+      toast("升级包已上传", "success", status.archive_name + " 等待应用");
+      await renderSettings(document.querySelector("#mainContent"));
+    } catch (error) {
+      toast("上传失败", "error", error.message || "无法上传升级包");
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = uploadBtn.dataset.label || "上传升级包";
+    }
+  });
+  applyBtn?.addEventListener("click", async () => {
+    if (!confirm("确认立即升级？升级过程中服务会短暂重启，健康检查失败将自动回滚。")) return;
+    applyBtn.disabled = true;
+    try {
+      const result = await api("/api/upgrade/apply", { method: "POST", body: "{}" });
+      toast("升级已触发", "success", result.message || "");
+      const poll = setInterval(async () => {
+        try {
+          const info = await api("/api/upgrade/status");
+          const label = document.querySelector("#upgradeStateLabel");
+          const msg = document.querySelector("#upgradeStateMessage");
+          if (label) label.textContent = ({idle:"空闲",pending:"待应用",applying:"升级中…",success:"升级成功",failed:"升级失败",rollback:"已回滚"})[info.status?.state] || info.status?.state || "空闲";
+          if (msg) msg.textContent = info.status?.message || "";
+          if (info.status?.state === "success" || info.status?.state === "failed" || info.status?.state === "rollback") {
+            clearInterval(poll);
+            toast(info.status.state === "success" ? "升级成功" : "升级未完成", info.status.state === "success" ? "success" : "error", info.status.message || "");
+            setTimeout(() => location.reload(), 1500);
+          }
+        } catch (_) { /* 服务重启中，等待恢复 */ }
+      }, 2000);
+    } catch (error) {
+      toast("触发失败", "error", error.message || "无法触发升级");
+      applyBtn.disabled = false;
+    }
+  });
+  abortBtn?.addEventListener("click", async () => {
+    if (!confirm("取消本次升级？")) return;
+    try {
+      await api("/api/upgrade/abort", { method: "POST", body: "{}" });
+      toast("升级已取消", "success");
+      await renderSettings(document.querySelector("#mainContent"));
+    } catch (error) {
+      toast("取消失败", "error", error.message || "");
+    }
+  });
+}
 async function renderSettings(main) {
   setHeader("集成设置");
   const config = state.config || {};
@@ -2230,6 +2308,9 @@ async function renderSettings(main) {
     events = await api("/api/integrations/events?limit=10");
     state.integrationEvents = events;
   } catch (_) { /* ignore */ }
+  let upgradeInfo = { current: null, status: { state: "idle" }, history: [] };
+  try { upgradeInfo = await api("/api/upgrade/status"); } catch (_) { /* upgrade API 不可用（本地模式） */ }
+  const upgradeStateLabel = ({idle:"空闲",pending:"待应用",applying:"升级中…",success:"升级成功",failed:"升级失败",rollback:"已回滚"})[upgradeInfo.status?.state] || upgradeInfo.status?.state || "空闲";
   const eventRows = (events || []).length
     ? events.map(item => {
         const changeLink = item.change_id
@@ -2448,10 +2529,33 @@ async function renderSettings(main) {
     </article>
   </div>
   <article class="panel" style="margin-top:16px">
+    <header class="panel-header"><div><h3>系统升级</h3><p>上传 ChangeGuard 升级包，在线完成版本更新与自动回滚</p></div>
+      <span id="upgradeCurrentBadge" class="status status-approved"><i></i>当前 ${escapeHTML(upgradeInfo.current?.version || "dev")}</span>
+    </header>
+    <div class="panel-body" id="upgradePanelBody">
+      <div class="upgrade-status-row">
+        <div class="upgrade-state"><span>升级状态</span><strong id="upgradeStateLabel">${upgradeStateLabel}</strong><small id="upgradeStateMessage">${escapeHTML(upgradeInfo.status?.message || "")}</small></div>
+        ${upgradeInfo.status?.archive_name ? `<div class="upgrade-pkg"><span>升级包</span><strong>${escapeHTML(upgradeInfo.status.archive_name)}</strong><small>SHA256 ${escapeHTML((upgradeInfo.status.archive_sha256 || "").slice(0, 16))}…</small></div>` : ""}
+      </div>
+      <div class="upgrade-actions">
+        <label class="upgrade-file-label">
+          <input type="file" id="upgradeFileInput" accept=".tar.gz" hidden>
+          <span class="button button-secondary">选择升级包（changeguard-*.tar.gz）</span>
+        </label>
+        <span id="upgradeFileName" class="muted"></span>
+        <button type="button" class="button button-primary" id="upgradeUploadButton" disabled>上传升级包</button>
+        <button type="button" class="button button-primary" id="upgradeApplyButton" hidden>立即升级</button>
+        <button type="button" class="button button-danger" id="upgradeAbortButton" hidden>取消升级</button>
+      </div>
+      <div id="upgradeHistory" class="upgrade-history">${renderUpgradeHistory(upgradeInfo.history || [])}</div>
+    </div>
+  </article>
+  <article class="panel" style="margin-top:16px">
     <header class="panel-header"><div><h3>最近集成事件</h3><p>GitLab Webhook</p></div><span>${(events || []).length}</span></header>
     <div class="panel-body"><div class="table-wrap"><table class="data-table"><thead><tr><th>来源</th><th>状态</th><th>摘要</th><th>变更单</th><th>时间</th></tr></thead><tbody>${eventRows}</tbody></table></div></div>
   </article>`;
 
+  bindUpgradeEvents();
   document.querySelector("[data-agent-audit-export]")?.addEventListener("click", async event => {
     const button = event.currentTarget;
     const original = button.textContent;

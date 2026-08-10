@@ -1675,3 +1675,16 @@ body.panorama-mode .main-content { width: 100%; max-width: none; min-height: 100
   .enterprise-identity .status { margin-left: 0; }
   .invite-result > div { flex-direction: column; }
 }
+
+
+/* ═══ 系统升级面板 ═══ */
+.upgrade-status-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.upgrade-state, .upgrade-pkg { min-width: 220px; flex: 1; padding: 13px 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-subtle); }
+.upgrade-state span, .upgrade-pkg span { display: block; color: var(--muted-light); font-size: 12px; margin-bottom: 5px; }
+.upgrade-state strong { display: block; color: var(--text-strong); font-size: 17px; }
+.upgrade-state small, .upgrade-pkg small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+.upgrade-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.upgrade-file-label { display: inline-flex; }
+.upgrade-file-label .button { pointer-events: none; }
+.upgrade-history { border-top: 1px solid var(--line); padding-top: 14px; }
+.upgrade-history-empty { color: var(--muted-light); font-size: 13px; text-align: center; padding: 14px 0; }

@@ -116,6 +116,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/integrations/jenkins/events", s.handleJenkinsEvent)
 	mux.HandleFunc("/api/integrations/operations/events", s.handleOperationsEvents)
 	mux.HandleFunc("/api/integrations/operations/webhook", s.handleOperationsWebhook)
+	mux.HandleFunc("/api/upgrade/status", s.handleUpgradeStatus)
+	mux.HandleFunc("/api/upgrade/upload", s.handleUpgradeUpload)
+	mux.HandleFunc("/api/upgrade/apply", s.handleUpgradeApply)
+	mux.HandleFunc("/api/upgrade/abort", s.handleUpgradeAbort)
 	staticFS, err := fs.Sub(webAssets, "web")
 	if err != nil {
 		panic(err)
