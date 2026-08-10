@@ -1,9 +1,9 @@
 "use strict";
 
 const state = {
-  users: [], apps: [], changes: [], policies: [], dashboard: null, audits: [], config: null, authStatus: null, session: null, organization: null, invites: [],
+  users: [], apps: [], changes: [], policies: [], dashboard: null, governanceOutcomes: null, audits: [], config: null, ciTrusts: [], authStatus: null, session: null, organization: null, invites: [],
   actorId: localStorage.getItem("dbguard_actor") || "usr_developer",
-  currentChange: null, review: null, findingAction: null, editingId: null, editingPolicy: null, editingMember: null, editingApp: null,
+  currentChange: null, review: null, findingAction: null, editingId: null, editingPolicy: null, editingMember: null, editingApp: null, editingCITrust: null,
   assetFilters: {keyword:"", environment:""},
   riskFilters: {keyword:"", application:"", severity:"", status:""}
 };
@@ -83,6 +83,85 @@ function riskBadge(risk) {
 function actor() { return state.users.find(user => user.id === state.actorId) || state.users[0] || {id:"usr_developer",name:"刘丰熙",role:"后端开发"}; }
 function roleLabel(role) { return role === "数据库审核人" ? "发布审核人" : role; }
 
+const workspaceProfiles = {
+  developer: {
+    key: "developer", label: "开发者工作台", shortLabel: "开发",
+    description: "先判断自己的变更能否发布，再处理阻断证据与下一步动作。",
+    home: "dashboard",
+    routes: ["dashboard", "changes"],
+    order: ["dashboard", "changes"]
+  },
+  reviewer: {
+    key: "reviewer", label: "审核工作台", shortLabel: "审核",
+    description: "优先核对待审批变更、风险证据、影响范围与审计上下文。",
+    home: "approvals",
+    routes: ["dashboard", "approvals", "changes"],
+    order: ["approvals", "dashboard", "changes"]
+  },
+  operations: {
+    key: "operations", label: "发布运行工作台", shortLabel: "运行",
+    description: "聚焦发布窗口、观测信号、事故回溯和服务运行上下文。",
+    home: "calendar",
+    routes: ["dashboard", "calendar", "observability", "incidents", "changes"],
+    order: ["dashboard", "calendar", "observability", "incidents", "changes"]
+  },
+  lead: {
+    key: "lead", label: "治理工作台", shortLabel: "治理",
+    description: "跨服务查看审批、风险、规则、运行证据与治理配置。",
+    home: "dashboard",
+    routes: ["dashboard", "approvals", "changes", "risks", "calendar", "experiments", "observability", "incidents", "panorama", "assets", "policies", "apps", "audits", "settings"],
+    order: ["dashboard", "approvals", "changes", "risks", "calendar", "experiments", "observability", "incidents", "panorama", "assets", "policies", "apps", "audits", "settings"]
+  },
+  manager: {
+    key: "manager", label: "管理者工作台", shortLabel: "管理",
+    description: "只看真实治理结果、运行后果与可量化收益；缺少信号时明确提示证据不足。",
+    home: "dashboard",
+    routes: ["dashboard"],
+    order: ["dashboard"]
+  },
+  admin: {
+    key: "admin", label: "企业管理工作台", shortLabel: "企业管理",
+    description: "聚焦应用映射、CI 身份信任、治理策略与成员权限配置。",
+    home: "dashboard",
+    routes: ["dashboard", "apps", "settings", "policies", "enterprise"],
+    order: ["dashboard", "apps", "settings", "policies", "enterprise"]
+  }
+};
+
+function workspaceProfile(user = actor()) {
+  if (user?.enterprise_admin) return workspaceProfiles.admin;
+  const rawRole = String(user?.role || "").trim().toLowerCase();
+  if (["sre", "operations", "operation", "运维", "运营", "可靠性", "值班"].some(token => rawRole.includes(token))) return workspaceProfiles.operations;
+  if (["数据库审核人", "发布审核人", "reviewer", "审核", "审批"].some(token => rawRole.includes(token))) return workspaceProfiles.reviewer;
+  if (["manager", "management", "经理", "管理层", "管理者", "主管"].some(token => rawRole.includes(token))) return workspaceProfiles.manager;
+  if (["技术负责人", "technical lead", "tech lead", "负责人"].some(token => rawRole.includes(token))) return workspaceProfiles.lead;
+  return workspaceProfiles.developer;
+}
+
+function routeAllowed(route, user = actor()) {
+  return workspaceProfile(user).routes.includes(String(route || "").split("/")[0]);
+}
+
+function ensureAllowedRoute() {
+  const route = currentRoute()[0];
+  const profile = workspaceProfile();
+  if (profile.routes.includes(route)) return {changed:false, route};
+  const fallback = profile.home || "dashboard";
+  history.replaceState({}, "", "#/" + fallback);
+  return {changed:true, route:fallback, blocked:route};
+}
+
+function visibleNavGroups(user = actor()) {
+  const profile = workspaceProfile(user);
+  const order = new Map(profile.order.map((route, index) => [route, index]));
+  return navItems.map(group => ({
+    group: group.group === "工作台" ? profile.label : group.group,
+    items: group.items
+      .filter(item => profile.routes.includes(item.route))
+      .sort((left, right) => (order.get(left.route) ?? 999) - (order.get(right.route) ?? 999))
+  })).filter(group => group.items.length);
+}
+
 async function api(path, options = {}) {
   const headers = {"Content-Type":"application/json","X-Actor-ID":state.actorId,"X-CSRF-Token":state.session?.csrf_token || "",...options.headers};
   const response = await fetch(path, {...options, headers});
@@ -94,8 +173,13 @@ async function api(path, options = {}) {
       state.organization = null;
       renderAuthGate("登录状态已失效，请重新登录");
     }
-    const error = new Error(data?.error || "请求失败，请稍后重试");
+    const error = new Error(data?.message || data?.error || "请求失败，请稍后重试");
     error.status = response.status;
+    error.code = data?.code || "REQUEST_FAILED";
+    error.resource = data?.resource || "request";
+    error.evidence = data?.evidence || `HTTP ${response.status}`;
+    error.fix = data?.fix || "检查当前页面数据与权限后重试。";
+    error.deepLink = data?.deep_link || "";
     throw error;
   }
   return data;
@@ -128,13 +212,13 @@ async function bootstrapAuthentication() {
 }
 
 async function loadBase() {
-  const [users, apps, dashboard, changesRaw, policies, audits, config] = await Promise.all([
-    api("/api/users"), api("/api/apps"), api("/api/dashboard"),
+  const [users, apps, dashboard, governanceOutcomes, changesRaw, policies, audits, config] = await Promise.all([
+    api("/api/users"), api("/api/apps"), api("/api/dashboard"), api("/api/governance/outcomes?window_days=30"),
     api("/api/changes?page=1&page_size=100"),
     api("/api/policies"), api("/api/audits?limit=100"), api("/api/config/status")
   ]);
   const changes = Array.isArray(changesRaw) ? changesRaw : (changesRaw?.items || []);
-  Object.assign(state, {users, apps, dashboard, changes, policies, audits, config});
+  Object.assign(state, {users, apps, dashboard, governanceOutcomes, changes, policies, audits, config});
   if (!users.some(user => user.id === state.actorId)) state.actorId = users[0]?.id || "usr_developer";
   renderActor();
   renderNav();
@@ -169,8 +253,19 @@ function renderActor() {
 
   const workspaceName = document.querySelector("#workspaceName");
   const workspaceMode = document.querySelector("#workspaceMode");
+  const profile = workspaceProfile(current);
+  document.body.dataset.workspaceRole = profile.key;
+  const createButton = document.querySelector("#createButton");
+  const canCreateChanges = ["developer", "lead"].includes(profile.key);
+  createButton?.classList.toggle("is-hidden", !canCreateChanges);
   if (workspaceName) workspaceName.textContent = state.organization?.name || current.organization_name || "当前企业";
-  if (workspaceMode) workspaceMode.textContent = authenticated ? "已登录" : "演示模式";
+  if (workspaceMode) workspaceMode.textContent = (authenticated ? "已登录" : "演示模式") + " · " + profile.shortLabel;
+  const workspaceButton = document.querySelector(".workspace .icon-button[data-route]");
+  if (workspaceButton) {
+    const enterpriseVisible = routeAllowed("enterprise", current);
+    workspaceButton.dataset.route = enterpriseVisible ? "enterprise" : "assets";
+    workspaceButton.title = enterpriseVisible ? "企业设置" : "服务上下文";
+  }
   const appSelect = document.querySelector("#applicationSelect");
   if (appSelect) {
     appSelect.innerHTML = (state.apps || []).map(app =>
@@ -182,10 +277,13 @@ function renderActor() {
 function pendingNotifyItems() {
   const changes = state.changes || [];
   const me = actor()?.id;
-  const waiting = changes.filter(item => item.status === "WAITING_APPROVAL");
-  const failed = changes.filter(item => item.status === "CHECK_FAILED").slice(0, 5);
+  const profile = workspaceProfile();
+  const reviewFocused = ["reviewer", "lead", "admin"].includes(profile.key);
+  const owned = item => item.submitter_id === me;
+  const waiting = reviewFocused ? changes.filter(item => item.status === "WAITING_APPROVAL" && item.submitter_id !== me) : [];
+  const failed = changes.filter(item => item.status === "CHECK_FAILED" && (profile.key !== "developer" || owned(item))).slice(0, 5);
   const ready = changes.filter(item => item.status === "READY_FOR_EXPERIMENT" && item.submitter_id === me).slice(0, 5);
-  const openFindings = changes.flatMap(change =>
+  const openFindings = changes.filter(change => profile.key !== "developer" || owned(change)).flatMap(change =>
     (change.findings || [])
       .filter(f => f.status !== "VERIFIED")
       .map(f => ({ ...f, change_id: change.id, change_title: change.title }))
@@ -276,12 +374,15 @@ function renderNotifyPanel() {
 function currentRoute() { return (location.hash.replace(/^#\/?/, "") || "dashboard").split("/"); }
 function renderNav() {
   const route = currentRoute()[0];
-  document.querySelector("#navList").innerHTML = navItems.map(group => `
+  const nav = document.querySelector("#navList");
+  if (!nav) return;
+  nav.innerHTML = visibleNavGroups().map(group => `
     <div class="nav-group-label">${group.group}</div>
-    ${group.items.map(item => `<button class="nav-item ${route === item.route ? "active" : ""}" data-route="${item.route}">
+    ${group.items.map(item => `<button class="nav-item ${route === item.route ? "active" : ""}" data-route="${item.route}" ${route === item.route ? 'aria-current="page"' : ""}>
       ${svg(item.icon)}<span>${item.label}</span>${item.count && item.count() ? `<b class="nav-count">${item.count()}</b>` : ""}
     </button>`).join("")}
   `).join("");
+  requestAnimationFrame(() => nav.querySelector(".nav-item.active")?.scrollIntoView({block:"nearest"}));
 }
 function setHeader(title, breadcrumb = title) {
   document.querySelector("#pageTitle").textContent = title;
@@ -293,6 +394,7 @@ function pageHeading(title, description, actions = "") {
 }
 
 async function renderPage() {
+  ensureAllowedRoute();
   const [route, id] = currentRoute();
   document.body.classList.toggle("panorama-mode", route === "panorama");
   renderNav();
@@ -712,6 +814,7 @@ function renderReleaseSchedule(items) {
 
 function renderCalendar(main) {
   setHeader("发布日历");
+  const operationsView = workspaceProfile().key === "operations";
   const schedule = buildReleaseSchedule();
   const start = new Date(); start.setHours(0, 0, 0, 0);
   const end = new Date(start); end.setDate(end.getDate() + 7);
@@ -722,7 +825,10 @@ function renderCalendar(main) {
   const hardConflicts = releasePairCount(baseItems, "sameService");
   const dependencyOverlaps = releasePairCount(baseItems, "dependency");
   const production = baseItems.filter(item => /生产|prod/i.test(item.change.environment || "")).length;
-  main.innerHTML = pageHeading("发布日历", "把未来 7 天的服务发布、同服务撞车和上下游联动窗口放在一张计划表中。", `<button class="button button-secondary" data-route="changes">${svg("code")}查看统一变更</button><button class="button button-primary" data-create>${svg("plus")}登记发布计划</button>`) + `
+  const calendarActions = operationsView
+    ? `<button class="button button-secondary" data-route="observability">${svg("activity")}查看 SLI / 回滚证据</button>`
+    : `<button class="button button-secondary" data-route="changes">${svg("code")}查看统一变更</button><button class="button button-primary" data-create>${svg("plus")}登记发布计划</button>`;
+  main.innerHTML = pageHeading("发布日历", "把未来 7 天的服务发布、同服务撞车和上下游联动窗口放在一张计划表中。", calendarActions) + `
     <section class="registry-stat-grid release-calendar-stats">
       <article><span>近 7 天发布</span><strong>${baseItems.length}</strong><small>包含草稿、验证、审批与待执行计划</small></article>
       <article class="success"><span>生产环境计划</span><strong>${production}</strong><small>需要发布策略、回滚和观察指标</small></article>
@@ -745,19 +851,13 @@ function renderCalendar(main) {
 }
 
 function renderImpactPanel(change) {
-  const analysis = releaseWindowAnalysis(change);
-  const nearby = analysis.nearby;
-  const tone = analysis.sameService.length ? "hard" : analysis.dependency.length ? "warning" : "normal";
-  const headline = tone === "hard" ? "存在同服务窗口冲突" : tone === "warning" ? "存在上下游联动窗口" : "当前窗口未发现直接冲突";
-  const serviceNames = items => items.length ? items.map(item => `<span>${escapeHTML(item.name)}</span>`).join("") : `<em>暂无</em>`;
-  return `<article class="panel impact-panel impact-${tone}"><header class="panel-header"><div><h3>影响范围与发布窗口</h3><p>依据服务依赖和 90 分钟发布保护窗口计算</p></div><button class="panel-link" data-route="calendar">查看日历 →</button></header><div class="panel-body"><div class="impact-headline"><span>${svg(tone === "hard" ? "alert" : tone === "warning" ? "activity" : "check")}</span><div><strong>${headline}</strong><p>${escapeHTML(analysis.currentApp?.name || change.application_name || "未关联服务")} · ${formatDate(change.planned_at)}</p></div></div><div class="impact-service-map"><div><b>直接上游</b><span>${serviceNames(analysis.dependencies)}</span></div><div><b>直接下游</b><span>${serviceNames(analysis.downstream)}</span></div></div><div class="impact-window-list">${nearby.length ? nearby.slice(0, 5).map(item => `<button data-open-change="${item.id}" class="impact-window-item impact-window-${item.level}"><span>${formatDate(item.planned_at)}</span><strong>${escapeHTML(item.application_name)} · ${escapeHTML(item.title)}</strong><small>${item.relation} · ${statusInfo(item.status)[0]}</small></button>`).join("") : `<div class="impact-window-empty">相邻 90 分钟内没有同服务或直接上下游发布。</div>`}</div></div></article>
-  <article class="panel blast-panel" id="blastRadiusPanel" data-change-id="${escapeHTML(change.id)}">
-    <header class="panel-header"><div><h3>爆炸半径分析</h3><p>震中服务 → 下游波及链 · 核心链路高亮</p></div><button type="button" class="panel-link" data-load-blast>计算半径</button></header>
-    <div class="panel-body" id="blastRadiusBody"><div class="blast-placeholder">点击「计算半径」，基于服务依赖表 BFS 推演影响面（含负责人 / 历史事故次数）。</div></div>
+  return `<article class="panel impact-panel" id="impactGraphPanel" data-change-id="${escapeHTML(change.id)}">
+    <header class="panel-header"><div><h3>影响图谱与冲突雷达 2.0</h3><p>资源、上下游、窗口冲突、Owner 与历史结果均来自当前真实变更证据</p></div><button type="button" class="panel-link" data-load-impact>刷新图谱</button></header>
+    <div class="panel-body" id="impactGraphBody"><div class="blast-placeholder">正在计算可解释影响图谱…</div></div>
   </article>
-  <article class="panel efficacy-panel" id="efficacyPanel" data-change-id="${escapeHTML(change.id)}">
-    <header class="panel-header"><div><h3>变更效果验证</h3><p>发布前后错误率 / P95（当前为可复现 mock，可接 Prometheus）</p></div><button type="button" class="panel-link" data-load-efficacy>拉取效果</button></header>
-    <div class="panel-body" id="efficacyBody"><div class="blast-placeholder">发布完成后自动对比前后窗口指标，回答「这次到底好不好」。</div></div>
+  <article class="panel efficacy-panel" id="outcomeEvidencePanel" data-change-id="${escapeHTML(change.id)}">
+    <header class="panel-header"><div><h3>发布结果证据</h3><p>只展示 Operations Webhook 实际接收的 SLI、事故与回滚信号</p></div><button type="button" class="panel-link" data-load-outcomes>刷新证据</button></header>
+    <div class="panel-body" id="outcomeEvidenceBody"><div class="blast-placeholder">正在读取真实发布结果；无信号时明确显示 NOT_RUN。</div></div>
   </article>`;
 }
 
@@ -773,9 +873,245 @@ function statCard(label, value, foot, iconName, accent, soft) {
     <div class="stat-value">${value}</div><div class="stat-foot">${foot}</div>
   </article>`;
 }
+
+function changeUpdatedAt(change) {
+  const value = new Date(change?.updated_at || change?.created_at || 0).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function developerChangeFocus() {
+  const mine = (state.changes || [])
+    .filter(change => change.submitter_id === actor()?.id)
+    .sort((left, right) => changeUpdatedAt(right) - changeUpdatedAt(left));
+  return mine.find(change => !["COMPLETED", "REJECTED"].includes(change.status)) || mine[0] || null;
+}
+
+function developerShipState(change) {
+  const openFindings = (change?.findings || []).filter(item => item.status !== "VERIFIED");
+  const stateByStatus = {
+    DRAFT: ["尚不能发布", "提交规则检查", "变更仍是草稿，需要先进入确定性规则检查。"],
+    CHECKING: ["尚不能发布", "等待规则检查完成", "规则检查正在生成真实证据。"],
+    CHECK_FAILED: ["暂不可发布", "按阻断项修改后重新提交", "存在未通过的规则证据。"],
+    READY_FOR_EXPERIMENT: ["尚不能发布", "启动预发布验证", "规则已完成，下一步需要验证制品与回滚方案。"],
+    EXPERIMENT_QUEUED: ["尚不能发布", "等待预发布验证", "验证任务已排队。"],
+    EXPERIMENT_RUNNING: ["尚不能发布", "等待验证结果", "预发布验证正在执行。"],
+    WAITING_APPROVAL: ["等待独立审批", "补齐证据并等待审批", "当前证据已进入四眼审批阶段。"],
+    APPROVED: ["可以按窗口发布", "在计划窗口使用通行证", "变更已获批准，仍需遵守计划窗口与通行证绑定。"],
+    REJECTED: ["暂不可发布", "根据驳回意见修改并重提", "审批已驳回。"],
+    COMPLETED: ["已完成发布", "查看发布结果证据", "流程已闭环，可复核真实发布后信号。"]
+  };
+  const result = stateByStatus[change?.status] || ["尚不能发布", "查看变更详情", "当前状态需要进一步核对。"];
+  return {label:result[0], next:result[1], detail:result[2], openFindings};
+}
+
+function renderDeveloperContext(profile) {
+  const change = developerChangeFocus();
+  if (!change) {
+    return `<article class="role-context role-context-developer">
+      <header><div><span class="role-context-kicker">${escapeHTML(profile.label)}</span><h3>先登记一条真实变更，再判断能否发布</h3><p>当前账号没有提交记录，因此没有可展示的阻断项、影响资源或发布结论。</p></div><span class="role-context-badge">${escapeHTML(roleLabel(actor()?.role || "开发者"))}</span></header>
+      <div class="developer-answer-grid is-empty"><div><span>我的变更能发布吗？</span><strong>暂无变更</strong></div><div><span>什么在阻断？</span><strong>暂无证据</strong></div><div><span>影响哪些文件 / 资源？</span><strong>暂无制品</strong></div><div><span>下一步是什么？</span><strong>登记变更单</strong></div></div>
+      <footer><button class="button button-primary button-small" data-create>${svg("plus")}新建变更</button><button class="button button-secondary button-small" data-route="changes">查看我的变更</button></footer>
+    </article>`;
+  }
+  const ship = developerShipState(change);
+  const artifacts = (change.artifacts || []).map(item => item.path || item.name || item.kind).filter(Boolean);
+  if (change.sql && !artifacts.some(item => String(item).includes("SQL"))) artifacts.push("数据库 SQL");
+  const affected = [...new Set([change.application_name, ...artifacts].filter(Boolean))];
+  const blockerText = ship.openFindings.length
+    ? ship.openFindings.slice(0, 2).map(item => item.title || item.code).filter(Boolean).join("；") + (ship.openFindings.length > 2 ? ` 等 ${ship.openFindings.length} 项` : "")
+    : (["WAITING_APPROVAL", "APPROVED", "COMPLETED"].includes(change.status) ? "无未闭环规则项" : "等待当前流程生成结论");
+  const affectedText = affected.slice(0, 3).join("；") + (affected.length > 3 ? ` 等 ${affected.length} 项` : "");
+  return `<article class="role-context role-context-developer">
+    <header><div><span class="role-context-kicker">${escapeHTML(profile.label)} · 当前焦点</span><h3>${escapeHTML(change.title)}</h3><p>${escapeHTML(change.application_name || "未关联服务")} · ${statusInfo(change.status)[0]} · 更新于 ${formatDate(change.updated_at)}</p></div><span class="role-context-badge">${escapeHTML(roleLabel(actor()?.role || "开发者"))}</span></header>
+    <div class="developer-answer-grid">
+      <div><span>我的变更能发布吗？</span><strong>${escapeHTML(ship.label)}</strong><small>${escapeHTML(ship.detail)}</small></div>
+      <div><span>什么在阻断？</span><strong>${ship.openFindings.length}</strong><small>${escapeHTML(blockerText)}</small></div>
+      <div><span>影响哪些文件 / 资源？</span><strong>${affected.length}</strong><small>${escapeHTML(affectedText || "尚未登记制品")}</small></div>
+      <div><span>下一步是什么？</span><strong>${escapeHTML(ship.next)}</strong><small>${escapeHTML(change.review_comment || "打开详情查看可执行动作与证据。")}</small></div>
+    </div>
+    <footer><button class="button button-primary button-small" data-open-change="${escapeHTML(change.id)}">打开当前变更</button><button class="button button-secondary button-small" data-route="changes">查看我的变更</button></footer>
+  </article>`;
+}
+
+function managerOutcomeViewModel() {
+  const summary = state.governanceOutcomes || {};
+  const operations = summary.operations || {};
+  const flow = summary.flow || {};
+  const coverage = summary.control_coverage || {};
+  const business = summary.business || {};
+  const quality = summary.outcome_data_quality || {};
+  const formatRate = value => `${Number(value || 0).toFixed(1)}%`;
+  const unavailable = (label, detail = "当前接口未提供可审计样本。") => ({label, value:"证据不足", detail, available:false});
+
+  const postReleaseSamples = Number(operations.post_release_sample_count || 0);
+  const incident = quality.incident_linkage_observable && postReleaseSamples > 0
+    ? {label:"事故率", value:formatRate(Number(operations.linked_incident_count || 0) / postReleaseSamples * 100), detail:`${Number(operations.linked_incident_count || 0)} 个关联事故 / ${postReleaseSamples} 个发布后样本`, available:true}
+    : unavailable("事故率", "缺少可关联到发布的真实事故样本。" );
+
+  const deploymentSamples = Number(flow.deployment_outcome_sample_count || 0);
+  const rollbackSamples = Number(operations.rollback_outcome_sample_count || 0);
+  const rollback = quality.rollback_outcome_observable && quality.release_outcome_observable && deploymentSamples > 0
+    ? {label:"回滚率", value:formatRate(rollbackSamples / deploymentSamples * 100), detail:`${rollbackSamples} 个回滚结果 / ${deploymentSamples} 个发布结果样本`, available:true}
+    : unavailable("回滚率", "缺少同时可观测的发布结果与回滚结果。" );
+
+  const decisionSamples = Number(flow.decision_lead_time_sample_count || 0);
+  const approval = decisionSamples > 0
+    ? {label:"平均审批耗时", value:`${Number(flow.average_decision_lead_minutes || 0).toFixed(1)} 分钟`, detail:`基于 ${decisionSamples} 个已形成决定的审批样本`, available:true}
+    : unavailable("平均审批耗时", "未提供可计算决定耗时的审批样本。" );
+
+  const totalChanges = Number(summary.total_changes || 0);
+  const coverageValues = [
+    coverage.check_run_percent,
+    coverage.artifact_evidence_percent,
+    coverage.rollback_plan_percent,
+    coverage.success_metrics_percent,
+    coverage.progressive_delivery_percent,
+    coverage.auto_rollback_percent,
+  ].map(Number).filter(Number.isFinite);
+  const coverageAverage = coverageValues.length ? coverageValues.reduce((sum, value) => sum + value, 0) / coverageValues.length : 0;
+  const governanceCoverage = totalChanges > 0 && coverageValues.length === 6
+    ? {label:"治理覆盖率", value:formatRate(coverageAverage), detail:`30 天内 ${totalChanges} 条变更的 6 项控制平均覆盖`, available:true}
+    : unavailable("治理覆盖率", "没有足够变更样本计算控制覆盖。" );
+
+  let benefit = {label:"可量化收益", value:"未提供", detail:"尚未收到业务目标或 SLI 对比样本。", available:false};
+  const objectiveSamples = Number(business.objective_sample_count || 0);
+  const sliSamples = Number(business.sli_sample_count || 0);
+  if (objectiveSamples > 0) {
+    benefit = {label:"可量化收益", value:formatRate(business.objective_attainment_rate_percent), detail:`${Number(business.objectives_met || 0)} / ${objectiveSamples} 个业务目标达成`, available:true};
+  } else if (sliSamples > 0) {
+    benefit = {label:"可量化收益", value:formatRate(Number(business.improved_slis || 0) / sliSamples * 100), detail:`${Number(business.improved_slis || 0)} / ${sliSamples} 个真实 SLI 改善`, available:true};
+  }
+
+  return {summary, quality, coverage, incident, rollback, approval, governanceCoverage, benefit};
+}
+
+function renderManagerContext(profile) {
+  const view = managerOutcomeViewModel();
+  const cards = [view.incident, view.rollback, view.approval, view.governanceCoverage, view.benefit].map(item => `
+    <div class="manager-outcome-card ${item.available ? "is-available" : "is-unavailable"}">
+      <span>${escapeHTML(item.label)}</span><strong>${escapeHTML(item.value)}</strong><small>${escapeHTML(item.detail)}</small>
+    </div>`).join("");
+  return `<article class="role-context role-context-manager"><header><div><span class="role-context-kicker">${escapeHTML(profile.label)}</span><h3>只用真实发布结果衡量治理成效</h3><p>${escapeHTML(profile.description)}</p></div><span class="role-context-badge">${escapeHTML(roleLabel(actor()?.role || "管理者"))}</span></header><div class="manager-outcome-grid">${cards}</div></article>`;
+}
+
+function renderManagerEvidencePanel() {
+  const view = managerOutcomeViewModel();
+  const summary = view.summary;
+  const missingSignals = Array.isArray(view.quality.missing_signals) ? view.quality.missing_signals : [];
+  const coverageRows = [
+    ["规则检查", view.coverage.check_run_percent],
+    ["制品证据", view.coverage.artifact_evidence_percent],
+    ["回滚方案", view.coverage.rollback_plan_percent],
+    ["成功指标", view.coverage.success_metrics_percent],
+    ["渐进发布", view.coverage.progressive_delivery_percent],
+    ["自动回滚", view.coverage.auto_rollback_percent],
+  ];
+  const hasCoverage = Number(summary.total_changes || 0) > 0;
+  return `<section class="manager-evidence-grid">
+    <article class="panel"><header class="panel-header"><div><h3>治理覆盖明细</h3><p>${Number(summary.window_days || 30)} 天窗口 · ${Number(summary.total_changes || 0)} 条真实变更</p></div><span class="status ${hasCoverage ? "status-approved" : "status-draft"}"><i></i>${hasCoverage ? "已计算" : "证据不足"}</span></header><div class="panel-body"><div class="metric-bars">${coverageRows.map(item => `<div><div class="metric-bar-head"><span>${item[0]}</span><b>${hasCoverage ? `${Number(item[1] || 0).toFixed(1)}%` : "证据不足"}</b></div><div class="metric-bar-track"><div class="metric-bar-fill" style="width:${hasCoverage ? Math.max(0, Math.min(100, Number(item[1] || 0))) : 0}%;--bar:#2458e6"></div></div></div>`).join("")}</div></div></article>
+    <article class="panel"><header class="panel-header"><div><h3>结果数据质量</h3><p>缺失信号不会被当作成功或收益。</p></div><span class="status ${missingSignals.length ? "status-waiting" : "status-approved"}"><i></i>${missingSignals.length ? `${missingSignals.length} 项缺口` : "信号完整"}</span></header><div class="panel-body"><dl class="manager-evidence-list"><div><dt>统计范围</dt><dd>${escapeHTML(summary.scope || "未提供")}</dd></div><div><dt>生成时间</dt><dd>${summary.generated_at ? formatDate(summary.generated_at) : "未提供"}</dd></div><div><dt>生产变更</dt><dd>${Number(summary.production_changes || 0)}</dd></div><div><dt>已完成变更</dt><dd>${Number(summary.completed_changes || 0)}</dd></div></dl>${missingSignals.length ? `<div class="manager-missing-signals"><strong>当前缺失</strong><ul>${missingSignals.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</ul></div>` : '<p class="manager-data-note">已收到当前统计所需的外部发布结果、回滚、事故与业务信号。</p>'}</div></article>
+  </section>`;
+}
+
+function renderAdminContext(profile) {
+  const activeMembers = (state.users || []).filter(user => user.active !== false).length;
+  const enabledPolicies = (state.policies || []).filter(policy => policy.enabled !== false).length;
+  return `<article class="role-context role-context-admin"><header><div><span class="role-context-kicker">${escapeHTML(profile.label)}</span><h3>完成身份、应用与权限边界配置</h3><p>${escapeHTML(profile.description)}</p></div><span class="role-context-badge">企业管理员</span></header><div class="role-context-metrics"><div><span>已映射服务</span><strong>${(state.apps || []).length}</strong></div><div><span>启用策略</span><strong>${enabledPolicies}</strong></div><div><span>启用成员</span><strong>${activeMembers}</strong></div></div><footer><button class="button button-primary button-small" data-route="settings">管理 CI 身份信任</button><button class="button button-secondary button-small" data-route="apps">维护应用映射</button><button class="button button-secondary button-small" data-route="enterprise">管理成员权限</button></footer></article>`;
+}
+
+function renderAdminWorkbench() {
+  const items = [
+    ["apps", "apps", "应用 / 服务映射", "把仓库、服务、环境与依赖关系绑定到同一治理对象。", "维护映射"],
+    ["settings", "shield", "CI 工作负载信任", "配置 GitHub / GitLab OIDC 不可变身份、ref、workflow 与环境边界。", "管理信任"],
+    ["policies", "shield", "治理策略", "维护确定性检查规则与适用范围，不改变服务端授权。", "查看策略"],
+    ["enterprise", "users", "成员与权限", "管理企业成员、管理员职责与应用级提交 / 审核权限。", "管理权限"],
+  ];
+  return `<section class="admin-workbench-grid">${items.map(item => `<article class="panel admin-workbench-card"><span class="admin-workbench-icon">${svg(item[1])}</span><div><h3>${item[2]}</h3><p>${item[3]}</p></div><button class="button button-secondary button-small" data-route="${item[0]}">${item[4]}${svg("arrow")}</button></article>`).join("")}</section>`;
+}
+
+function renderRoleContext() {
+  const profile = workspaceProfile();
+  if (profile.key === "developer") return renderDeveloperContext(profile);
+  if (profile.key === "manager") return renderManagerContext(profile);
+  if (profile.key === "admin") return renderAdminContext(profile);
+  const activeFindings = (state.changes || []).flatMap(change => (change.findings || []).filter(item => item.status !== "VERIFIED"));
+  if (profile.key === "reviewer") {
+    const pending = (state.changes || []).filter(change => change.status === "WAITING_APPROVAL" && change.submitter_id !== actor()?.id);
+    return `<article class="role-context"><header><div><span class="role-context-kicker">${escapeHTML(profile.label)}</span><h3>先处理需要独立判断的发布证据</h3><p>${escapeHTML(profile.description)}</p></div><span class="role-context-badge">${escapeHTML(roleLabel(actor()?.role || "审核人"))}</span></header><div class="role-context-metrics"><div><span>待独立审批</span><strong>${pending.length}</strong></div><div><span>未闭环风险</span><strong>${activeFindings.length}</strong></div><div><span>验证证据</span><strong>${pending.filter(item => item.experiment).length}</strong></div></div><footer><button class="button button-primary button-small" data-route="approvals">进入审批队列</button><button class="button button-secondary button-small" data-route="changes">查看相关变更</button></footer></article>`;
+  }
+  if (profile.key === "operations") {
+    const now = Date.now();
+    const upcoming = buildReleaseSchedule().filter(item => item.timestamp >= now - 60 * 60 * 1000 && !releaseTerminalStatuses.has(item.change.status));
+    const conflicts = upcoming.filter(item => item.conflictLevel !== "normal");
+    return `<article class="role-context"><header><div><span class="role-context-kicker">${escapeHTML(profile.label)}</span><h3>从发布窗口进入真实运行证据</h3><p>${escapeHTML(profile.description)}</p></div><span class="role-context-badge">${escapeHTML(roleLabel(actor()?.role || "Operations"))}</span></header><div class="role-context-metrics"><div><span>近期发布安排</span><strong>${upcoming.length}</strong></div><div><span>需协调窗口</span><strong>${conflicts.length}</strong></div><div><span>纳管服务</span><strong>${(state.apps || []).length}</strong></div></div><footer><button class="button button-primary button-small" data-route="calendar">打开发布日历</button><button class="button button-secondary button-small" data-route="observability">查看发布观测</button></footer></article>`;
+  }
+  const pending = (state.changes || []).filter(change => change.status === "WAITING_APPROVAL");
+  const highRisk = (state.changes || []).filter(change => change.risk === "HIGH" && !["COMPLETED", "REJECTED"].includes(change.status));
+  return `<article class="role-context"><header><div><span class="role-context-kicker">${escapeHTML(profile.label)}</span><h3>用真实证据维持跨服务治理闭环</h3><p>${escapeHTML(profile.description)}</p></div><span class="role-context-badge">${escapeHTML(roleLabel(actor()?.role || "技术负责人"))}</span></header><div class="role-context-metrics"><div><span>待审批</span><strong>${pending.length}</strong></div><div><span>处理中高风险</span><strong>${highRisk.length}</strong></div><div><span>未闭环证据</span><strong>${activeFindings.length}</strong></div></div><footer><button class="button button-primary button-small" data-route="approvals">查看审批</button><button class="button button-secondary button-small" data-route="policies">查看治理规则</button></footer></article>`;
+}
+
+function renderDeveloperWorkbench() {
+  const mine = (state.changes || []).filter(change => change.submitter_id === actor()?.id).sort((left, right) => changeUpdatedAt(right) - changeUpdatedAt(left)).slice(0, 6);
+  return `<article class="panel role-workbench"><header class="panel-header"><div><h3>我的变更与修复动作</h3><p>只展示是否可发布、问题文件和下一步修复。</p></div><button class="panel-link" data-route="changes">查看全部 →</button></header><div class="panel-body role-workbench-list">${mine.length ? mine.map(change => {
+    const ship = developerShipState(change);
+    const finding = (change.findings || []).find(item => item.status !== "VERIFIED");
+    const file = finding?.resource || finding?.file || (change.artifacts || [])[0]?.path || (change.artifacts || [])[0]?.name || "未定位文件";
+    const fix = finding?.suggestion || finding?.detail || ship.next;
+    return `<button type="button" class="role-workbench-item" data-open-change="${escapeHTML(change.id)}"><span class="status ${ship.label === "可以发布" ? "status-approved" : "status-waiting"}"><i></i>${escapeHTML(ship.label)}</span><strong>${escapeHTML(change.title)}</strong><small>问题文件：${escapeHTML(file)}</small><p>${escapeHTML(fix)}</p></button>`;
+  }).join("") : '<div class="impact-window-empty">当前账号还没有变更记录。</div>'}</div></article>`;
+}
+
+function renderReviewerWorkbench() {
+  const pending = (state.changes || []).filter(change => change.status === "WAITING_APPROVAL" && change.submitter_id !== actor()?.id).slice(0, 8);
+  return `<article class="panel role-workbench"><header class="panel-header"><div><h3>待判断的发布证据</h3><p>风险变化、影响范围、验证证据和审批理由集中在变更详情。</p></div><button class="panel-link" data-route="approvals">进入审批队列 →</button></header><div class="panel-body role-workbench-list">${pending.length ? pending.map(change => {
+    const openFindings = (change.findings || []).filter(item => item.status !== "VERIFIED");
+    const experiment = change.experiment ? (change.experiment.status === "PASSED" ? "验证通过" : "验证未通过") : "NOT_RUN";
+    return `<button type="button" class="role-workbench-item" data-open-change="${escapeHTML(change.id)}">${riskBadge(change.risk)}<strong>${escapeHTML(change.title)}</strong><small>${openFindings.length} 项未闭环风险 · ${escapeHTML(experiment)}</small><p>${escapeHTML(change.review_comment || "尚未形成审批理由，需核对影响与验证证据。")}</p></button>`;
+  }).join("") : '<div class="impact-window-empty">当前没有需要独立审批的变更。</div>'}</div></article>`;
+}
+
+function renderOperationsWorkbench() {
+  const summary = state.governanceOutcomes || {};
+  const operations = summary.operations || {};
+  const business = summary.business || {};
+  const quality = summary.outcome_data_quality || {};
+  const schedule = buildReleaseSchedule().filter(item => !releaseTerminalStatuses.has(item.change.status));
+  const conflicts = schedule.filter(item => item.conflictLevel !== "normal");
+  const active = (state.changes || []).filter(item => ["EXPERIMENT_QUEUED", "EXPERIMENT_RUNNING", "WAITING_APPROVAL", "APPROVED"].includes(item.status));
+  const sliSamples = Number(business.sli_sample_count || 0);
+  const rollbackSamples = Number(operations.rollback_outcome_sample_count || 0);
+  return `<section class="registry-stat-grid operations-focus-stats">
+    <article class="${conflicts.length ? "danger" : "success"}"><span>窗口冲突</span><strong>${conflicts.length}</strong><small>${conflicts.length ? "需要协调同服务或上下游窗口" : "当前未发现共享资源撞车"}</small></article>
+    <article><span>部署阶段</span><strong>${active.length}</strong><small>验证、审批或待执行流程</small></article>
+    <article class="${sliSamples ? "success" : "warning"}"><span>SLI 证据</span><strong>${sliSamples || "NOT_RUN"}</strong><small>${sliSamples ? "真实发布后 SLI 样本" : "尚未收到真实监控信号"}</small></article>
+    <article class="${rollbackSamples ? "warning" : ""}"><span>回滚状态</span><strong>${rollbackSamples || "NOT_RUN"}</strong><small>${quality.rollback_outcome_observable ? "已记录真实回滚结果" : "没有可审计回滚结果"}</small></article>
+  </section><article class="panel role-workbench"><header class="panel-header"><div><h3>近期发布运行队列</h3><p>按窗口、阶段、SLI 与回滚证据处理，不展示开发配置入口。</p></div><button class="panel-link" data-route="calendar">打开日历 →</button></header><div class="panel-body role-workbench-list">${schedule.slice(0, 8).map(item => `<button type="button" class="role-workbench-item" data-open-change="${escapeHTML(item.change.id)}"><span class="status ${item.conflictLevel === "hard" ? "status-failed" : item.conflictLevel === "warning" ? "status-waiting" : "status-approved"}"><i></i>${item.conflictLevel === "hard" ? "同服务冲突" : item.conflictLevel === "warning" ? "上下游重叠" : "窗口正常"}</span><strong>${escapeHTML(item.change.title)}</strong><small>${formatDate(item.change.planned_at)} · ${escapeHTML(item.change.application_name || "未关联服务")}</small><p>${escapeHTML(item.change.release_plan?.strategy || "待登记部署策略")} · ${statusInfo(item.change.status)[0]}</p></button>`).join("") || '<div class="impact-window-empty">当前没有待执行发布计划。</div>'}</div></article>`;
+}
+
 function renderDashboard(main) {
   setHeader("概览");
+  const profile = workspaceProfile();
   const d = state.dashboard || {};
+  if (profile.key === "admin") {
+    main.innerHTML = pageHeading(profile.label, profile.description, `<button class="button button-secondary" data-refresh>${svg("refresh")}刷新</button>`) + renderRoleContext() + renderAdminWorkbench();
+    return;
+  }
+  if (profile.key === "manager") {
+    main.innerHTML = pageHeading(profile.label, profile.description, `<button class="button button-secondary" data-refresh>${svg("refresh")}刷新</button>`) + renderRoleContext() + renderManagerEvidencePanel();
+    return;
+  }
+  if (profile.key === "developer") {
+    main.innerHTML = pageHeading(profile.label, profile.description, `<button class="button button-secondary" data-refresh>${svg("refresh")}刷新</button>`) + renderRoleContext() + renderDeveloperWorkbench();
+    return;
+  }
+  if (profile.key === "reviewer") {
+    main.innerHTML = pageHeading(profile.label, profile.description, `<button class="button button-secondary" data-refresh>${svg("refresh")}刷新</button>`) + renderRoleContext() + renderReviewerWorkbench();
+    return;
+  }
+  if (profile.key === "operations") {
+    main.innerHTML = pageHeading(profile.label, profile.description, `<button class="button button-secondary" data-refresh>${svg("refresh")}刷新</button>`) + renderRoleContext() + renderOperationsWorkbench();
+    return;
+  }
   const dist = d.risk_distribution || {};
   const total = Object.values(dist).reduce((sum, value) => sum + value, 0);
   const recent = d.recent_changes || [];
@@ -789,7 +1125,7 @@ function renderDashboard(main) {
   const cfg = state.config || {};
   const llmReady = !!cfg.llm_configured;
   const canEditIntegrations = !!(actor()?.enterprise_admin || actor()?.role === "技术负责人");
-  const setupBanner = !llmReady ? `
+  const setupBanner = !llmReady && routeAllowed("settings") ? `
     <article class="setup-banner">
       <div class="setup-banner-main">
         <span class="setup-banner-icon">${svg("activity")}</span>
@@ -805,7 +1141,8 @@ function renderDashboard(main) {
         <button type="button" class="button button-secondary" data-create>先建变更单</button>
       </div>
     </article>` : "";
-  main.innerHTML = pageHeading("概览", "当前企业的变更、验证与待审批情况。", `<button class="button button-secondary" data-refresh>${svg("refresh")}刷新</button>`) + `
+  main.innerHTML = pageHeading(profile.label, profile.description, `<button class="button button-secondary" data-refresh>${svg("refresh")}刷新</button>`) + `
+    ${renderRoleContext()}
     ${setupBanner}
     <section class="stats-grid">
       ${statCard("处理中变更", d.pending_count || 0, "<b>实时</b> 汇总全部待处理节点", "database", "#2458e6", "#eaf0ff")}
@@ -855,15 +1192,25 @@ function changeTable(items, compact = false) {
     </tr>`).join("")}</tbody></table>`;
 }
 function emptyState(title, description) {
-  return `<div class="empty-state"><div class="empty-state-icon">${svg("file")}</div><h3>${title}</h3><p>${description}</p><button class="button button-primary" data-create>${svg("plus")}新建变更</button></div>`;
+  const canCreate = ["developer", "lead"].includes(workspaceProfile().key);
+  return `<div class="empty-state"><div class="empty-state-icon">${svg("file")}</div><h3>${title}</h3><p>${description}</p>${canCreate ? `<button class="button button-primary" data-create>${svg("plus")}新建变更</button>` : ""}</div>`;
 }
 async function renderChanges(main) {
-  setHeader("变更单");
+  const profile = workspaceProfile();
+  const copy = profile.key === "developer"
+    ? {header:"我的变更", title:"我的变更", description:"只处理自己提交的发布状态、问题文件和修复动作。"}
+    : profile.key === "reviewer"
+      ? {header:"审批相关变更", title:"审批相关变更", description:"从风险、影响、仿真证据和审批理由进入独立判断。"}
+      : profile.key === "operations"
+        ? {header:"发布运行记录", title:"发布运行记录", description:"按发布阶段、窗口、SLI 与回滚状态查看变更。"}
+        : {header:"变更单", title:"变更单", description:"提交、检查、验证到审批的记录列表。"};
+  const canCreate = ["developer", "lead"].includes(profile.key);
+  setHeader(copy.header);
   if (!state.changeListPage) state.changeListPage = 1;
   const pageSize = 15;
   const seedKeyword = state.pendingChangeFilter || "";
   if (state.pendingChangeFilter) state.pendingChangeFilter = "";
-  main.innerHTML = pageHeading("变更单", "提交、检查、验证到审批的记录列表。", `<button class="button button-primary" type="button" data-create>${svg("plus")}新建变更</button>`) + `
+  main.innerHTML = pageHeading(copy.title, copy.description, canCreate ? `<button class="button button-primary" type="button" data-create>${svg("plus")}新建变更</button>` : "") + `
     <article class="panel">
       <div class="toolbar">
       <div class="filter-group"><input class="filter-input" id="changeFilter" placeholder="标题 / 编号 / 服务" value="${escapeHTML(seedKeyword)}"><select class="filter-select" id="statusFilter"><option value="">全部状态</option>${[...new Set((state.changes || []).map(x=>x.status))].map(status => `<option value="${status}">${statusInfo(status)[0]}</option>`).join("")}</select><select class="filter-select" id="riskFilter"><option value="">全部风险</option><option value="LOW">低</option><option value="MEDIUM">中</option><option value="HIGH">高</option></select></div>
@@ -886,8 +1233,10 @@ async function renderChanges(main) {
     if (risk) q.set("risk", risk);
     try {
       const result = await api("/api/changes?" + q.toString());
-      const items = Array.isArray(result) ? result : (result.items || []);
-      const total = Array.isArray(result) ? result.length : Number(result.total || 0);
+      let items = Array.isArray(result) ? result : (result.items || []);
+      if (profile.key === "developer") items = items.filter(item => item.submitter_id === actor()?.id);
+      if (profile.key === "operations") items = items.filter(item => item.status !== "DRAFT");
+      const total = Array.isArray(result) ? items.length : Number(result.total || items.length);
       const page = Array.isArray(result) ? 1 : Number(result.page || 1);
       const size = Array.isArray(result) ? Math.max(total, 1) : Number(result.page_size || pageSize);
       const table = document.querySelector("#changeTable");
@@ -1196,12 +1545,54 @@ function renderPassportPanel(change) {
   </article>`;
 }
 
+function renderReviewerImpactPanel(change) {
+  return `<article class="panel impact-panel" id="impactGraphPanel" data-change-id="${escapeHTML(change.id)}">
+    <header class="panel-header"><div><h3>影响范围与冲突解释</h3><p>直接资源、上下游、窗口冲突、Owner 与历史结果</p></div><button type="button" class="panel-link" data-load-impact>刷新图谱</button></header>
+    <div class="panel-body" id="impactGraphBody"><div class="blast-placeholder">正在计算可解释影响图谱…</div></div>
+  </article>`;
+}
+
+function renderDeveloperChangeDetail(main, change) {
+  const ship = developerShipState(change);
+  const openFindings = (change.findings || []).filter(item => item.status !== "VERIFIED");
+  const artifacts = change.artifacts || [];
+  main.innerHTML = `<div class="detail-head"><div class="detail-head-main"><a class="back-link" href="#/changes">${svg("back")}返回我的变更</a><h2>${escapeHTML(change.title)}</h2><div class="detail-meta"><code>${escapeHTML(change.id)}</code>${statusBadge(change.status)}<span>更新于 ${formatDate(change.updated_at)}</span></div></div><div class="detail-actions">${actionButtons(change)}</div></div>
+    <section class="developer-answer-grid developer-detail-summary"><div><span>是否可发布</span><strong>${escapeHTML(ship.label)}</strong><small>${escapeHTML(ship.detail)}</small></div><div><span>阻断问题</span><strong>${openFindings.length}</strong><small>${openFindings.length ? "必须处理后重新检查" : "没有未闭环规则项"}</small></div><div><span>问题文件</span><strong>${artifacts.length}</strong><small>${escapeHTML(artifacts.map(item => item.path || item.name || item.kind).filter(Boolean).slice(0, 3).join("；") || "尚未定位")}</small></div><div><span>下一步</span><strong>${escapeHTML(ship.next)}</strong><small>所有动作仍需通过服务端状态与权限校验。</small></div></section>
+    <div class="detail-grid role-detail-grid"><div class="detail-column"><article class="panel"><header class="panel-header"><div><h3>问题文件与制品</h3><p>只展示本次变更实际登记的文件和资源。</p></div></header><div class="panel-body">${renderArtifacts(change)}</div></article><article class="panel"><header class="panel-header"><div><h3>修复方法</h3><p>规则证据、责任人和建议动作。</p></div><span>${openFindings.length} 项待处理</span></header><div class="panel-body"><div class="finding-list">${renderFindings(change)}</div></div></article></div><aside class="detail-column side-column"><article class="panel"><header class="panel-header"><div><h3>发布状态</h3><p>当前流程结论</p></div></header><div class="panel-body side-info-list"><div class="side-info-row"><span>状态</span><strong>${statusInfo(change.status)[0]}</strong></div><div class="side-info-row"><span>环境</span><strong>${escapeHTML(change.environment || "未登记")}</strong></div><div class="side-info-row"><span>计划窗口</span><strong>${formatDate(change.planned_at)}</strong></div><div class="side-info-row"><span>回滚方案</span><strong>${escapeHTML(change.rollback_plan || "待补充")}</strong></div></div></article></aside></div>`;
+}
+
+function renderReviewerChangeDetail(main, change) {
+  const exp = change.experiment;
+  main.innerHTML = `<div class="detail-head"><div class="detail-head-main"><a class="back-link" href="#/approvals">${svg("back")}返回审批队列</a><h2>${escapeHTML(change.title)}</h2><div class="detail-meta"><code>${escapeHTML(change.id)}</code>${riskBadge(change.risk)}${statusBadge(change.status)}<span>更新于 ${formatDate(change.updated_at)}</span></div></div><div class="detail-actions">${actionButtons(change)}</div></div>
+    <div class="detail-grid role-detail-grid"><div class="detail-column"><article class="panel"><header class="panel-header"><div><h3>风险变化与规则证据</h3><p>审批只基于确定性结果与已登记整改证据。</p></div><span>${(change.findings || []).length} 项</span></header><div class="panel-body"><div class="finding-list">${renderFindings(change)}</div></div></article><article class="panel"><header class="panel-header"><div><h3>仿真证据</h3><p>未真实执行时必须保持 NOT_RUN。</p></div>${exp ? `<span class="status ${exp.status === "PASSED" ? "status-approved" : "status-failed"}"><i></i>${escapeHTML(exp.status)}</span>` : '<span class="status status-draft"><i></i>NOT_RUN</span>'}</header><div class="panel-body">${renderExperiment(exp)}</div></article>${renderReviewerImpactPanel(change)}</div><aside class="detail-column side-column"><article class="panel"><header class="panel-header"><div><h3>审批理由</h3><p>责任、版本与人工判断</p></div></header><div class="panel-body side-info-list"><div class="side-info-row"><span>提交人</span><strong>${escapeHTML(change.submitter_name || "未登记")}</strong></div><div class="side-info-row"><span>审批人</span><strong>${escapeHTML(change.reviewer_name || "待独立审批")}</strong></div><div class="side-info-row"><span>审批意见</span><strong>${escapeHTML(change.review_comment || "尚未形成")}</strong></div><div class="side-info-row"><span>规则版本</span><strong>${Number(change.rule_set_version || 0) || "未登记"}</strong></div></div></article><article class="panel"><header class="panel-header"><div><h3>回滚前提</h3><p>审批前必须可执行</p></div></header><div class="panel-body"><p class="change-description">${escapeHTML(change.rollback_plan || "未登记回滚方案，不能形成完整批准证据。")}</p></div></article></aside></div>`;
+  void loadImpactSnapshot(change.id);
+}
+
+function renderOperationsChangeDetail(main, change) {
+  main.innerHTML = `<div class="detail-head"><div class="detail-head-main"><a class="back-link" href="#/calendar">${svg("back")}返回发布日历</a><h2>${escapeHTML(change.title)}</h2><div class="detail-meta"><code>${escapeHTML(change.id)}</code>${statusBadge(change.status)}<span>${escapeHTML(change.environment || "未登记环境")}</span></div></div></div>${renderProcess(change)}
+    <div class="detail-grid role-detail-grid"><div class="detail-column"><article class="panel"><header class="panel-header"><div><h3>部署阶段与观察窗口</h3><p>只展示发布执行所需的阶段、策略和成功指标。</p></div></header><div class="panel-body">${renderReleasePlan(change)}</div></article>${renderImpactPanel(change)}</div><aside class="detail-column side-column"><article class="panel"><header class="panel-header"><div><h3>回滚状态</h3><p>真实结果由 Operations Webhook 写入</p></div></header><div class="panel-body"><p class="change-description">${escapeHTML(change.rollback_plan || "未登记回滚方案")}</p>${change.rollback_sql ? '<div class="approval-notice">已登记数据库回滚 SQL；原文仅对有权限的变更责任人开放。</div>' : '<div class="approval-notice">没有数据库回滚 SQL 证据。</div>'}</div></article><article class="panel"><header class="panel-header"><div><h3>责任与窗口</h3><p>用于协调发布运行</p></div></header><div class="panel-body side-info-list"><div class="side-info-row"><span>服务</span><strong>${escapeHTML(change.application_name || "未关联")}</strong></div><div class="side-info-row"><span>计划窗口</span><strong>${formatDate(change.planned_at)}</strong></div><div class="side-info-row"><span>提交人</span><strong>${escapeHTML(change.submitter_name || "未登记")}</strong></div><div class="side-info-row"><span>当前阶段</span><strong>${statusInfo(change.status)[0]}</strong></div></div></article></aside></div>`;
+  void Promise.allSettled([loadImpactSnapshot(change.id), loadOutcomeSignals(change.id)]);
+}
+
 async function renderChangeDetail(main, id) {
   setHeader("变更详情", "统一变更 / 详情");
   main.innerHTML = '<div class="page-loading"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-panel"></div></div>';
   let change;
   try { change = await api("/api/changes/" + id); } catch (error) { main.innerHTML = emptyState("变更单不存在", error.message); return; }
   state.currentChange = change;
+  const profile = workspaceProfile();
+  if (profile.key === "developer") {
+    renderDeveloperChangeDetail(main, change);
+    return;
+  }
+  if (profile.key === "reviewer") {
+    renderReviewerChangeDetail(main, change);
+    return;
+  }
+  if (profile.key === "operations") {
+    renderOperationsChangeDetail(main, change);
+    return;
+  }
   const exp = change.experiment;
   const analysis = change.analysis;
   main.innerHTML = `
@@ -1279,6 +1670,10 @@ async function renderChangeDetail(main, id) {
 
       </aside>
     </div>`;
+  void Promise.allSettled([
+    loadImpactSnapshot(change.id),
+    loadOutcomeSignals(change.id),
+  ]);
 }
 
 function renderComments(comments) {
@@ -1515,67 +1910,95 @@ function renderApprovals(main) {
   main.innerHTML = pageHeading("待审批", "核对规则结果、验证记录与回滚方案后批准或驳回。") + `<article class="panel"><div class="toolbar"><div class="filter-group"><span class="approval-notice">${escapeHTML(actor().name)} · ${escapeHTML(actor().role)}</span></div><span class="result-count">${items.length} 项</span></div><div class="table-wrap">${changeTable(items)}</div></article>`;
 }
 
-function renderBlastRadiusHTML(data) {
-  if (!data || !Array.isArray(data.nodes)) return `<div class="blast-placeholder">暂无结果</div>`;
-  const nodes = data.nodes || [];
-  const down = nodes.filter(n => n.direction === "downstream");
-  const up = nodes.filter(n => n.direction === "upstream");
-  const epi = nodes.find(n => n.direction === "epicenter");
-  const chip = (n) => `<div class="blast-node blast-${escapeHTML(n.direction || "")}${n.is_core ? " is-core" : ""}" title="${escapeHTML(n.owner || "")}">
-    <em>${escapeHTML(n.hop_label || "")}</em>
-    <strong>${escapeHTML(n.name || n.application_id || "")}</strong>
-    <span>${escapeHTML(n.owner || "未登记负责人")}</span>
-    <b>事故 ${Number(n.incident_count || 0)} · 高风险 ${Number(n.high_risk_changes || 0)}</b>
-  </div>`;
-  return `<div class="blast-result">
-    <div class="blast-summary"><strong>${escapeHTML(data.summary || "")}</strong><span class="blast-hint">${escapeHTML(data.risk_hint || "")}</span></div>
-    <div class="blast-stats">
-      <span>波及 <b>${Number(data.affected_count || 0)}</b> 服务</span>
-      <span>下游 <b>${Number(data.downstream_hops || 0)}</b> 跳</span>
-      <span>核心链路 <b>${Number(data.core_path_count || 0)}</b></span>
-    </div>
-    <div class="blast-map">
-      <div class="blast-col"><h5>上游依赖</h5>${up.length ? up.map(chip).join("") : "<em class='muted'>无</em>"}</div>
-      <div class="blast-col blast-center"><h5>震中</h5>${epi ? chip(epi) : "<em class='muted'>—</em>"}</div>
-      <div class="blast-col"><h5>下游波及</h5>${down.length ? down.map(chip).join("") : "<em class='muted'>无</em>"}</div>
-    </div>
+function renderImpactSnapshotHTML(data) {
+  if (!data || !Array.isArray(data.direct_impact)) return `<div class="blast-placeholder">暂无图谱结果</div>`;
+  const resourceChip = resource => `<span class="impact-resource-chip"><b>${escapeHTML(resource.kind || "RESOURCE")}</b>${escapeHTML(resource.name || resource.id || "—")}${resource.owner ? `<small>${escapeHTML(resource.owner)}</small>` : ""}</span>`;
+  const dependencyList = items => items?.length ? items.map(item => `<div class="impact-dependency-item"><strong>${escapeHTML(item.resource?.name || item.resource?.id || "—")}</strong><span>${Number(item.hops || 0)} 跳 · ${escapeHTML(item.resource?.owner || "未登记 Owner")}</span><small>${escapeHTML(item.reason || "")}</small></div>`).join("") : '<div class="impact-window-empty">无</div>';
+  const conflicts = data.conflicts || [];
+  const history = data.related_history || [];
+  return `<div class="impact-v2">
+    <div class="impact-v2-summary"><div><strong>${data.direct_impact.length}</strong><span>直接资源</span></div><div><strong>${(data.upstream_impact || []).length}</strong><span>上游</span></div><div><strong>${(data.downstream_impact || []).length}</strong><span>下游</span></div><div class="${conflicts.length ? "danger" : ""}"><strong>${conflicts.length}</strong><span>窗口冲突</span></div></div>
+    <div class="impact-v2-section"><h5>直接影响资源</h5><div class="impact-resource-list">${data.direct_impact.map(resourceChip).join("")}</div></div>
+    <div class="impact-v2-columns"><div><h5>上游影响</h5>${dependencyList(data.upstream_impact)}</div><div><h5>下游影响</h5>${dependencyList(data.downstream_impact)}</div></div>
+    <div class="impact-v2-section"><h5>冲突解释</h5>${conflicts.length ? conflicts.map(item => `<button type="button" class="impact-conflict-card" data-open-change="${escapeHTML(item.change_id)}"><span class="risk risk-${item.severity === "HIGH" ? "high" : "medium"}"><i></i>${escapeHTML(item.severity)}</span><strong>${escapeHTML(item.title || item.change_id)}</strong><small>${formatDate(item.planned_at)} · 重叠 ${Number(item.overlap_minutes || 0)} 分钟</small><ul>${(item.reasons || []).map(reason => `<li>${escapeHTML(reason)}</li>`).join("")}</ul><em>${escapeHTML(item.recommendation || "")}</em></button>`).join("") : '<div class="impact-window-empty">同企业、同环境、同保护窗口内未发现共享资源冲突。</div>'}</div>
+    <div class="impact-v2-section"><h5>Owner 与建议审批人</h5><div class="impact-approver-list">${(data.recommended_approvers || []).map(item => `<span><b>${escapeHTML(item.name)}</b><small>${escapeHTML(item.role)} · ${escapeHTML(item.reason)}</small></span>`).join("") || '<em class="muted">暂无推荐</em>'}</div></div>
+    <div class="impact-v2-section"><h5>相关事故 / 回滚历史</h5>${history.length ? history.map(item => `<div class="impact-history-item"><span>${escapeHTML(item.kind)} · ${escapeHTML(item.status)}</span><strong>${escapeHTML(item.incident_id || item.operation_id || item.change_id)}</strong><small>${formatDate(item.occurred_at)} · ${escapeHTML(item.reason || "")}</small></div>`).join("") : '<div class="impact-window-empty">没有收到与共享资源关联的真实事故或回滚信号。</div>'}</div>
+    <details class="impact-explanations"><summary>查看计算依据与快照摘要</summary><ul>${(data.explanations || []).map(item => `<li>${escapeHTML(item)}</li>`).join("")}</ul><code>${escapeHTML(data.snapshot_digest || "")}</code></details>
   </div>`;
 }
 
-function renderEfficacyHTML(data) {
-  if (!data) return `<div class="blast-placeholder">暂无结果</div>`;
-  const tone = ({IMPROVED:"ok", REGRESSED:"bad", NEUTRAL:"mid", PENDING:"wait"}[data.status] || "mid");
-  return `<div class="efficacy-result efficacy-${tone}">
-    <div class="efficacy-verdict"><span class="efficacy-status">${escapeHTML(data.status || "")}</span><strong>${escapeHTML(data.verdict || "")}</strong></div>
-    <div class="efficacy-metrics">
-      <div><span>错误率</span><b>${Number(data.error_rate_before || 0).toFixed(2)}% → ${Number(data.error_rate_after || 0).toFixed(2)}%</b><small>${escapeHTML(data.window_before || "")} / ${escapeHTML(data.window_after || "")}</small></div>
-      <div><span>延迟 P95</span><b>${Number(data.p95_before_ms || 0).toFixed(1)}ms → ${Number(data.p95_after_ms || 0).toFixed(1)}ms</b><small>${escapeHTML(data.source || "mock")}</small></div>
-    </div>
-    ${data.knowledge_note ? `<p class="efficacy-knowledge">${escapeHTML(data.knowledge_note)}</p>` : ""}
-  </div>`;
+function renderOutcomeSignalsHTML(data) {
+  const status = data?.status || "NOT_RUN";
+  const signals = Array.isArray(data?.signals) ? data.signals : [];
+  const statusClass = status === "PASS" ? "status-approved" : status === "WARN" ? "status-waiting" : status === "BLOCK" ? "status-failed" : "status-draft";
+  if (!signals.length) {
+    return `<div class="outcome-not-run"><span class="status ${statusClass}"><i></i>NOT_RUN</span><strong>尚未收到发布后证据</strong><p>这不是成功结论。请配置 Operations Webhook，在真实发布后发送 SLI、事故或回滚结果。</p><button class="button button-secondary button-small" data-route="settings">配置证据接入</button></div>`;
+  }
+  return `<div class="outcome-evidence"><div class="outcome-evidence-head"><span class="status ${statusClass}"><i></i>${escapeHTML(status)}</span><strong>${signals.length} 条真实外部信号</strong></div>${signals.map(item => `<article><header><b>${escapeHTML(item.kind)}</b><span>${escapeHTML(item.status)}</span><time>${formatDate(item.occurred_at)}</time></header><p>${escapeHTML(item.detail || item.metric_name || item.incident_id || item.operation_id || "已记录外部证据")}</p>${item.metric_name ? `<small>${escapeHTML(item.metric_name)}：${item.baseline_value ?? "—"} → ${item.observed_value ?? "—"} ${escapeHTML(item.metric_unit || "")}</small>` : ""}${item.external_url ? `<a href="${escapeHTML(item.external_url)}" target="_blank" rel="noreferrer">打开来源证据 →</a>` : ""}</article>`).join("")}</div>`;
 }
 
-async function loadBlastRadius(changeId) {
-  const body = document.querySelector("#blastRadiusBody");
-  if (body) body.innerHTML = `<div class="blast-placeholder">正在推演爆炸半径…</div>`;
+function renderActionableFailure(error) {
+  const link = error.deepLink ? `<a class="button button-secondary button-small" href="${escapeHTML(error.deepLink)}">打开修复页面</a>` : "";
+  return `<div class="actionable-error"><code>${escapeHTML(error.code || "REQUEST_FAILED")}</code><strong>${escapeHTML(error.message || "请求失败")}</strong><span>资源：${escapeHTML(error.resource || "request")}</span><span>证据：${escapeHTML(error.evidence || "—")}</span><p>${escapeHTML(error.fix || "检查配置后重试。")}</p>${link}</div>`;
+}
+
+async function loadImpactSnapshot(changeId) {
+  const panel = document.querySelector("#impactGraphPanel");
+  const body = document.querySelector("#impactGraphBody");
+  const button = panel?.querySelector("[data-load-impact]");
+  if (!panel || panel.getAttribute("data-change-id") !== changeId || !body) return;
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "刷新中…";
+  }
+  if (body) body.innerHTML = `<div class="blast-placeholder">正在计算资源关系与冲突…</div>`;
   try {
-    const data = await api("/api/changes/" + changeId + "/blast-radius");
-    if (body) body.innerHTML = renderBlastRadiusHTML(data);
+    const data = await api("/api/changes/" + changeId + "/impact");
+    if (document.querySelector("#impactGraphPanel")?.getAttribute("data-change-id") === changeId) {
+      body.innerHTML = renderImpactSnapshotHTML(data);
+    }
   } catch (error) {
-    if (body) body.innerHTML = `<div class="blast-placeholder">计算失败：${escapeHTML(error.message)}</div>`;
-    toast("爆炸半径计算失败", "error", error.message);
+    if (document.querySelector("#impactGraphPanel")?.getAttribute("data-change-id") === changeId) {
+      body.innerHTML = renderActionableFailure(error);
+      toast("影响图谱计算失败", "error", `${error.code || "REQUEST_FAILED"} · ${error.fix || error.message}`);
+    }
+  } finally {
+    if (document.querySelector("#impactGraphPanel")?.getAttribute("data-change-id") === changeId && button) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = "刷新图谱";
+    }
   }
 }
 
-async function loadEfficacy(changeId) {
-  const body = document.querySelector("#efficacyBody");
-  if (body) body.innerHTML = `<div class="blast-placeholder">正在拉取效果指标…</div>`;
+async function loadOutcomeSignals(changeId) {
+  const panel = document.querySelector("#outcomeEvidencePanel");
+  const body = document.querySelector("#outcomeEvidenceBody");
+  const button = panel?.querySelector("[data-load-outcomes]");
+  if (!panel || panel.getAttribute("data-change-id") !== changeId || !body) return;
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "刷新中…";
+  }
+  if (body) body.innerHTML = `<div class="blast-placeholder">正在读取发布结果证据…</div>`;
   try {
-    const data = await api("/api/changes/" + changeId + "/efficacy");
-    if (body) body.innerHTML = renderEfficacyHTML(data);
+    const data = await api("/api/changes/" + changeId + "/outcomes");
+    if (document.querySelector("#outcomeEvidencePanel")?.getAttribute("data-change-id") === changeId) {
+      body.innerHTML = renderOutcomeSignalsHTML(data);
+    }
   } catch (error) {
-    if (body) body.innerHTML = `<div class="blast-placeholder">拉取失败：${escapeHTML(error.message)}</div>`;
-    toast("效果验证失败", "error", error.message);
+    if (document.querySelector("#outcomeEvidencePanel")?.getAttribute("data-change-id") === changeId) {
+      body.innerHTML = renderActionableFailure(error);
+      toast("发布结果读取失败", "error", `${error.code || "REQUEST_FAILED"} · ${error.fix || error.message}`);
+    }
+  } finally {
+    if (document.querySelector("#outcomeEvidencePanel")?.getAttribute("data-change-id") === changeId && button) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      button.textContent = "刷新证据";
+    }
   }
 }
 
@@ -1628,6 +2051,7 @@ function renderIncidentBacktrace(main) {
 
 function renderObservability(main) {
   setHeader("发布观测");
+  const settingsAllowed = routeAllowed("settings");
   const changes = [...state.changes].sort((left,right) => new Date(right.updated_at) - new Date(left.updated_at));
   const active = changes.filter(item => ["EXPERIMENT_QUEUED","EXPERIMENT_RUNNING","WAITING_APPROVAL","APPROVED"].includes(item.status));
   const autoRollback = changes.filter(item => item.release_plan?.auto_rollback).length;
@@ -1639,14 +2063,14 @@ function renderObservability(main) {
     const validation = change.experiment;
     return `<tr data-open-change="${change.id}"><td><div class="change-title"><span class="type-icon">${svg("activity")}</span><div><strong>${escapeHTML(change.title)}</strong><span>${escapeHTML(change.application_name)} · ${escapeHTML(change.environment)}</span></div></div></td><td><strong>${escapeHTML(plan.strategy || "待制定")}</strong><span class="table-subtext">首批 ${Number(plan.canary_percent || 0)}%</span></td><td><strong>${Number(plan.observation_minutes || 0)} 分钟</strong><span class="table-subtext">${plan.auto_rollback ? "允许自动中止" : "人工决策"}</span></td><td><div class="metric-chip-list">${metrics.length ? metrics.slice(0,3).map(item => `<span>${escapeHTML(item)}</span>`).join("") : '<span class="muted">待补充</span>'}</div></td><td>${validation ? `<span class="status ${validation.status === "PASSED" ? "status-approved" : "status-failed"}"><i></i>${validation.status === "PASSED" ? "验证通过" : "验证失败"}</span>` : '<span class="status status-draft"><i></i>未验证</span>'}</td><td>${statusBadge(change.status)}</td></tr>`;
   }).join("");
-  main.innerHTML = pageHeading("发布观测", "发布计划与验证结果。监控系统接入后可补真实指标。", `<button class="button button-secondary" data-route="settings">${svg("settings")}集成设置</button>`) + `
+  main.innerHTML = pageHeading("发布观测", "发布计划与验证结果。监控系统接入后可补真实指标。", settingsAllowed ? `<button class="button button-secondary" data-route="settings">${svg("settings")}集成设置</button>` : `<button class="button button-secondary" data-route="calendar">${svg("calendar")}返回发布窗口</button>`) + `
     <section class="registry-stat-grid observation-stats">
       <article><span>进行中的治理流程</span><strong>${active.length}</strong><small>验证、审批或待执行</small></article>
       <article><span>允许自动中止</span><strong>${autoRollback}</strong><small>异常时由发布系统执行动作</small></article>
       <article><span>灰度 / 分批策略</span><strong>${canary}</strong><small>避免生产环境一次性全量</small></article>
       <article class="danger"><span>待发布审批</span><strong>${pending}</strong><small>需要人工核对证据</small></article>
     </section>
-    <section class="integration-strip"><div><span class="integration-icon">${svg("activity")}</span><div><strong>Prometheus</strong><span>待配置 · 当前不展示虚构实时指标</span></div></div><div><span class="integration-icon">${svg("code")}</span><div><strong>Jenkins / Argo CD</strong><span>待配置 · 当前只管理发布计划与证据</span></div></div><button class="button button-secondary button-small" data-route="settings">前往集成设置</button></section>
+    <section class="integration-strip"><div><span class="integration-icon">${svg("activity")}</span><div><strong>Prometheus</strong><span>待配置 · 当前不展示虚构实时指标</span></div></div><div><span class="integration-icon">${svg("code")}</span><div><strong>Jenkins / Argo CD</strong><span>待配置 · 当前只管理发布计划与证据</span></div></div>${settingsAllowed ? '<button class="button button-secondary button-small" data-route="settings">前往集成设置</button>' : '<span class="muted">集成配置由企业管理员维护</span>'}</section>
     <article class="panel"><header class="panel-header"><div><h3>发布计划与验证证据</h3><p>这些数据来自变更单和预发布验证，不代表已连接生产监控。</p></div><span>${changes.length} 条记录</span></header><div class="table-wrap"><table class="data-table observation-table"><thead><tr><th>变更与服务</th><th>发布策略</th><th>观察窗口</th><th>成功指标</th><th>验证证据</th><th>当前状态</th></tr></thead><tbody>${rows || `<tr><td colspan="6">${emptyState("暂无发布记录","创建变更单并完成规则检查后，此处将形成发布观测记录。")}</td></tr>`}</tbody></table></div></article>`;
 }
 
@@ -2009,13 +2433,15 @@ function switchAuthTab(tab) {
 }
 
 function roleBadge(role) {
-  const cls = role === "技术负责人" ? "owner" : role === "数据库审核人" ? "reviewer" : "developer";
+  const cls = role === "技术负责人" ? "owner" : role === "数据库审核人" ? "reviewer" : role === "运维" ? "operations" : role === "管理者" ? "manager" : "developer";
   return `<span class="role-badge role-${cls}">${escapeHTML(roleLabel(role))}</span>`;
 }
 
 function roleCaption(role) {
   if (role === "技术负责人") return "高风险批准与规则管理";
   if (role === "数据库审核人") return "风险复核与变更审批";
+  if (role === "运维") return "窗口、部署阶段、SLI 与回滚只读视图";
+  if (role === "管理者") return "事故率、回滚率、审批耗时、覆盖率与收益";
   return "变更提交与整改执行";
 }
 
@@ -2037,7 +2463,7 @@ async function renderEnterprise(main) {
   const members = state.users;
   const invites = state.invites;
   const active = members.filter(item => item.active).length;
-  const reviewers = members.filter(item => item.active && item.role !== "后端开发").length;
+  const reviewers = members.filter(item => item.active && ["数据库审核人", "技术负责人"].includes(item.role)).length;
   main.innerHTML = pageHeading("企业工作空间", "管理企业身份、员工职责和单点登录加入策略，保证提交人与审核人职责分离。", admin ? `<button class="button button-primary" data-invite-create>${svg("plus")}邀请员工</button>` : "") + `
     <section class="enterprise-summary">
       <article class="enterprise-identity"><div class="enterprise-logo">${escapeHTML(initials(org.name))}</div><div><span class="eyebrow">当前企业</span><h3>${escapeHTML(org.name)}</h3><p>${escapeHTML(org.slug)} · ${org.sso_enforced ? "强制单点登录" : "允许密码登录"}</p></div><span class="status status-approved"><i></i>独立空间</span></article>
@@ -2062,7 +2488,7 @@ async function renderEnterprise(main) {
         </div></section>
       </aside>
     </div>
-    <section class="responsibility-grid"><article><b>01</b><h4>后端开发</h4><p>创建变更、提交检查和执行整改，不能审批自己的变更。</p></article><article><b>02</b><h4>数据库审核人</h4><p>派发整改、独立复核，并审批中低风险变更。</p></article><article><b>03</b><h4>技术负责人</h4><p>管理风险规则，并负责高风险变更批准。</p></article><article><b>04</b><h4>企业管理员</h4><p>邀请、停用员工，维护企业域名与单点登录策略。</p></article></section>`;
+    <section class="responsibility-grid"><article><b>01</b><h4>后端开发</h4><p>只处理是否可发布、问题文件和修复动作，不能审批自己的变更。</p></article><article><b>02</b><h4>发布审核人</h4><p>只核对风险变化、影响范围、仿真证据和审批理由。</p></article><article><b>03</b><h4>运维</h4><p>只查看窗口冲突、部署阶段、SLI 与回滚状态。</p></article><article><b>04</b><h4>管理者</h4><p>只查看事故率、回滚率、审批耗时、治理覆盖率与收益。</p></article><article><b>05</b><h4>技术负责人</h4><p>管理跨服务治理并负责高风险变更批准。</p></article><article><b>06</b><h4>企业管理员</h4><p>维护应用映射、身份信任、策略与成员权限。</p></article></section>`;
 }
 
 function openInviteModal() {
@@ -2087,12 +2513,13 @@ async function openMemberModal(member) {
     document.querySelector("#memberRole").value = current.role;
     document.querySelector("#memberActive").checked = Boolean(current.active);
     document.querySelector("#memberEnterpriseAdmin").checked = Boolean(current.enterprise_admin);
-  document.querySelector("#memberAdminHint").textContent = current.enterprise_admin ? "企业管理员拥有全部服务权限；下方配置会在撤销管理员身份后生效。" : "未勾选的服务不会出现在该成员的工作台。";
+    document.querySelector("#memberAdminHint").textContent = current.enterprise_admin ? "企业管理员拥有全部服务权限；下方配置会在撤销管理员身份后生效。" : "未勾选的服务不会出现在该成员的工作台。";
     const grantByApp = new Map(state.editingMemberAccess.map(item => [item.application_id, item]));
     document.querySelector("#memberApplicationGrants").innerHTML = state.apps.map(app => {
       const grant = grantByApp.get(app.id) || {};
       return "<article data-grant-app=\"" + escapeHTML(app.id) + "\"><div><strong>" + escapeHTML(app.name) + "</strong><small>" + escapeHTML(app.database) + " / " + escapeHTML(app.schema) + "</small></div><label><input type=\"checkbox\" data-grant-submit " + (grant.can_submit ? "checked" : "") + ">可提交</label><label><input type=\"checkbox\" data-grant-review " + (grant.can_review ? "checked" : "") + ">可审核</label></article>";
   }).join("") || "<p class=\"muted\">请先纳管业务服务。</p>";
+    updateMemberGrantMode(current.role);
     setModalOpen(document.querySelector("#memberModal"), true);
   } catch (error) {
     toast("成员权限读取失败", "error", error.message);
@@ -2102,6 +2529,20 @@ function closeMemberModal() {
   setModalOpen(document.querySelector("#memberModal"), false);
   state.editingMember = null;
   state.editingMemberAccess = [];
+}
+
+function updateMemberGrantMode(role = document.querySelector("#memberRole")?.value) {
+  const readOnly = ["运维", "管理者"].includes(role);
+  document.querySelectorAll("#memberApplicationGrants input").forEach(input => {
+    input.disabled = readOnly;
+    if (readOnly) input.checked = false;
+  });
+  const hint = document.querySelector("#memberAdminHint");
+  if (hint) {
+    hint.textContent = readOnly
+      ? role + "为组织级只读角色：可查看对应工作台，但不能提交、审核或修改治理配置。"
+      : (document.querySelector("#memberEnterpriseAdmin")?.checked ? "企业管理员拥有全部服务权限；下方配置会在撤销管理员身份后生效。" : "未勾选的服务不会出现在该成员的工作台。");
+  }
 }
 
 function renderApps(main) {
@@ -2177,6 +2618,209 @@ function usageBarHTML(label, used, limit) {
   </div>`;
 }
 
+function normalizeCITrusts(value) {
+  return Array.isArray(value) ? value : Array.isArray(value?.trusts) ? value.trusts : [];
+}
+
+function ciProviderLabel(provider) {
+  return provider === "GITLAB" ? "GitLab CI" : "GitHub Actions";
+}
+
+function ciTrustApplication(trust) {
+  return (state.apps || []).find(app => app.id === trust?.application_id) || null;
+}
+
+function renderCITrustPanel(trusts, loadError, canManage) {
+  const safeTrusts = Array.isArray(trusts) ? trusts : [];
+  const status = canManage
+    ? `<span class="status ${loadError ? "status-failed" : safeTrusts.some(item => item.enabled) ? "status-approved" : "status-draft"}"><i></i>${loadError ? "读取失败" : `${safeTrusts.filter(item => item.enabled).length} 个启用`}</span>`
+    : '<span class="status status-draft"><i></i>只读说明</span>';
+  let content = "";
+  if (!canManage) {
+    content = `<div class="ci-trust-permission">${svg("lock")}<div><strong>只有企业管理员可查看和修改具体信任绑定</strong><p>当前身份仍可查看接入诊断说明。请由企业管理员一次性配置不可变仓库 / 项目 ID、完整 ref、环境与 workflow 边界。</p></div></div>`;
+  } else if (loadError) {
+    content = `<div class="ci-trust-error">${renderActionableFailure(loadError)}<button type="button" class="button button-secondary button-small" data-ci-trust-retry>${svg("refresh")}重新读取</button></div>`;
+  } else if (!safeTrusts.length) {
+    content = `<div class="ci-trust-empty">${svg("shield")}<strong>尚未建立 CI 工作负载信任</strong><p>先把一个 GitHub Actions 或 GitLab CI 身份绑定到已纳管服务与环境。没有信任时，CI OIDC 交换会安全拒绝。</p><button type="button" class="button button-primary button-small" data-ci-trust-create ${state.apps?.length ? "" : "disabled"}>${svg("plus")}创建第一条信任</button>${state.apps?.length ? "" : '<small>请先在“服务配置”中纳管业务服务。</small>'}</div>`;
+  } else {
+    content = `<div class="ci-trust-list">${safeTrusts.map(trust => {
+      const app = ciTrustApplication(trust);
+      const github = trust.provider === "GITHUB";
+      const immutable = github
+        ? [["Repository ID", trust.repository_id], ["Owner ID", trust.repository_owner_id]]
+        : [["Project ID", trust.project_id], ["Namespace ID", trust.namespace_id]];
+      const refs = Array.isArray(trust.allowed_refs) ? trust.allowed_refs : [];
+      const workflows = Array.isArray(trust.allowed_workflows) ? trust.allowed_workflows : [];
+      return `<article class="ci-trust-card ${trust.enabled ? "" : "is-disabled"}">
+        <header><div class="ci-trust-provider"><span class="ci-provider-mark ci-provider-${github ? "github" : "gitlab"}">${github ? "GH" : "GL"}</span><div><span>${escapeHTML(ciProviderLabel(trust.provider))} · ${escapeHTML(app?.name || trust.application_id || "未知服务")}</span><strong>${escapeHTML(trust.repository_path || "未登记仓库路径")}</strong><small>${escapeHTML(trust.environment || "未登记环境")} · 更新于 ${formatDate(trust.updated_at)}</small></div></div><div class="ci-trust-card-actions"><span class="status ${trust.enabled ? "status-approved" : "status-draft"}"><i></i>${trust.enabled ? "已启用" : "已停用"}</span><button type="button" class="button button-secondary button-small" data-ci-trust-edit="${escapeHTML(trust.id)}">编辑</button></div></header>
+        <div class="ci-trust-core"><div><span>Audience</span><code>${escapeHTML(trust.audience || "—")}</code></div>${immutable.map(item => `<div><span>${item[0]}</span><code>${escapeHTML(item[1] || "—")}</code></div>`).join("")}<div><span>Application ID</span><code>${escapeHTML(trust.application_id || "—")}</code></div></div>
+        <details class="ci-trust-issuer"><summary>Issuer 与 JWKS 诊断</summary><div><span>Issuer</span><code>${escapeHTML(trust.issuer || "—")}</code></div><div><span>JWKS</span><code>${escapeHTML(trust.jwks_url || "—")}</code></div></details>
+        <div class="ci-trust-scopes"><div><span>允许 Ref</span><div class="ci-scope-chips">${refs.length ? refs.map(item => `<code>${escapeHTML(item)}</code>`).join("") : '<em>未配置</em>'}</div></div><div><span>Workflow / Job</span><div class="ci-scope-chips">${workflows.length ? workflows.map(item => `<code>${escapeHTML(item)}</code>`).join("") : '<em>未额外限制</em>'}</div></div></div>
+        <div class="ci-trust-protections"><span class="${trust.require_protected_ref ? "is-on" : ""}">${trust.require_protected_ref ? "✓" : "—"} 受保护 Ref</span><span class="${trust.require_protected_environment ? "is-on" : ""}">${trust.require_protected_environment ? "✓" : "—"} 受保护环境</span><span>不保存 OIDC 原始令牌</span></div>
+      </article>`;
+    }).join("")}</div>`;
+  }
+  return `<article class="panel ci-trust-panel" id="ciTrustPanel"><header class="panel-header"><div><h3>CI 工作负载信任</h3><p>用 GitHub / GitLab OIDC 的不可变身份约束通行证交换；ChangeGuard 不是 CI Runner。</p></div><div class="ci-trust-panel-actions">${status}${canManage ? `<button type="button" class="button button-primary button-small" data-ci-trust-create ${state.apps?.length ? "" : "disabled"}>${svg("plus")}新建信任</button>` : ""}</div></header><div class="panel-body"><div class="ci-trust-runtime-note"><span>${svg("shield")}</span><p><strong>短期身份、一次配置。</strong> CI 在运行时获取短期 OIDC token 并直接交换通行证；管理员只维护 issuer、audience、不可变 ID、ref、workflow 与环境边界。不要把 token 粘贴到页面或日志。</p></div>${content}</div></article>`;
+}
+
+const ciProviderDefaults = {
+  GITHUB: {
+    issuer: "https://token.actions.githubusercontent.com",
+    jwks_url: "https://token.actions.githubusercontent.com/.well-known/jwks"
+  },
+  GITLAB: {
+    issuer: "https://gitlab.com",
+    jwks_url: "https://gitlab.com/oauth/discovery/keys"
+  }
+};
+
+function repositoryPathFromApp(application) {
+  const raw = String(application?.repository_url || "").trim();
+  if (!raw) return "";
+  try { return new URL(raw).pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, ""); }
+  catch (_) { return raw.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, ""); }
+}
+
+function updateCIProviderFields(form, applyDefaults = false) {
+  if (!form) return;
+  const provider = String(form.elements.namedItem("provider")?.value || "GITHUB").toUpperCase();
+  document.querySelectorAll("[data-ci-provider-fields]").forEach(group => {
+    const visible = group.getAttribute("data-ci-provider-fields") === provider;
+    group.classList.toggle("is-hidden", !visible);
+    group.querySelectorAll("input").forEach(input => {
+      input.disabled = !visible;
+      input.required = visible;
+    });
+  });
+  if (!applyDefaults) return;
+  const defaults = ciProviderDefaults[provider] || ciProviderDefaults.GITHUB;
+  const knownIssuer = Object.values(ciProviderDefaults).map(item => item.issuer);
+  const knownJWKS = Object.values(ciProviderDefaults).map(item => item.jwks_url);
+  const issuer = form.elements.namedItem("issuer");
+  const jwks = form.elements.namedItem("jwks_url");
+  const audience = form.elements.namedItem("audience");
+  if (!issuer.value.trim() || knownIssuer.includes(issuer.value.trim())) issuer.value = defaults.issuer;
+  if (!jwks.value.trim() || knownJWKS.includes(jwks.value.trim())) jwks.value = defaults.jwks_url;
+  if (!audience.value.trim()) audience.value = "changeguard-ci";
+  if (!state.editingCITrust) {
+    form.elements.namedItem("require_protected_ref").checked = provider === "GITLAB";
+    form.elements.namedItem("require_protected_environment").checked = provider === "GITLAB";
+  }
+}
+
+function applyCITrustApplicationDefaults(form, force = false) {
+  if (!form || state.editingCITrust) return;
+  const application = (state.apps || []).find(app => app.id === form.elements.namedItem("application_id")?.value);
+  const repositoryPath = form.elements.namedItem("repository_path");
+  const environment = form.elements.namedItem("environment");
+  if (repositoryPath && (force || !repositoryPath.value.trim())) repositoryPath.value = repositoryPathFromApp(application);
+  if (environment && (force || !environment.value.trim())) environment.value = application?.environment || "production";
+}
+
+function openCITrustModal(trust = null) {
+  if (!actor()?.enterprise_admin) {
+    toast("只有企业管理员可管理 CI 信任", "error", "服务端仍会独立校验企业管理员身份。");
+    return;
+  }
+  if (!state.apps?.length) {
+    toast("请先纳管业务服务", "error", "CI 信任必须绑定当前企业的 application_id。");
+    return;
+  }
+  const form = document.querySelector("#ciTrustForm");
+  if (!form) return;
+  state.editingCITrust = trust || null;
+  form.reset();
+  form.elements.namedItem("application_id").innerHTML = state.apps.map(app => `<option value="${escapeHTML(app.id)}">${escapeHTML(app.name)} · ${escapeHTML(app.environment || "未配置环境")}</option>`).join("");
+  document.querySelector("#ciTrustModalTitle").textContent = trust ? "编辑 CI 信任" : "创建 CI 信任";
+  document.querySelector("#ciTrustModalDescription").textContent = trust ? "更新身份边界或用启用开关安全停用；不提供删除操作。" : "把 GitHub Actions 或 GitLab CI 的不可变身份绑定到服务与环境。";
+  document.querySelector("#saveCITrustButton").textContent = trust ? "保存信任" : "创建信任";
+  if (trust) {
+    for (const name of ["provider", "application_id", "repository_path", "environment", "issuer", "jwks_url", "audience", "repository_id", "repository_owner_id", "project_id", "namespace_id"]) {
+      const field = form.elements.namedItem(name);
+      if (field) field.value = trust[name] || "";
+    }
+    form.elements.namedItem("allowed_refs").value = (trust.allowed_refs || []).join("\n");
+    form.elements.namedItem("allowed_workflows").value = (trust.allowed_workflows || []).join("\n");
+    form.elements.namedItem("require_protected_ref").checked = Boolean(trust.require_protected_ref);
+    form.elements.namedItem("require_protected_environment").checked = Boolean(trust.require_protected_environment);
+    form.elements.namedItem("enabled").checked = Boolean(trust.enabled);
+    updateCIProviderFields(form, false);
+  } else {
+    form.elements.namedItem("provider").value = "GITHUB";
+    form.elements.namedItem("application_id").value = state.apps[0].id;
+    form.elements.namedItem("audience").value = "changeguard-ci";
+    form.elements.namedItem("allowed_refs").value = "refs/heads/main";
+    form.elements.namedItem("enabled").checked = true;
+    updateCIProviderFields(form, true);
+    applyCITrustApplicationDefaults(form);
+  }
+  setModalOpen(document.querySelector("#ciTrustModal"), true);
+  requestAnimationFrame(() => form.elements.namedItem("repository_path")?.focus({preventScroll:true}));
+}
+
+function closeCITrustModal() {
+  setModalOpen(document.querySelector("#ciTrustModal"), false);
+  document.querySelector("#ciTrustForm")?.reset();
+  state.editingCITrust = null;
+}
+
+function splitCITrustList(value) {
+  return [...new Set(String(value || "").split(/[\r\n,，]+/).map(item => item.trim()).filter(Boolean))];
+}
+
+function readCITrustForm(form) {
+  const values = new FormData(form);
+  const provider = String(values.get("provider") || "GITHUB").toUpperCase();
+  const payload = {
+    application_id: String(values.get("application_id") || "").trim(),
+    provider,
+    issuer: String(values.get("issuer") || "").trim().replace(/\/$/, ""),
+    jwks_url: String(values.get("jwks_url") || "").trim(),
+    audience: String(values.get("audience") || "").trim(),
+    repository_id: provider === "GITHUB" ? String(values.get("repository_id") || "").trim() : "",
+    repository_owner_id: provider === "GITHUB" ? String(values.get("repository_owner_id") || "").trim() : "",
+    project_id: provider === "GITLAB" ? String(values.get("project_id") || "").trim() : "",
+    namespace_id: provider === "GITLAB" ? String(values.get("namespace_id") || "").trim() : "",
+    repository_path: String(values.get("repository_path") || "").trim().replace(/^\/+|\/+$/g, ""),
+    environment: String(values.get("environment") || "").trim(),
+    allowed_refs: splitCITrustList(values.get("allowed_refs")),
+    allowed_workflows: splitCITrustList(values.get("allowed_workflows")),
+    require_protected_ref: values.get("require_protected_ref") === "on",
+    require_protected_environment: values.get("require_protected_environment") === "on",
+    enabled: values.get("enabled") === "on"
+  };
+  if (!payload.allowed_refs.length) throw new Error("至少填写一个完整 allowed ref");
+  if (provider === "GITHUB" && (!payload.repository_id || !payload.repository_owner_id)) throw new Error("GitHub 信任必须填写 Repository ID 与 Owner ID");
+  if (provider === "GITLAB" && (!payload.project_id || !payload.namespace_id)) throw new Error("GitLab 信任必须填写 Project ID 与 Namespace ID");
+  return payload;
+}
+
+async function saveCITrust(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = document.querySelector("#saveCITrustButton");
+  let payload;
+  try { payload = readCITrustForm(form); }
+  catch (error) { toast("CI 信任表单不完整", "error", error.message); return; }
+  const editing = state.editingCITrust;
+  button.disabled = true;
+  button.textContent = "正在保存…";
+  try {
+    const saved = await api(editing ? "/api/ci/trusts/" + encodeURIComponent(editing.id) : "/api/ci/trusts", {method:editing ? "PUT" : "POST", body:JSON.stringify(payload)});
+    closeCITrustModal();
+    state.ciTrusts = normalizeCITrusts(await api("/api/ci/trusts"));
+    await renderSettings(document.querySelector("#mainContent"));
+    toast(editing ? "CI 信任已更新" : "CI 信任已创建", "success", `${ciProviderLabel(saved.provider)} · ${saved.repository_path} · ${saved.enabled ? "已启用" : "已停用"}`);
+  } catch (error) {
+    toast("CI 信任保存失败", "error", error.message || "请核对不可变 ID、ref、环境与权限后重试");
+  } finally {
+    if (button && document.contains(button)) {
+      button.disabled = false;
+      button.textContent = editing ? "保存信任" : "创建信任";
+    }
+  }
+}
+
 function renderUpgradeHistory(history) {
   if (!history || !history.length) return '<div class="upgrade-history-empty">暂无升级记录</div>';
   return '<div class="table-wrap"><table class="data-table" style="min-width:560px"><thead><tr><th>版本</th><th>结果</th><th>时间</th></tr></thead><tbody>' + history.map(item => '<tr>' +
@@ -2185,6 +2829,7 @@ function renderUpgradeHistory(history) {
     '<td>' + formatDate(item.applied_at) + '</td>' +
   '</tr>').join("") + '</tbody></table></div>';
 }
+
 function bindUpgradeEvents() {
   const fileInput = document.querySelector("#upgradeFileInput");
   const fileName = document.querySelector("#upgradeFileName");
@@ -2193,10 +2838,6 @@ function bindUpgradeEvents() {
   const abortBtn = document.querySelector("#upgradeAbortButton");
   if (!fileInput || !uploadBtn) return;
   let selectedFile = null;
-  const refreshState = () => {
-    if (!applyBtn || !abortBtn) return;
-    applyBtn.hidden = true; abortBtn.hidden = true;
-  };
   fileInput.addEventListener("change", () => {
     selectedFile = fileInput.files?.[0] || null;
     if (fileName) fileName.textContent = selectedFile ? selectedFile.name + "（" + (selectedFile.size / 1024 / 1024).toFixed(1) + "MB）" : "";
@@ -2258,40 +2899,57 @@ function bindUpgradeEvents() {
 async function renderSettings(main) {
   setHeader("集成设置");
   const config = state.config || {};
+  const capabilities = config.capabilities || {};
+  const enterpriseAPIAvailable = capabilities.enterprise_api === true;
+  const agentRuntimeAPIAvailable = capabilities.agent_runtime_api === true;
+  const enterpriseUnavailableMessage = "当前核心服务未启用企业集成配置 API；规则检查、审批与 CI 信任不受影响。";
+  const canManageCITrusts = Boolean(actor()?.enterprise_admin);
+  main.innerHTML = pageHeading("集成", "按企业配置外部能力，并用不可变 CI 身份保护通行证交换。") + `<article class="panel ci-trust-panel"><header class="panel-header"><div><h3>CI 工作负载信任</h3><p>正在读取当前企业的 OIDC 身份绑定…</p></div><span class="status status-running"><i></i>加载中</span></header><div class="panel-body"><div class="ci-trust-loading"><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span></div></div></article>`;
+  let ciTrusts = [];
+  let ciTrustError = null;
+  if (canManageCITrusts) {
+    try {
+      ciTrusts = normalizeCITrusts(await api("/api/ci/trusts"));
+      state.ciTrusts = ciTrusts;
+    } catch (error) {
+      ciTrustError = error;
+      state.ciTrusts = [];
+    }
+  } else {
+    state.ciTrusts = [];
+  }
   const waiting = '<span class="status status-draft"><i></i>待配置</span>';
   const gitlabState = config.gitlab_configured
     ? '<span class="status status-approved"><i></i>Webhook 已就绪</span>'
     : waiting;
-  let llmStatus = null;
-  try {
-    llmStatus = await api("/api/enterprise/llm");
-  } catch (_) {
-    llmStatus = {
-      configured: !!config.llm_configured,
-      source: config.llm_source || "none",
-      message: config.llm_message || "",
-      base_url: config.llm_base_url || "",
-      model: config.llm_model || "deepseek-chat",
-      api_key_hint: config.llm_api_key_hint || "",
-      enabled: !!config.llm_enabled,
-    };
-  }
-  let outboundStatus = null;
-  try {
-    outboundStatus = await api("/api/enterprise/outbound");
-  } catch (_) {
-    outboundStatus = {
-      configured: !!config.outbound_webhook_configured,
-      source: config.outbound_webhook_source || "none",
-      message: config.outbound_webhook_message || "",
-      url: config.outbound_webhook_url || "",
-      enabled: !!config.outbound_webhook_configured,
-    };
+  let llmStatus = {
+    configured: !!config.llm_configured,
+    source: config.llm_source || "none",
+    message: config.llm_message || (enterpriseAPIAvailable ? "" : enterpriseUnavailableMessage),
+    base_url: config.llm_base_url || "",
+    model: config.llm_model || "deepseek-chat",
+    api_key_hint: config.llm_api_key_hint || "",
+    enabled: !!config.llm_enabled,
+  };
+  let outboundStatus = {
+    configured: !!config.outbound_webhook_configured,
+    source: config.outbound_webhook_source || "none",
+    message: config.outbound_webhook_message || (enterpriseAPIAvailable ? "" : enterpriseUnavailableMessage),
+    url: config.outbound_webhook_url || "",
+    enabled: !!config.outbound_webhook_configured,
+  };
+  if (enterpriseAPIAvailable) {
+    try { llmStatus = await api("/api/enterprise/llm"); } catch (_) { /* keep config fallback */ }
+    try { outboundStatus = await api("/api/enterprise/outbound"); } catch (_) { /* keep config fallback */ }
   }
   let usage = config.llm_usage || null;
-  try { usage = await api("/api/enterprise/llm/usage"); } catch (_) { /* keep fallback */ }
+  if (enterpriseAPIAvailable) {
+    try { usage = await api("/api/enterprise/llm/usage"); } catch (_) { /* keep fallback */ }
+  }
   let agentRuntime = null;
-  try { agentRuntime = await api("/api/agent-runtime/summary"); } catch (_) { /* optional enterprise gateway */ }
+  if (agentRuntimeAPIAvailable) {
+    try { agentRuntime = await api("/api/agent-runtime/summary"); } catch (_) { /* compatible rolling upgrade */ }
+  }
   let agentRuntimeEvents = {events: [], total: 0, truncated: false, verified: false};
   if (agentRuntime) {
     try { agentRuntimeEvents = await api("/api/agent-runtime/events?limit=20"); } catch (_) { /* compatible rolling upgrade */ }
@@ -2303,9 +2961,16 @@ async function renderSettings(main) {
   const outboundState = outboundStatus.configured
     ? `<span class="status status-approved"><i></i>${outboundStatus.source === "platform" ? "平台配置" : "已配置"}</span>`
     : waiting;
-  let events = state.integrationEvents || [];
+  const normalizeIntegrationEvents = value => Array.isArray(value)
+    ? value
+    : Array.isArray(value?.events)
+      ? value.events
+      : Array.isArray(value?.items)
+        ? value.items
+        : [];
+  let events = normalizeIntegrationEvents(state.integrationEvents);
   try {
-    events = await api("/api/integrations/events?limit=10");
+    events = normalizeIntegrationEvents(await api("/api/integrations/events?limit=10"));
     state.integrationEvents = events;
   } catch (_) { /* ignore */ }
   let upgradeInfo = { current: null, status: { state: "idle" }, history: [] };
@@ -2325,9 +2990,11 @@ async function renderSettings(main) {
         </tr>`;
       }).join("")
     : `<tr><td colspan="5"><div class="table-empty">尚无 GitLab 事件</div></td></tr>`;
-  const canEdit = !!(actor()?.enterprise_admin || actor()?.role === "技术负责人");
+  const canEdit = enterpriseAPIAvailable && !!(actor()?.enterprise_admin || actor()?.role === "技术负责人");
   let presets = [];
-  try { presets = await api("/api/enterprise/llm/presets"); } catch (_) { presets = []; }
+  if (enterpriseAPIAvailable) {
+    try { presets = await api("/api/enterprise/llm/presets"); } catch (_) { presets = []; }
+  }
   const presetButtons = (presets || []).map(p =>
     `<button type="button" class="button button-secondary button-small" data-llm-preset="${escapeHTML(p.id)}">${escapeHTML(p.name)}</button>`
   ).join("");
@@ -2467,6 +3134,7 @@ async function renderSettings(main) {
   const encConfigured = !!config.data_encryption_configured;
 
   main.innerHTML = pageHeading("集成", "按企业配置外部能力。新注册工作空间需自行接入 AI，不共用平台测试 Key。") + `
+  ${renderCITrustPanel(ciTrusts, ciTrustError, canManageCITrusts)}
   <article class="panel llm-connect-panel">
     <header class="panel-header"><div><h3>接入 AI</h3><p>只读分析变更证据，不能审批、不能改生产。支持 DeepSeek / OpenAI / 内网兼容接口。</p></div>${modelState}</header>
     <div class="panel-body">
@@ -2556,6 +3224,7 @@ async function renderSettings(main) {
   </article>`;
 
   bindUpgradeEvents();
+
   document.querySelector("[data-agent-audit-export]")?.addEventListener("click", async event => {
     const button = event.currentTarget;
     const original = button.textContent;
@@ -2973,13 +3642,13 @@ function toast(message, type = "success", detail = "") {
   setTimeout(() => element.remove(), 3800);
 }
 async function refreshData(render = true) {
-  const [users, apps, dashboard, changesRaw, policies, audits, config] = await Promise.all([
-    api("/api/users"), api("/api/apps"), api("/api/dashboard"),
+  const [users, apps, dashboard, governanceOutcomes, changesRaw, policies, audits, config] = await Promise.all([
+    api("/api/users"), api("/api/apps"), api("/api/dashboard"), api("/api/governance/outcomes?window_days=30"),
     api("/api/changes?page=1&page_size=100"),
     api("/api/policies"), api("/api/audits?limit=100"), api("/api/config/status")
   ]);
   const changes = Array.isArray(changesRaw) ? changesRaw : (changesRaw?.items || []);
-  Object.assign(state, {users, apps, dashboard, changes, policies, audits, config});
+  Object.assign(state, {users, apps, dashboard, governanceOutcomes, changes, policies, audits, config});
   if (!users.some(user => user.id === state.actorId)) state.actorId = users[0]?.id || "";
   renderActor();
   renderNav();
@@ -3295,6 +3964,7 @@ function closeAllOverlays() {
   closeInviteModal();
   closeMemberModal();
   closeAppModal();
+  closeCITrustModal();
   closeNotifyPanel();
   document.body.classList.remove("sidebar-open");
 }
@@ -3320,7 +3990,14 @@ function bindEvents() {
     if (routeButton && !routeButton.disabled && !routeButton.hasAttribute("disabled")) {
       event.preventDefault();
       closeAllOverlays();
-      location.hash = "#/" + routeButton.dataset.route;
+      const requested = String(routeButton.dataset.route || "dashboard");
+      if (!routeAllowed(requested)) {
+        const home = workspaceProfile().home || "dashboard";
+        if (currentRoute()[0] === home) void renderPage(); else location.hash = "#/" + home;
+        toast("当前身份未显示该工作区", "error", "已返回" + workspaceProfile().label + "；权限仍由服务端独立校验。");
+        return;
+      }
+      location.hash = "#/" + requested;
       return;
     }
     // 整行打开变更；仅当点到带业务动作的按钮时不跳转
@@ -3379,6 +4056,11 @@ function bindEvents() {
     const appEdit = event.target.closest("[data-app-edit]");
     if (appEdit) { openAppModal(state.apps.find(item => item.id === appEdit.dataset.appEdit)); return; }
     if (event.target.closest("[data-close-app]")) { closeAppModal(); return; }
+    if (event.target.closest("[data-close-ci-trust]")) { closeCITrustModal(); return; }
+    if (event.target.closest("[data-ci-trust-create]")) { openCITrustModal(); return; }
+    const trustEdit = event.target.closest("[data-ci-trust-edit]");
+    if (trustEdit) { openCITrustModal(state.ciTrusts.find(item => item.id === trustEdit.dataset.ciTrustEdit)); return; }
+    if (event.target.closest("[data-ci-trust-retry]")) { void renderSettings(document.querySelector("#mainContent")); return; }
     if (event.target.closest("[data-invite-create]")) { openInviteModal(); return; }
     if (event.target.closest("[data-close-invite]")) {
       closeInviteModal();
@@ -3545,18 +4227,18 @@ function bindEvents() {
       area.focus();
       return;
     }
-    const blastBtn = event.target.closest("[data-load-blast]");
-    if (blastBtn) {
+    const impactBtn = event.target.closest("[data-load-impact]");
+    if (impactBtn) {
       event.preventDefault();
-      const id = document.querySelector("#blastRadiusPanel")?.getAttribute("data-change-id") || state.currentChange?.id;
-      if (id) loadBlastRadius(id);
+      const id = document.querySelector("#impactGraphPanel")?.getAttribute("data-change-id") || state.currentChange?.id;
+      if (id) void loadImpactSnapshot(id);
       return;
     }
-    const effBtn = event.target.closest("[data-load-efficacy]");
-    if (effBtn) {
+    const outcomesBtn = event.target.closest("[data-load-outcomes]");
+    if (outcomesBtn) {
       event.preventDefault();
-      const id = document.querySelector("#efficacyPanel")?.getAttribute("data-change-id") || state.currentChange?.id;
-      if (id) loadEfficacy(id);
+      const id = document.querySelector("#outcomeEvidencePanel")?.getAttribute("data-change-id") || state.currentChange?.id;
+      if (id) void loadOutcomeSignals(id);
       return;
     }
   });
@@ -3565,14 +4247,20 @@ function bindEvents() {
     state.actorId = event.target.value;
     localStorage.setItem("dbguard_actor", state.actorId);
     renderActor();
+    const fallback = ensureAllowedRoute();
     renderPage();
-    toast("已切换当前成员", "success", actor().name + " · " + roleLabel(actor().role));
+    const routeNotice = fallback.changed ? " · 已切换到" + workspaceProfile().label : "";
+    toast("已切换当前成员", "success", actor().name + " · " + roleLabel(actor().role) + routeNotice);
   });
   document.querySelector("#applicationSelect")?.addEventListener("change", event => {
     const selected = state.apps.find(app => app.id === event.target.value);
     const repository = document.querySelector('#createForm [name="repository_url"]');
     if (repository && selected?.repository_url && !repository.value.trim()) repository.value = selected.repository_url;
   });
+  document.querySelector("#ciTrustForm")?.addEventListener("submit", saveCITrust);
+  document.querySelector("#memberRole")?.addEventListener("change", event => updateMemberGrantMode(event.target.value));
+  document.querySelector('#ciTrustForm [name="provider"]')?.addEventListener("change", event => updateCIProviderFields(event.currentTarget.form, true));
+  document.querySelector('#ciTrustForm [name="application_id"]')?.addEventListener("change", event => applyCITrustApplicationDefaults(event.currentTarget.form, true));
   document.querySelector("#menuButton")?.addEventListener("click", () => document.body.classList.toggle("sidebar-open"));
   document.querySelector("#mobileBackdrop")?.addEventListener("click", () => document.body.classList.remove("sidebar-open"));
   document.querySelector("#createForm").addEventListener("submit", async event => {

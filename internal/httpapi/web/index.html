@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f7f9fc">
   <title>ChangeGuard</title>
-    <link rel="stylesheet" href="/styles.css?v=20260808-enterprise-agent3">
+    <link rel="stylesheet" href="/styles.css?v=20260810-upgrade1">
 </head>
 <body>
 <div class="auth-gate" id="authGate" hidden></div>
@@ -206,6 +206,47 @@
     </section>
   </div>
 
+  <div class="modal-layer" id="ciTrustModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-ci-trust></div>
+    <section class="modal modal-large" role="dialog" aria-modal="true" aria-labelledby="ciTrustModalTitle">
+      <header class="modal-header"><div><span class="eyebrow">CI 工作负载信任</span><h2 id="ciTrustModalTitle">创建 CI 信任</h2><p id="ciTrustModalDescription">把 GitHub Actions 或 GitLab CI 的不可变身份绑定到服务与环境。</p></div><button class="icon-button" data-close-ci-trust aria-label="关闭">×</button></header>
+      <form id="ciTrustForm">
+        <div class="modal-body">
+          <div class="ci-trust-form-note">CI 在运行时向平台申请短期 OIDC 身份令牌；管理员只配置一次信任边界。ChangeGuard 不在此表单请求、展示或保存原始令牌。</div>
+          <div class="form-grid ci-trust-form-grid">
+            <label class="field"><span>CI 提供方 <b>*</b></span><select name="provider" required><option value="GITHUB">GitHub Actions</option><option value="GITLAB">GitLab CI</option></select></label>
+            <label class="field"><span>ChangeGuard 服务 <b>*</b></span><select name="application_id" required></select></label>
+            <label class="field"><span>仓库 / 项目路径 <b>*</b></span><input name="repository_path" required maxlength="500" placeholder="acme/order-service"><small>仅用于展示与诊断；授权使用下方不可变 ID。</small></label>
+            <label class="field"><span>目标环境 <b>*</b></span><input name="environment" required maxlength="120" placeholder="production"></label>
+            <label class="field field-wide"><span>Issuer <b>*</b></span><input name="issuer" type="url" required maxlength="500" autocomplete="off" placeholder="https://token.actions.githubusercontent.com"></label>
+            <label class="field field-wide"><span>JWKS URL <b>*</b></span><input name="jwks_url" type="url" required maxlength="1000" autocomplete="off" placeholder="https://token.actions.githubusercontent.com/.well-known/jwks"></label>
+            <label class="field field-wide"><span>精确 Audience <b>*</b></span><input name="audience" required maxlength="500" autocomplete="off" placeholder="changeguard-ci"><small>CI 请求的 audience 必须与这里完全一致。</small></label>
+            <div class="ci-provider-fields field-wide" data-ci-provider-fields="GITHUB">
+              <div class="form-grid">
+                <label class="field"><span>Repository ID <b>*</b></span><input name="repository_id" inputmode="numeric" maxlength="160" autocomplete="off" placeholder="123456789"><small>GitHub 仓库不可变数字 ID。</small></label>
+                <label class="field"><span>Repository Owner ID <b>*</b></span><input name="repository_owner_id" inputmode="numeric" maxlength="160" autocomplete="off" placeholder="987654321"><small>GitHub 组织或所有者不可变数字 ID。</small></label>
+              </div>
+            </div>
+            <div class="ci-provider-fields field-wide is-hidden" data-ci-provider-fields="GITLAB">
+              <div class="form-grid">
+                <label class="field"><span>Project ID <b>*</b></span><input name="project_id" inputmode="numeric" maxlength="160" autocomplete="off" placeholder="501"><small>GitLab 项目不可变 ID。</small></label>
+                <label class="field"><span>Namespace ID <b>*</b></span><input name="namespace_id" inputmode="numeric" maxlength="160" autocomplete="off" placeholder="42"><small>GitLab namespace 不可变 ID。</small></label>
+              </div>
+            </div>
+            <label class="field"><span>允许的完整 Ref <b>*</b></span><textarea name="allowed_refs" rows="5" required spellcheck="false" placeholder="refs/heads/main&#10;refs/tags/release-*"></textarea><small>每行或逗号分隔；至少一项，支持服务端认可的 glob 模式。</small></label>
+            <label class="field"><span>允许的 Workflow / Job</span><textarea name="allowed_workflows" rows="5" spellcheck="false" placeholder="acme/order-service/.github/workflows/deploy.yml@refs/heads/main"></textarea><small>留空表示不额外限制 workflow；生产建议固定 reusable workflow 或 job。</small></label>
+            <div class="ci-trust-checks field-wide">
+              <label class="enterprise-switch"><input name="require_protected_ref" type="checkbox"><span><strong>要求受保护 Ref</strong><small>GitLab 会校验 OIDC 中的 protected ref 声明；GitHub 仍以完整 ref 与 workflow 绑定为准。</small></span></label>
+              <label class="enterprise-switch"><input name="require_protected_environment" type="checkbox"><span><strong>要求受保护环境</strong><small>GitLab 会校验受保护环境声明；环境名称仍必须精确匹配。</small></span></label>
+              <label class="enterprise-switch"><input name="enabled" type="checkbox" checked><span><strong>启用此信任</strong><small>后端没有删除接口；取消启用可安全、可逆地停用。</small></span></label>
+            </div>
+          </div>
+        </div>
+        <footer class="modal-footer"><span><i class="secure-dot"></i>不可变身份绑定与修改会写入企业审计日志</span><div><button type="button" class="button button-secondary" data-close-ci-trust>取消</button><button type="submit" class="button button-primary" id="saveCITrustButton">创建信任</button></div></footer>
+      </form>
+    </section>
+  </div>
+
 <div class="modal-layer" id="inviteModal" aria-hidden="true">
     <div class="modal-backdrop" data-close-invite></div>
     <section class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="inviteModalTitle">
@@ -214,7 +255,7 @@
         <div class="modal-body">
           <div class="form-grid">
             <label class="field field-wide"><span>员工邮箱 <b>*</b></span><input name="email" type="email" required placeholder="employee@company.com"></label>
-            <label class="field"><span>企业职责 <b>*</b></span><select name="role" required><option value="后端开发">后端开发</option><option value="数据库审核人">发布审核人</option><option value="技术负责人">技术负责人</option></select></label>
+            <label class="field"><span>企业职责 <b>*</b></span><select name="role" required><option value="后端开发">后端开发</option><option value="数据库审核人">发布审核人</option><option value="运维">运维</option><option value="管理者">管理者</option><option value="技术负责人">技术负责人</option></select></label>
             <label class="field"><span>有效期</span><select name="expires_in"><option value="24">24 小时</option><option value="72" selected>3 天</option><option value="168">7 天</option><option value="720">30 天</option></select></label>
             <div class="invite-result field-wide" id="inviteResult" hidden>
               <span>邀请链接已生成</span>
@@ -235,7 +276,7 @@
       <form id="memberForm">
         <div class="modal-body">
           <div class="form-grid">
-            <label class="field field-wide"><span>业务角色</span><select id="memberRole" name="role"><option value="后端开发">后端开发</option><option value="数据库审核人">发布审核人</option><option value="技术负责人">技术负责人</option></select><small>角色决定变更提交、整改、复核和批准权限。</small></label>
+            <label class="field field-wide"><span>业务角色</span><select id="memberRole" name="role"><option value="后端开发">后端开发</option><option value="数据库审核人">发布审核人</option><option value="运维">运维</option><option value="管理者">管理者</option><option value="技术负责人">技术负责人</option></select><small>角色决定工作台可见范围和服务端可执行权限；运维与管理者默认只读。</small></label>
             <label class="enterprise-switch field-wide"><input id="memberActive" name="active" type="checkbox"><span><strong>允许登录和参与流程</strong><small>停用后现有会话会失效，历史审计记录仍保留。</small></span></label>
             <label class="enterprise-switch field-wide"><input id="memberEnterpriseAdmin" name="enterprise_admin" type="checkbox"><span><strong>授予企业管理员权限</strong><small>可邀请员工、分配角色并维护企业 SSO 策略；至少保留一名管理员。</small></span></label>
             <div class="member-admin-hint field-wide" id="memberAdminHint"></div>
@@ -247,6 +288,6 @@
     </section>
   </div>
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
-  <script src="/app.js?v=20260808-enterprise-agent3" defer></script>
+  <script src="/app.js?v=20260810-upgrade1" defer></script>
 </body>
 </html>
