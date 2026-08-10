@@ -1,0 +1,134 @@
+name: Release
+
+# 触发：推送 v* 标签（如 v2026.08.10.1）
+# 产出：changeguard-<version>.tar.gz 升级包，发布到 GitHub Releases
+#
+# 升级包结构（与 deploy/production/changeguard-core-install.sh 兼容）：
+#   changeguard-<version>.tar.gz
+#     └── changeguard-<version>/     # release_id 目录
+#           ├── dbguard              # Linux amd64 二进制
+#           ├── SHA256SUMS           # 全部文件校验
+#           ├── release-manifest.json
+#           ├── verification.json    # 验证证据
+#           ├── source.bundle / source.tar.gz
+#           └── ...（modules/module-verify/binary-buildinfo/bundle-verify/build.log）
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify and build release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(printf '%s' "$TAG" | tr '.' '-')"
+          RELEASE_ID="changeguard-${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Verify frontend JavaScript syntax
+        run: |
+          node --check internal/httpapi/web/api-adapter.js
+          node --check internal/httpapi/web/app.js
+
+      - name: Run Go tests and vet
+        run: |
+          go test ./... -count=1
+          go vet ./...
+
+      - name: Run race detector
+        run: go test -race ./... -count=1
+
+      - name: Generate verification evidence
+        id: evidence
+        run: |
+          python3 - "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.tag }}" <<'PY'
+          import json, os, subprocess, sys
+          version, tag = sys.argv[1], sys.argv[2]
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          source = subprocess.check_output(["bash", "deploy/production/source-tree-sha256.sh", "."], text=True).strip()
+          evidence = {
+              "schema": "changeguard-core-verification/v1",
+              "status": "passed",
+              "version": version,
+              "tag": tag,
+              "commit": commit,
+              "source_sha256": source,
+              "target": "linux/amd64",
+              "built_at": subprocess.check_output(["git", "show", "-s", "--format=%cI", "HEAD"], text=True).strip(),
+              "clean_worktree": True,
+              "commands": [
+                  {"command": "gofmt -l .", "status": "passed"},
+                  {"command": "go test ./... -count=1", "status": "passed"},
+                  {"command": "go vet ./...", "status": "passed"},
+                  {"command": "go test -race ./... -count=1", "status": "passed"},
+                  {"command": "node --check internal/httpapi/web/app.js", "status": "passed"},
+              ],
+          }
+          with open("verification.json", "w", encoding="utf-8") as handle:
+              json.dump(evidence, handle, ensure_ascii=False, indent=2)
+              handle.write("\n")
+          print(f"verification written for {commit} sha {source[:16]}")
+          PY
+
+      - name: Assemble offline release
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq git 2>/dev/null || true
+          CHANGEGUARD_VERSION="${{ steps.version.outputs.version }}" \
+          CHANGEGUARD_RELEASE_TAG="${{ steps.version.outputs.tag }}" \
+          CHANGEGUARD_RELEASE_DIRECTORY="${{ runner.temp }}/release" \
+          CHANGEGUARD_VERIFICATION_EVIDENCE="${{ github.workspace }}/verification.json" \
+          CHANGEGUARD_GOMODCACHE="$(go env GOMODCACHE)" \
+          bash deploy/production/build-core-git-release.sh
+
+      - name: Package upgrade archive
+        run: |
+          RELEASE_ID="${{ steps.version.outputs.release_id }}"
+          RELEASE_DIR="${{ runner.temp }}/release"
+          PKG_DIR="${{ runner.temp }}/package/${RELEASE_ID}"
+          mkdir -p "$PKG_DIR"
+          cp "$RELEASE_DIR"/{dbguard,SHA256SUMS,release-manifest.json,verification.json,source.bundle,source.tar.gz,modules.txt,module-verify.txt,binary-buildinfo.txt,bundle-verify.txt,build.log} "$PKG_DIR/"
+          tar -czf "${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz" -C "${{ runner.temp }}/package" "$RELEASE_ID"
+          sha256sum "${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz" > "${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz.sha256"
+          echo "archive_sha256=$(awk '{print $1}' "${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz.sha256")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ChangeGuard ${{ steps.version.outputs.version }}
+          body: |
+            ## ChangeGuard ${{ steps.version.outputs.version }}
+
+            服务器升级：
+            ```bash
+            sudo bash deploy/upgrade/changeguard-upgrade.sh \
+              --version ${{ steps.version.outputs.version }} \
+              --archive-url https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/changeguard-${{ steps.version.outputs.version }}.tar.gz \
+              --expected-sha256 ${{ steps.archive.outputs.archive_sha256 }}
+            ```
+          files: |
+            ${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz
+            ${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz.sha256
