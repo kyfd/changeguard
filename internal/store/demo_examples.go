@@ -44,7 +44,9 @@ func ensureDemoCoverage(data *state, organization model.Organization, now time.T
 		demoConfigDraftChange(organization.ID, applicationByID["app_gateway"], developer, now),
 		demoDDLNoConcurrentChange(organization.ID, applicationByID["app_order"], developer, now),
 		demoBatchDMLChange(organization.ID, applicationByID["app_member"], developer, now),
+		demoUnbatchedDMLChange(organization.ID, applicationByID["app_order"], developer, now),
 		demoIndexMaintenanceChange(organization.ID, applicationByID["app_inventory"], developer, now),
+		demoHeavyDDLChange(organization.ID, applicationByID["app_order"], developer, now),
 		demoEmergencyRejectedChange(organization.ID, applicationByID["app_payment"], developer, reviewer, now),
 		demoRollbackCompletedChange(organization.ID, applicationByID["app_order"], developer, owner, now),
 		demoIncidentLinkedChange(organization.ID, applicationByID["app_payment"], developer, owner, now),
@@ -188,27 +190,70 @@ func demoBatchDMLChange(organizationID string, application model.Application, su
 	createdAt := now.Add(-3 * time.Hour)
 	change := demoChangeBase(organizationID, "chg_demo_points_archive", "会员积分过期批量归档", application, submitter, model.StatusReadyForExperiment, model.RiskMedium, createdAt, now.Add(5*time.Hour))
 	change.ChangeType = "DML"
-	change.SQL = "UPDATE member_points SET status='EXPIRED' WHERE expires_at < NOW() - INTERVAL '7 days' AND status='ACTIVE' LIMIT 10000;"
-	change.RollbackSQL = "UPDATE member_points SET status='ACTIVE' WHERE status='EXPIRED' AND updated_at >= NOW() - INTERVAL '1 hour';"
-	change.Description = "对超期积分进行分批归档，单批上限 1 万行，避免大事务。"
+	// Good practice: SET LOCAL timeouts + LIMIT batch boundary.
+	change.SQL = "SET LOCAL lock_timeout = '2s'; SET LOCAL statement_timeout = '30s'; UPDATE member_points SET status='EXPIRED' WHERE expires_at < NOW() - INTERVAL '7 days' AND status='ACTIVE' LIMIT 10000;"
+	change.RollbackSQL = "UPDATE member_points SET status='ACTIVE' WHERE status='EXPIRED' AND updated_at >= NOW() - INTERVAL '1 hour' LIMIT 10000;"
+	change.Description = "对超期积分进行分批归档，单批上限 1 万行，并声明锁/语句超时，避免大事务。"
 	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_batch_dml", Kind: model.ArtifactDatabase, Name: "积分归档 DML", Source: "scripts/archive_points.sql", Language: "SQL", Content: change.SQL}}
 	change.RollbackPlan = "停止调度并执行回滚 UPDATE 恢复积分状态。"
-	change.Experiment = &model.ExperimentReport{ID: "exp_demo_batch", Kind: "DEMO_ONLY", Mode: "DEMO_ONLY", Status: "PASSED", StartedAt: createdAt.Add(20 * time.Minute), FinishedAt: createdAt.Add(24 * time.Minute), DurationMS: 2400, DatasetRows: 10000, LockWaitMS: 40, P99BeforeMS: 8.2, P99AfterMS: 8.5, FailedTransactions: 0, RollbackVerified: true, ChecksTotal: 4, ChecksPassed: 4, ExecutionError: "显式演示数据未执行真实 PostgreSQL 影子演练"}
+	change.Experiment = &model.ExperimentReport{ID: "exp_demo_batch", Kind: "DEMO_ONLY", Mode: "DEMO_ONLY", Status: "PASSED", StartedAt: createdAt.Add(20 * time.Minute), FinishedAt: createdAt.Add(24 * time.Minute), DurationMS: 2400, DatasetRows: 10000, LockWaitMS: 40, P99BeforeMS: 8.2, P99AfterMS: 8.5, FailedTransactions: 0, RollbackVerified: true, ChecksTotal: 4, ChecksPassed: 4, ExecutionError: "显式演示数据未执行真实 PostgreSQL 影子演练", Evidence: []model.Evidence{{ID: "ev_demo_batch_timeout", Kind: "check", Title: "锁/语句超时基线", Value: "lock_timeout=2s; statement_timeout=30s", Source: "变更脚本", ObservedAt: createdAt.Add(24 * time.Minute)}, {ID: "ev_demo_batch_limit", Kind: "check", Title: "分批边界", Value: "LIMIT 10000", Source: "变更脚本", ObservedAt: createdAt.Add(24 * time.Minute)}}}
 	change.Timeline = append(change.Timeline, model.TimelineEntry{ID: "tl_demo_batch_exp", Status: model.StatusReadyForExperiment, Title: "影子库演练通过", Detail: "DEMO_ONLY：批量上限与锁等待符合预期", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(24 * time.Minute)})
+	return change
+}
+
+func demoUnbatchedDMLChange(organizationID string, application model.Application, submitter model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-110 * time.Minute)
+	change := demoChangeBase(organizationID, "chg_demo_orders_unbatched", "历史订单状态一次性回填", application, submitter, model.StatusCheckFailed, model.RiskMedium, createdAt, now.Add(6*time.Hour))
+	change.ChangeType = "DML"
+	change.SQL = "UPDATE orders SET archive_flag=1 WHERE created_at < NOW() - INTERVAL '180 days' AND archive_flag=0;"
+	change.RollbackSQL = "UPDATE orders SET archive_flag=0 WHERE archive_flag=1 AND updated_at >= NOW() - INTERVAL '2 hours';"
+	change.Description = "演示缺少分批边界的大事务 DML：条件更新可能锁住海量行。"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_unbatched_dml", Kind: model.ArtifactDatabase, Name: "订单归档回填", Source: "scripts/archive_orders_once.sql", Language: "SQL", Content: change.SQL}}
+	change.RollbackPlan = "停止任务并按时间窗口反向 UPDATE。"
+	change.Findings = []model.Finding{
+		{ID: "finding_demo_unbatched_dml", Code: "UNBATCHED_LARGE_DML", Severity: model.RiskMedium, Title: "大批量 DML 缺少分批边界", Detail: "条件 UPDATE 未声明 LIMIT，可能形成长事务并放大锁等待。", Evidence: "UPDATE ... WHERE ... (no LIMIT)", Suggestion: "按主键游标分批，单批限制行数并控制提交节奏。", Blocking: false, RuleVersion: 1, Status: model.FindingOpen, UpdatedAt: createdAt.Add(4 * time.Minute)},
+		{ID: "finding_demo_missing_lock_timeout", Code: "MISSING_LOCK_TIMEOUT", Severity: model.RiskMedium, Title: "高锁风险变更未声明锁超时", Detail: "未设置 lock_timeout/statement_timeout，冲突时可能长时间阻塞业务。", Evidence: "lock_timeout 未声明", Suggestion: "在执行脚本声明 SET lock_timeout / statement_timeout。", Blocking: false, RuleVersion: 1, Status: model.FindingOpen, UpdatedAt: createdAt.Add(4 * time.Minute)},
+	}
+	change.Analysis = &model.AgentAnalysis{Provider: "rules-fallback", Risk: model.RiskMedium, Summary: "大事务回填缺少分批与超时保护，建议先整改再演练。", Reasons: []string{"无 LIMIT 的条件 UPDATE", "未声明 lock_timeout"}, Suggestions: []string{"按 id 游标分批 1 万行", "声明 lock_timeout=2s"}, EvidenceIDs: []string{"finding_demo_unbatched_dml"}, Steps: 2, ToolCalls: 1, GeneratedAt: createdAt.Add(5 * time.Minute)}
+	change.Timeline = append(change.Timeline, model.TimelineEntry{ID: "tl_demo_unbatched_check", Status: model.StatusCheckFailed, Title: "事务优化检查提示大事务风险", Detail: "DEMO_ONLY：命中未分批 DML 与缺失锁超时", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(4 * time.Minute)})
 	return change
 }
 
 func demoIndexMaintenanceChange(organizationID string, application model.Application, submitter model.User, now time.Time) model.ChangeRequest {
 	createdAt := now.Add(-7 * time.Hour)
-	change := demoChangeBase(organizationID, "chg_demo_inventory_fk", "库存预占表补充外键约束", application, submitter, model.StatusExperimentRunning, model.RiskMedium, createdAt, now.Add(3*time.Hour))
+	change := demoChangeBase(organizationID, "chg_demo_inventory_fk", "库存预占表补充外键约束", application, submitter, model.StatusCheckFailed, model.RiskHigh, createdAt, now.Add(3*time.Hour))
 	change.ChangeType = "DDL"
 	change.SQL = "ALTER TABLE inventory_reservation ADD CONSTRAINT fk_reservation_sku FOREIGN KEY (sku_id) REFERENCES sku(id);"
 	change.RollbackSQL = "ALTER TABLE inventory_reservation DROP CONSTRAINT IF EXISTS fk_reservation_sku;"
-	change.Description = "为预占记录补充外键约束，防止孤儿数据。"
+	change.Description = "为预占记录补充外键约束；演示未使用 NOT VALID 分阶段时的长事务锁风险。"
 	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_fk_add", Kind: model.ArtifactDatabase, Name: "库存外键 DDL", Source: "migrations/022_add_fk.sql", Language: "SQL", Content: change.SQL}}
 	change.RollbackPlan = "执行 DROP CONSTRAINT 回滚外键。"
-	change.Experiment = &model.ExperimentReport{ID: "exp_demo_fk", Kind: "DEMO_ONLY", Mode: "DEMO_ONLY", Status: "RUNNING", StartedAt: createdAt.Add(2 * time.Hour), FinishedAt: time.Time{}, DurationMS: 0, DatasetRows: 2000000, LockWaitMS: 120, ExecutionError: "显式演示数据未执行真实 PostgreSQL 影子演练"}
-	change.Timeline = append(change.Timeline, model.TimelineEntry{ID: "tl_demo_fk_exp", Status: model.StatusExperimentRunning, Title: "影子库演练进行中", Detail: "DEMO_ONLY：模拟 200 万行表外键验证", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(2 * time.Hour)})
+	change.Findings = []model.Finding{
+		{ID: "finding_demo_fk_not_valid", Code: "FK_WITHOUT_NOT_VALID", Severity: model.RiskHigh, Title: "外键约束缺少 NOT VALID 分阶段", Detail: "直接 ADD FOREIGN KEY 会在创建时扫描整表校验，长事务期间持有锁。", Evidence: "ADD CONSTRAINT ... FOREIGN KEY (no NOT VALID)", Suggestion: "先 ADD CONSTRAINT ... NOT VALID，低峰期再 VALIDATE CONSTRAINT。", Blocking: true, RuleVersion: 1, Status: model.FindingOpen, UpdatedAt: createdAt.Add(6 * time.Minute)},
+		{ID: "finding_demo_fk_lock_timeout", Code: "MISSING_LOCK_TIMEOUT", Severity: model.RiskMedium, Title: "高锁风险变更未声明锁超时", Detail: "外键校验可能长时间持锁。", Evidence: "lock_timeout 未声明", Suggestion: "声明 lock_timeout 并在低峰窗口执行。", Blocking: false, RuleVersion: 1, Status: model.FindingOpen, UpdatedAt: createdAt.Add(6 * time.Minute)},
+	}
+	change.Experiment = &model.ExperimentReport{ID: "exp_demo_fk", Kind: "DEMO_ONLY", Mode: "DEMO_ONLY", Status: "FAILED", StartedAt: createdAt.Add(2 * time.Hour), FinishedAt: createdAt.Add(2*time.Hour + 45*time.Second), DurationMS: 45000, DatasetRows: 2000000, LockWaitMS: 2100, FailedTransactions: 1, ExecutionError: "DEMO_ONLY：模拟外键整表校验触发 lock timeout", Evidence: []model.Evidence{{ID: "ev_demo_fk_lock", Kind: "check", Title: "事务失败分类", Value: "LOCK_TIMEOUT：锁等待超过阈值，建议拆分变更、低峰执行或改用 CONCURRENTLY/NOT VALID", Source: "影子事务诊断", ObservedAt: createdAt.Add(2*time.Hour + 45*time.Second)}}}
+	change.Timeline = append(change.Timeline,
+		model.TimelineEntry{ID: "tl_demo_fk_check", Status: model.StatusCheckFailed, Title: "外键事务优化检查阻断", Detail: "DEMO_ONLY：命中 FK_WITHOUT_NOT_VALID", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(6 * time.Minute)},
+		model.TimelineEntry{ID: "tl_demo_fk_exp", Status: model.StatusExperimentRunning, Title: "影子库演练失败", Detail: "DEMO_ONLY：模拟 200 万行表外键校验超时", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(2*time.Hour + 45*time.Second)},
+	)
+	return change
+}
+
+func demoHeavyDDLChange(organizationID string, application model.Application, submitter model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-50 * time.Minute)
+	change := demoChangeBase(organizationID, "chg_demo_vacuum_full", "订单表空间回收 VACUUM FULL", application, submitter, model.StatusCheckFailed, model.RiskHigh, createdAt, now.Add(8*time.Hour))
+	change.ChangeType = "DDL"
+	change.SQL = "VACUUM FULL orders;"
+	change.RollbackSQL = "-- VACUUM FULL 不可按语句回滚；保留逻辑备份恢复路径"
+	change.Description = "演示重写型 DDL 的长事务与锁风险。"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_vacuum_full", Kind: model.ArtifactDatabase, Name: "订单表空间回收", Source: "ops/vacuum_full_orders.sql", Language: "SQL", Content: change.SQL}}
+	change.RollbackPlan = "从逻辑备份恢复受影响分区；生产禁止直接 VACUUM FULL。"
+	change.Findings = []model.Finding{
+		{ID: "finding_demo_heavy_ddl", Code: "HEAVY_DDL_REWRITE", Severity: model.RiskHigh, Title: "重写型 DDL 长事务风险", Detail: "VACUUM FULL 会触发表重写并长时间阻塞读写。", Evidence: "VACUUM FULL orders", Suggestion: "改用在线清理策略或维护窗口分片执行，并设置 lock_timeout。", Blocking: true, RuleVersion: 1, Status: model.FindingOpen, UpdatedAt: createdAt.Add(3 * time.Minute)},
+		{ID: "finding_demo_heavy_timeout", Code: "MISSING_LOCK_TIMEOUT", Severity: model.RiskMedium, Title: "高锁风险变更未声明锁超时", Detail: "重写型 DDL 未声明超时保护。", Evidence: "lock_timeout 未声明", Suggestion: "声明 lock_timeout/statement_timeout 并准备可观测回滚。", Blocking: false, RuleVersion: 1, Status: model.FindingOpen, UpdatedAt: createdAt.Add(3 * time.Minute)},
+	}
+	change.Timeline = append(change.Timeline, model.TimelineEntry{ID: "tl_demo_heavy_ddl", Status: model.StatusCheckFailed, Title: "重写型 DDL 被事务优化规则阻断", Detail: "DEMO_ONLY：命中 HEAVY_DDL_REWRITE", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(3 * time.Minute)})
 	return change
 }
 

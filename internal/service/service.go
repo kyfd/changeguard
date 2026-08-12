@@ -1378,6 +1378,7 @@ func isBlockingFinding(item model.Finding) bool {
 		"EMPTY_SQL": true, "MISSING_ROLLBACK": true, "UPDATE_WITHOUT_WHERE": true,
 		"DELETE_WITHOUT_WHERE": true, "DROP_TABLE": true, "TRUNCATE": true,
 		"ADD_NOT_NULL_WITHOUT_DEFAULT": true,
+		"FK_WITHOUT_NOT_VALID":         true, "HEAVY_DDL_REWRITE": true,
 	}
 	return item.Blocking || legacyBlocking[item.Code]
 }

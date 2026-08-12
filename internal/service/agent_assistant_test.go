@@ -115,6 +115,41 @@ func TestAskChangeAssistantConversationContinuation(t *testing.T) {
 	}
 }
 
+func TestAskChangeAssistantIncludesTransactionHints(t *testing.T) {
+	svc := newAssistantTestService(t)
+	actor, err := svc.activeActor("usr_developer")
+	if err != nil {
+		t.Fatalf("activeActor: %v", err)
+	}
+	change := model.ChangeRequest{
+		OrganizationID: actor.OrganizationID, ID: "chg_assist_tx", Title: "事务优化助手测试",
+		ApplicationID: "app_order", ApplicationName: "订单中心",
+		Environment: "生产环境", ChangeType: "DML",
+		SQL:         "UPDATE orders SET archive_flag=1 WHERE created_at < NOW() - INTERVAL '180 days';",
+		RollbackSQL: "UPDATE orders SET archive_flag=0 WHERE archive_flag=1;",
+		SubmitterID: actor.ID, SubmitterName: actor.Name,
+		Status: model.StatusCheckFailed, Risk: model.RiskMedium,
+		Findings: []model.Finding{
+			{ID: "finding_assist_unbatched", Code: "UNBATCHED_LARGE_DML", Severity: model.RiskMedium, Title: "大批量 DML 缺少分批边界", Suggestion: "按主键分批。", Blocking: false, Status: model.FindingOpen},
+			{ID: "finding_assist_timeout", Code: "MISSING_LOCK_TIMEOUT", Severity: model.RiskMedium, Title: "未声明锁超时", Suggestion: "设置 lock_timeout。", Blocking: false, Status: model.FindingOpen},
+		},
+		CreatedAt: mustTime("2026-08-01T10:00:00Z"), UpdatedAt: mustTime("2026-08-01T10:00:00Z"),
+	}
+	if err := svc.store.CreateChange(change, audit(actor, change.ID, "CREATE", "测试")); err != nil {
+		t.Fatalf("CreateChange: %v", err)
+	}
+	message, err := svc.AskChangeAssistant(context.Background(), change.ID, "usr_developer", AskChangeAssistantInput{Question: "怎么修事务问题？"})
+	if err != nil {
+		t.Fatalf("AskChangeAssistant: %v", err)
+	}
+	if !strings.Contains(message.Answer, "事务优化建议") {
+		t.Fatalf("expected transaction remediation section, got: %s", message.Answer)
+	}
+	if !strings.Contains(message.Answer, "分批") && !strings.Contains(message.Answer, "lock_timeout") {
+		t.Fatalf("expected concrete TX hints, got: %s", message.Answer)
+	}
+}
+
 func TestAskChangeAssistantEmptyQuestionRejected(t *testing.T) {
 	svc := newAssistantTestService(t)
 	change := assistantDemoChange(t, svc)

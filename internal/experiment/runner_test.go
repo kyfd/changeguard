@@ -2,6 +2,7 @@ package experiment
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -85,5 +86,21 @@ func TestSimulationIsExplicitlyNotRun(t *testing.T) {
 	report := runner.Run(context.Background(), modelChange("SELECT 1;", "SELECT 1;"))
 	if report.Mode != "DEMO_ONLY" || report.Status != "NOT_RUN" || report.RollbackVerified {
 		t.Fatalf("demo mode must not fabricate execution success: %+v", report)
+	}
+}
+
+func TestClassifyShadowSQLErrorMapsTimeouts(t *testing.T) {
+	cases := map[string]string{
+		"ERROR: canceling statement due to lock timeout (SQLSTATE 55P03)":      "LOCK_TIMEOUT",
+		"ERROR: canceling statement due to statement timeout (SQLSTATE 57014)": "STATEMENT_TIMEOUT",
+		"ERROR: deadlock detected":                                   "DEADLOCK",
+		"ERROR: could not serialize access due to concurrent update": "SERIALIZATION_FAILURE",
+		"ERROR: relation does not exist":                             "SQL_EXEC_FAILED",
+	}
+	for input, want := range cases {
+		got := classifyShadowSQLError(fmt.Errorf("%s", input))
+		if !strings.Contains(got, want) {
+			t.Fatalf("classify %q: got %q want prefix %q", input, got, want)
+		}
 	}
 }

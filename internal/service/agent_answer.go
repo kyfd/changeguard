@@ -114,6 +114,10 @@ func composeAssistantAnswer(change model.ChangeRequest, blocking, open []model.F
 		for _, finding := range blocking {
 			lines = append(lines, fmt.Sprintf("  - %s（%s）：%s", finding.Title, finding.Code, finding.Suggestion))
 		}
+		if hints := transactionRemediationHints(append(append([]model.Finding{}, blocking...), open...)); len(hints) > 0 {
+			lines = append(lines, "事务优化建议：")
+			lines = append(lines, hints...)
+		}
 		proposals = append(proposals, "remediate")
 		lines = append(lines, "下一步：先按建议完成整改，再由独立人员复核验证。")
 		next = "整改并提交复核"
@@ -122,6 +126,10 @@ func composeAssistantAnswer(change model.ChangeRequest, blocking, open []model.F
 		lines = append(lines, fmt.Sprintf("原因：还有 %d 个待处理发现项（非阻断）：", len(open)))
 		for _, finding := range open {
 			lines = append(lines, fmt.Sprintf("  - %s（%s）", finding.Title, finding.Code))
+		}
+		if hints := transactionRemediationHints(open); len(hints) > 0 {
+			lines = append(lines, "事务优化建议：")
+			lines = append(lines, hints...)
 		}
 		proposals = append(proposals, "remediate", "review")
 		lines = append(lines, "下一步：处理非阻断项并在审批前确认无新增阻断。")
@@ -132,6 +140,15 @@ func composeAssistantAnswer(change model.ChangeRequest, blocking, open []model.F
 		proposals = append(proposals, "rerun_experiment")
 		lines = append(lines, "下一步：使用真实 PostgreSQL 影子演练验证，并确认回滚已验证。")
 		next = "执行真实演练"
+	} else if change.Experiment != nil && (change.Experiment.LockWaitMS > 1000 || change.Experiment.DurationMS >= 5000) {
+		lines = append(lines, "结论：演练已完成，但事务成本偏高，建议优化后再审批。")
+		lines = append(lines, fmt.Sprintf("证据：锁/最慢语句约 %dms，总耗时 %dms。", change.Experiment.LockWaitMS, change.Experiment.DurationMS))
+		lines = append(lines, "事务优化建议：")
+		lines = append(lines, "  - 分批 DML（LIMIT + 主键游标），控制单事务行数")
+		lines = append(lines, "  - DDL 使用 CONCURRENTLY / NOT VALID 分阶段")
+		lines = append(lines, "  - 生产执行声明 lock_timeout 与 statement_timeout")
+		proposals = append(proposals, "remediate", "rerun_experiment")
+		next = "优化事务后重新演练"
 	} else if change.Status == model.StatusWaitingApproval {
 		lines = append(lines, "结论：当前变更可以进入审批环节。")
 		lines = append(lines, "状态：等待审批，且无阻断项、无未处理发现项。")
@@ -150,6 +167,35 @@ func composeAssistantAnswer(change model.ChangeRequest, blocking, open []model.F
 
 	answer := strings.Join(lines, "\n") + "\n\n下一步：" + next
 	return answer, assistantProposals(proposals)
+}
+
+// transactionRemediationHints maps transaction-optimization finding codes to
+// concrete, production-oriented next steps for Clawbot answers.
+func transactionRemediationHints(findings []model.Finding) []string {
+	seen := make(map[string]bool)
+	hints := make([]string, 0, 4)
+	add := func(code, hint string) {
+		if seen[code] {
+			return
+		}
+		for _, finding := range findings {
+			if finding.Code == code {
+				seen[code] = true
+				hints = append(hints, "  - "+hint)
+				return
+			}
+		}
+	}
+	add("UNBATCHED_LARGE_DML", "按主键/时间窗口分批 UPDATE/DELETE，单批限制行数并提交，避免大事务")
+	add("FK_WITHOUT_NOT_VALID", "外键改为 ADD ... NOT VALID，低峰期再 VALIDATE CONSTRAINT")
+	add("INDEX_NOT_CONCURRENT", "索引创建改为 CREATE INDEX CONCURRENTLY，并观察锁等待")
+	add("DDL_LOCK_IMPACT", "DDL 放到维护窗口，或改用在线/并发语法并设置 lock_timeout")
+	add("HEAVY_DDL_REWRITE", "避免 VACUUM FULL/CLUSTER/REINDEX 直接上生产，改用在线重建或分窗口")
+	add("MISSING_LOCK_TIMEOUT", "在执行脚本声明 SET lock_timeout / statement_timeout，冲突时快速失败")
+	add("SELECT_FOR_UPDATE_UNBOUNDED", "缩小 FOR UPDATE 范围，补充 LIMIT 或主键条件，缩短事务内逻辑")
+	add("MIXED_DDL_DML_TRANSACTION", "将结构变更与大批量数据回填拆成独立变更单分别演练")
+	add("TOO_MANY_STATEMENTS", "按业务目标与回滚边界拆分变更单，降低单事务失败面")
+	return hints
 }
 
 func assistantProposals(types []model.ActionProposalType) []model.AgentActionProposal {
