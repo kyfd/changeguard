@@ -26,19 +26,21 @@ var demoCredentials = []model.UserCredential{
 }
 
 type state struct {
-	Organizations     []model.Organization       `json:"organizations"`
-	Invites           []model.OrganizationInvite `json:"invites"`
-	Credentials       []model.UserCredential     `json:"credentials"`
-	Applications      []model.Application        `json:"applications"`
-	Users             []model.User               `json:"users"`
-	Changes           []model.ChangeRequest      `json:"changes"`
-	Audits            []model.AuditEvent         `json:"audits"`
-	Policies          []model.RiskPolicy         `json:"policies"`
-	ApplicationGrants []model.ApplicationGrant   `json:"application_grants"`
-	Outbox            []model.OutboxEvent        `json:"outbox"`
-	Passports         []model.StoredPassport     `json:"passports"`
-	IntegrationEvents []model.IntegrationEvent   `json:"integration_events"`
-	OutcomeSignals    []model.OutcomeSignal      `json:"outcome_signals"`
+	Organizations      []model.Organization       `json:"organizations"`
+	Invites            []model.OrganizationInvite `json:"invites"`
+	Credentials        []model.UserCredential     `json:"credentials"`
+	Applications       []model.Application        `json:"applications"`
+	Users              []model.User               `json:"users"`
+	Changes            []model.ChangeRequest      `json:"changes"`
+	Audits             []model.AuditEvent         `json:"audits"`
+	Policies           []model.RiskPolicy         `json:"policies"`
+	ApplicationGrants  []model.ApplicationGrant   `json:"application_grants"`
+	Outbox             []model.OutboxEvent        `json:"outbox"`
+	Passports          []model.StoredPassport     `json:"passports"`
+	IntegrationEvents  []model.IntegrationEvent   `json:"integration_events"`
+	OutcomeSignals     []model.OutcomeSignal      `json:"outcome_signals"`
+	AgentConversations []model.AgentConversation  `json:"agent_conversations,omitempty"`
+	AgentMessages      []model.AgentMessage       `json:"agent_messages,omitempty"`
 }
 
 type Store struct {
@@ -668,6 +670,20 @@ func (s *Store) OutcomeSignals(organizationID string, limit int) []model.Outcome
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
 	}
+	return items
+}
+
+// OutcomeSignalsByChange returns outcome signals scoped to one change.
+func (s *Store) OutcomeSignalsByChange(organizationID, changeID string) []model.OutcomeSignal {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]model.OutcomeSignal, 0, 4)
+	for _, signal := range s.data.OutcomeSignals {
+		if signal.OrganizationID == organizationID && signal.ChangeID == changeID {
+			items = append(items, signal)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].OccurredAt.After(items[j].OccurredAt) })
 	return items
 }
 

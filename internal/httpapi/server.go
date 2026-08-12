@@ -1065,6 +1065,45 @@ func (s *Server) handleChange(w http.ResponseWriter, r *http.Request) {
 		s.handleChangePassports(w, r, id, parts)
 		return
 	}
+	if action == "agent-ask" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		var input service.AskChangeAssistantInput
+		if err := decodeJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "问题格式不正确")
+			return
+		}
+		message, err := s.service.AskChangeAssistant(r.Context(), id, actorID(r), input)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, message)
+		return
+	}
+	if action == "agent-conversations" {
+		switch {
+		case len(parts) == 2 && r.Method == http.MethodGet:
+			items, err := s.service.AgentConversationsForChange(id, actorID(r))
+			if err != nil {
+				writeServiceError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, items)
+		case len(parts) == 3 && r.Method == http.MethodGet:
+			summary, err := s.service.AgentConversationFor(id, parts[2], actorID(r))
+			if err != nil {
+				writeServiceError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, summary)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	}
 	if action == "report" {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)

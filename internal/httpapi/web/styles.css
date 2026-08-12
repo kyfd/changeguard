@@ -1348,6 +1348,14 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .agent-qa-suggestions { display: flex; gap: 6px; flex-wrap: wrap; }
 .agent-qa-thinking { }
 .agent-tool-log { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+.agent-qa-citations { display: grid; gap: 6px; margin-top: 10px; }
+.agent-qa-citations > strong { font-size: 12px; color: var(--muted); letter-spacing: .03em; }
+.agent-citation-list { display: grid; gap: 5px; }
+.agent-citation { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid #dfe7f2; border-radius: 9px; background: #f8fafc; color: #263651; text-align: left; transition: border-color .18s ease, background .18s ease; }
+.agent-citation:hover { border-color: rgba(36,88,230,.4); background: #fff; }
+.agent-citation-kind { flex: none; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; letter-spacing: .04em; text-transform: uppercase; padding: 2px 6px; border-radius: 999px; background: rgba(36,88,230,.1); color: #2458e6; }
+.agent-citation > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 12px; }
+.agent-citation code { max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
 .agent-runtime-panel { margin-top: 16px; overflow: hidden; }
 .agent-runtime-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; }
 .agent-runtime-stat { min-width: 0; display: grid; gap: 5px; padding: 14px; border: 1px solid #dbe4f1; border-radius: 11px; background: linear-gradient(160deg, #f8faff, #fff); }

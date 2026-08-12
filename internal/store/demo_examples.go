@@ -12,24 +12,6 @@ func ensureDemoCoverage(data *state, organization model.Organization, now time.T
 	if organization.ID != "org_demo" {
 		return
 	}
-	legacyDemoIDs := map[string]bool{
-		"chg_demo_api_break": true, "chg_demo_gateway_limit": true, "chg_demo_promotion_done": true,
-		"chg_demo_portal_draft": true, "chg_demo_emergency_rejected": true,
-	}
-	keptChanges := data.Changes[:0]
-	for _, change := range data.Changes {
-		if !legacyDemoIDs[change.ID] {
-			keptChanges = append(keptChanges, change)
-		}
-	}
-	data.Changes = keptChanges
-	keptAudits := data.Audits[:0]
-	for _, audit := range data.Audits {
-		if !legacyDemoIDs[audit.ChangeID] {
-			keptAudits = append(keptAudits, audit)
-		}
-	}
-	data.Audits = keptAudits
 	applications := []model.Application{
 		{OrganizationID: organization.ID, ID: "app_gateway", Name: "开放平台网关", Owner: "陈嘉", Kind: "平台服务", Runtime: "Go / Kubernetes", RepositoryURL: "https://git.example.com/platform/api-gateway", Tier: "核心", Lifecycle: "生产运行", Environment: "生产 / Kubernetes", Tags: []string{"网关", "限流"}, Description: "统一认证、路由与限流"},
 		{OrganizationID: organization.ID, ID: "app_notification", Name: "消息通知服务", Owner: "赵可", Kind: "后端服务", Runtime: "Go / Kafka", RepositoryURL: "https://git.example.com/platform/notification-service", Tier: "重要", Lifecycle: "生产运行", Environment: "生产 / Kubernetes", Tags: []string{"短信", "Kafka"}, Description: "短信、邮件与站内信可靠投递"},
@@ -55,11 +37,48 @@ func ensureDemoCoverage(data *state, organization model.Organization, now time.T
 	}
 	developer := userByID["usr_developer"]
 	reviewer := userByID["usr_reviewer"]
+	owner := userByID["usr_owner"]
 	examples := []model.ChangeRequest{
 		demoSecretConfigChange(organization.ID, applicationByID["app_notification"], developer, now),
 		demoUnsafeKubernetesChange(organization.ID, applicationByID["app_file"], reviewer, now),
 		demoConfigDraftChange(organization.ID, applicationByID["app_gateway"], developer, now),
+		demoDDLNoConcurrentChange(organization.ID, applicationByID["app_order"], developer, now),
+		demoBatchDMLChange(organization.ID, applicationByID["app_member"], developer, now),
+		demoIndexMaintenanceChange(organization.ID, applicationByID["app_inventory"], developer, now),
+		demoEmergencyRejectedChange(organization.ID, applicationByID["app_payment"], developer, reviewer, now),
+		demoRollbackCompletedChange(organization.ID, applicationByID["app_order"], developer, owner, now),
+		demoIncidentLinkedChange(organization.ID, applicationByID["app_payment"], developer, owner, now),
+		demoAPIBreakingChange(organization.ID, applicationByID["app_gateway"], developer, now),
+		demoPromotionCompletedChange(organization.ID, applicationByID["app_member"], developer, owner, now),
 	}
+	// Purge only STALE legacy demo records — IDs that the current seed no longer
+	// provides (e.g. old chg_demo_gateway_limit / chg_demo_portal_draft). IDs that
+	// ARE re-seeded must be left untouched so normalizeState stays restart-idempotent
+	// (re-appending would rebuild their timestamps on every restart).
+	legacyDemoIDs := map[string]bool{
+		"chg_demo_api_break": true, "chg_demo_gateway_limit": true, "chg_demo_promotion_done": true,
+		"chg_demo_portal_draft": true, "chg_demo_emergency_rejected": true,
+	}
+	exampleIDs := make(map[string]bool, len(examples))
+	for _, example := range examples {
+		exampleIDs[example.ID] = true
+	}
+	keptChanges := data.Changes[:0]
+	for _, change := range data.Changes {
+		if legacyDemoIDs[change.ID] && !exampleIDs[change.ID] {
+			continue
+		}
+		keptChanges = append(keptChanges, change)
+	}
+	data.Changes = keptChanges
+	keptAudits := data.Audits[:0]
+	for _, audit := range data.Audits {
+		if legacyDemoIDs[audit.ChangeID] && !exampleIDs[audit.ChangeID] {
+			continue
+		}
+		keptAudits = append(keptAudits, audit)
+	}
+	data.Audits = keptAudits
 	existingChanges := make(map[string]bool, len(data.Changes))
 	for _, change := range data.Changes {
 		existingChanges[change.ID] = true
@@ -144,5 +163,130 @@ func demoConfigDraftChange(organizationID string, application model.Application,
 	change.ChangeType = "配置变更"
 	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_gateway_config", Kind: model.ArtifactConfig, Name: "限流策略配置", Source: "config/rate-limit.yaml", Language: "YAML", Content: "tenant_rate_limit:\n  enabled: true\n  default_qps: 500\n  burst: 100"}}
 	change.RollbackPlan = "恢复上一版限流参数并重新加载网关配置。"
+	return change
+}
+
+func demoDDLNoConcurrentChange(organizationID string, application model.Application, submitter model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-90 * time.Minute)
+	change := demoChangeBase(organizationID, "chg_demo_idx_offline", "订单历史分区表旧索引下线", application, submitter, model.StatusWaitingApproval, model.RiskHigh, createdAt, now.Add(2*time.Hour))
+	change.ChangeType = "DDL"
+	change.SQL = "DROP INDEX IF EXISTS ux_orders_legacy_status;"
+	change.RollbackSQL = "CREATE INDEX IF NOT EXISTS ux_orders_legacy_status ON orders(status) WHERE archived_at IS NULL;"
+	change.Description = "下线历史分区上长期未使用的大索引，释放存储并降低写入开销。"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_idx_drop", Kind: model.ArtifactDatabase, Name: "订单分区表 DDL", Source: "migrations/024_drop_legacy_index.sql", Language: "SQL", Content: change.SQL}}
+	change.RollbackPlan = "如出现性能回退，按回滚脚本重建受控索引。"
+	change.Findings = []model.Finding{
+		{ID: "finding_demo_idx_drop_meta", Code: "DDL_FULL_SCAN", Severity: model.RiskMedium, Title: "索引删除可能在活跃分区触发长时间扫描", Detail: "该索引同时服务订单历史查询，删除需在低峰窗口进行。", Evidence: "DROP INDEX", Suggestion: "拆分批次并在维护窗口执行。", Blocking: false, RuleVersion: 1, Status: model.FindingOpen, UpdatedAt: createdAt.Add(5 * time.Minute)},
+		{ID: "finding_demo_idx_drop_lock", Code: "DDL_LOCK_IMPACT", Severity: model.RiskHigh, Title: "线上 DDL 未使用 CONCURRENTLY", Detail: "DROP INDEX 直接执行会阻塞并发写入。", Evidence: "DROP INDEX IF EXISTS", Suggestion: "使用维护窗口或先改为占位再重建。", Blocking: true, RuleVersion: 1, Status: model.FindingAssigned, OwnerID: submitter.ID, OwnerName: submitter.Name, DueAt: &[]time.Time{now.Add(4 * time.Hour)}[0], UpdatedAt: createdAt.Add(5 * time.Minute)},
+	}
+	change.Timeline = append(change.Timeline, model.TimelineEntry{ID: "tl_demo_idx_drop_check", Status: model.StatusCheckFailed, Title: "确定性 DDL 检查提示锁影响", Detail: "DEMO_ONLY：命中非 CONCURRENTLY 与全表扫描风险", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(5 * time.Minute)})
+	change.Analysis = &model.AgentAnalysis{Provider: "rules-fallback", Risk: model.RiskHigh, Summary: "旧索引存在长时间不可用风险，建议维护窗口分批执行。", Reasons: []string{"DROP INDEX 需保持排他锁", "历史分区重建成本较高"}, Suggestions: []string{"低峰期窗口执行", "执行后监控慢查询变化"}, EvidenceIDs: []string{"finding_demo_idx_drop_lock"}, Steps: 2, ToolCalls: 2, GeneratedAt: createdAt.Add(6 * time.Minute)}
+	return change
+}
+
+func demoBatchDMLChange(organizationID string, application model.Application, submitter model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-3 * time.Hour)
+	change := demoChangeBase(organizationID, "chg_demo_points_archive", "会员积分过期批量归档", application, submitter, model.StatusReadyForExperiment, model.RiskMedium, createdAt, now.Add(5*time.Hour))
+	change.ChangeType = "DML"
+	change.SQL = "UPDATE member_points SET status='EXPIRED' WHERE expires_at < NOW() - INTERVAL '7 days' AND status='ACTIVE' LIMIT 10000;"
+	change.RollbackSQL = "UPDATE member_points SET status='ACTIVE' WHERE status='EXPIRED' AND updated_at >= NOW() - INTERVAL '1 hour';"
+	change.Description = "对超期积分进行分批归档，单批上限 1 万行，避免大事务。"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_batch_dml", Kind: model.ArtifactDatabase, Name: "积分归档 DML", Source: "scripts/archive_points.sql", Language: "SQL", Content: change.SQL}}
+	change.RollbackPlan = "停止调度并执行回滚 UPDATE 恢复积分状态。"
+	change.Experiment = &model.ExperimentReport{ID: "exp_demo_batch", Kind: "DEMO_ONLY", Mode: "DEMO_ONLY", Status: "PASSED", StartedAt: createdAt.Add(20 * time.Minute), FinishedAt: createdAt.Add(24 * time.Minute), DurationMS: 2400, DatasetRows: 10000, LockWaitMS: 40, P99BeforeMS: 8.2, P99AfterMS: 8.5, FailedTransactions: 0, RollbackVerified: true, ChecksTotal: 4, ChecksPassed: 4, ExecutionError: "显式演示数据未执行真实 PostgreSQL 影子演练"}
+	change.Timeline = append(change.Timeline, model.TimelineEntry{ID: "tl_demo_batch_exp", Status: model.StatusReadyForExperiment, Title: "影子库演练通过", Detail: "DEMO_ONLY：批量上限与锁等待符合预期", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(24 * time.Minute)})
+	return change
+}
+
+func demoIndexMaintenanceChange(organizationID string, application model.Application, submitter model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-7 * time.Hour)
+	change := demoChangeBase(organizationID, "chg_demo_inventory_fk", "库存预占表补充外键约束", application, submitter, model.StatusExperimentRunning, model.RiskMedium, createdAt, now.Add(3*time.Hour))
+	change.ChangeType = "DDL"
+	change.SQL = "ALTER TABLE inventory_reservation ADD CONSTRAINT fk_reservation_sku FOREIGN KEY (sku_id) REFERENCES sku(id);"
+	change.RollbackSQL = "ALTER TABLE inventory_reservation DROP CONSTRAINT IF EXISTS fk_reservation_sku;"
+	change.Description = "为预占记录补充外键约束，防止孤儿数据。"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_fk_add", Kind: model.ArtifactDatabase, Name: "库存外键 DDL", Source: "migrations/022_add_fk.sql", Language: "SQL", Content: change.SQL}}
+	change.RollbackPlan = "执行 DROP CONSTRAINT 回滚外键。"
+	change.Experiment = &model.ExperimentReport{ID: "exp_demo_fk", Kind: "DEMO_ONLY", Mode: "DEMO_ONLY", Status: "RUNNING", StartedAt: createdAt.Add(2 * time.Hour), FinishedAt: time.Time{}, DurationMS: 0, DatasetRows: 2000000, LockWaitMS: 120, ExecutionError: "显式演示数据未执行真实 PostgreSQL 影子演练"}
+	change.Timeline = append(change.Timeline, model.TimelineEntry{ID: "tl_demo_fk_exp", Status: model.StatusExperimentRunning, Title: "影子库演练进行中", Detail: "DEMO_ONLY：模拟 200 万行表外键验证", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(2 * time.Hour)})
+	return change
+}
+
+func demoEmergencyRejectedChange(organizationID string, application model.Application, submitter, reviewer model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-26 * time.Hour)
+	change := demoChangeBase(organizationID, "chg_demo_emergency_rejected", "支付网关故障应急参数调整", application, submitter, model.StatusRejected, model.RiskHigh, createdAt, now.Add(-20*time.Hour))
+	change.ChangeType = "配置变更"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_emergency", Kind: model.ArtifactConfig, Name: "支付网关超时配置", Source: "config/payment-timeout.yaml", Language: "YAML", Content: "payment_timeout_ms: 3000\nretry_policy:\n  max_retries: 1\n  backoff_ms: 200\ncallback:\n  enabled: false"}}
+	change.RollbackPlan = "恢复标准超时配置。"
+	change.Findings = []model.Finding{
+		{ID: "finding_demo_emergency_cb", Code: "CONFIG_CALLBACK_DISABLED", Severity: model.RiskHigh, Title: "回调被禁用将影响对账", Detail: "应急参数跳过了支付回调，存在资金核对缺口。", Evidence: "callback.enabled=false", Suggestion: "恢复回调或补充人工对账。", Blocking: true, RuleVersion: 1, Status: model.FindingVerified, OwnerID: submitter.ID, OwnerName: submitter.Name, Resolution: "应急窗口结束已恢复回调", VerifiedByID: reviewer.ID, VerifiedByName: reviewer.Name, VerificationComment: "已确认恢复", UpdatedAt: createdAt.Add(30 * time.Minute)},
+	}
+	change.ReviewerID = reviewer.ID
+	change.ReviewerName = reviewer.Name
+	change.ReviewComment = "应急变更缺少可观测性闭环，拒绝放行并要求恢复回调后重提。"
+	change.Timeline = append(change.Timeline,
+		model.TimelineEntry{ID: "tl_demo_emergency_submit", Status: model.StatusDraft, Title: "应急变更提交", Detail: "故障处置通道", Actor: submitter.Name, CreatedAt: createdAt},
+		model.TimelineEntry{ID: "tl_demo_emergency_reject", Status: model.StatusRejected, Title: "审核人拒绝", Detail: "要求补齐回调与对账方案", Actor: reviewer.Name, CreatedAt: createdAt.Add(2 * time.Hour)},
+	)
+	return change
+}
+
+func demoRollbackCompletedChange(organizationID string, application model.Application, submitter, reviewer model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-72 * time.Hour)
+	change := demoChangeBase(organizationID, "chg_demo_order_cache_ttl", "订单缓存 TTL 缩短为 30 秒", application, submitter, model.StatusCompleted, model.RiskLow, createdAt, now.Add(-60*time.Hour))
+	change.ChangeType = "配置变更"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_cache_ttl", Kind: model.ArtifactConfig, Name: "缓存 TTL 配置", Source: "config/cache.yaml", Language: "YAML", Content: "order_cache_ttl_seconds: 30\nnegative_cache_ttl_seconds: 5"}}
+	change.RollbackPlan = "恢复 300 秒 TTL 配置。"
+	change.ReviewerID = reviewer.ID
+	change.ReviewerName = reviewer.Name
+	change.ReviewComment = "同意缩短缓存 TTL 以降低脏读窗口。"
+	change.Timeline = append(change.Timeline,
+		model.TimelineEntry{ID: "tl_demo_cache_ttl_review", Status: model.StatusApproved, Title: "审批通过", Detail: "低风险参数调整", Actor: reviewer.Name, CreatedAt: now.Add(-66 * time.Hour)},
+		model.TimelineEntry{ID: "tl_demo_cache_ttl_done", Status: model.StatusCompleted, Title: "变更完成", Detail: "配置已生效，观察无回退", Actor: submitter.Name, CreatedAt: now.Add(-60 * time.Hour)},
+	)
+	return change
+}
+
+func demoIncidentLinkedChange(organizationID string, application model.Application, submitter, reviewer model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-5 * 24 * time.Hour)
+	change := demoChangeBase(organizationID, "chg_demo_pay_default", "支付渠道表默认值修复", application, submitter, model.StatusCompleted, model.RiskHigh, createdAt, now.Add(-4*24*time.Hour))
+	change.ChangeType = "DDL"
+	change.SQL = "ALTER TABLE payment_channel ALTER COLUMN callback_url SET DEFAULT 'PENDING';"
+	change.RollbackSQL = "ALTER TABLE payment_channel ALTER COLUMN callback_url DROP DEFAULT;"
+	change.Description = "修复新渠道无回调地址导致对账中断的问题，并关联事故复盘。"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_null_default", Kind: model.ArtifactDatabase, Name: "支付渠道默认值修复", Source: "migrations/021_fix_default.sql", Language: "SQL", Content: change.SQL}}
+	change.RollbackPlan = "恢复无默认值状态并通知对账组。"
+	change.ReviewerID = reviewer.ID
+	change.ReviewerName = reviewer.Name
+	change.ReviewComment = "事故复盘要求：默认值修复必须先在影子库验证。"
+	change.Timeline = append(change.Timeline,
+		model.TimelineEntry{ID: "tl_demo_null_default_incident", Status: model.StatusDraft, Title: "关联事故 INC-20260719", Detail: "回填事故关联与复盘结论", Actor: submitter.Name, CreatedAt: now.Add(-5 * 24 * time.Hour)},
+		model.TimelineEntry{ID: "tl_demo_null_default_done", Status: model.StatusCompleted, Title: "修复已上线并验证", Detail: "对账中断恢复", Actor: reviewer.Name, CreatedAt: now.Add(-4 * 24 * time.Hour)},
+	)
+	return change
+}
+
+func demoAPIBreakingChange(organizationID string, application model.Application, submitter model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-2 * time.Hour)
+	change := demoChangeBase(organizationID, "chg_demo_api_break", "订单查询接口契约升级", application, submitter, model.StatusReadyForExperiment, model.RiskMedium, createdAt, now.Add(4*time.Hour))
+	change.ChangeType = "API 变更"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_api_break", Kind: model.ArtifactAPI, Name: "OpenAPI 契约", Source: "api/openapi/orders.yaml", Language: "YAML", Content: "paths:\n  /v1/orders:\n    get:\n      parameters:\n        - name: cursor\n          in: query\n          required: true\n          schema:\n            type: string"}}
+	change.RollbackPlan = "保留旧接口灰度期 30 天，回退路由即可恢复。"
+	change.Timeline = append(change.Timeline, model.TimelineEntry{ID: "tl_demo_api_break_ready", Status: model.StatusReadyForExperiment, Title: "契约兼容性检查完成", Detail: "DEMO_ONLY：识别破坏性变更，需走双跑灰度", Actor: "ChangeGuard Worker", CreatedAt: createdAt.Add(15 * time.Minute)})
+	return change
+}
+
+func demoPromotionCompletedChange(organizationID string, application model.Application, submitter, reviewer model.User, now time.Time) model.ChangeRequest {
+	createdAt := now.Add(-10 * 24 * time.Hour)
+	change := demoChangeBase(organizationID, "chg_demo_promotion_done", "大促参数预热与容量评估", application, submitter, model.StatusCompleted, model.RiskLow, createdAt, now.Add(-9*24*time.Hour))
+	change.ChangeType = "配置变更"
+	change.Artifacts = []model.ChangeArtifact{{ID: "artifact_demo_promotion", Kind: model.ArtifactConfig, Name: "大促参数", Source: "config/promotion-2026.yaml", Language: "YAML", Content: "promotion_mode: enabled\npeak_qps_capacity: 5000\ndowngrade_ratio: 0.2\nobserve_window_minutes: 120"}}
+	change.RollbackPlan = "关闭大促模式并恢复默认容量评估。"
+	change.ReviewerID = reviewer.ID
+	change.ReviewerName = reviewer.Name
+	change.ReviewComment = "容量评估通过，允许大促窗口启用。"
+	change.Timeline = append(change.Timeline,
+		model.TimelineEntry{ID: "tl_demo_promotion_done", Status: model.StatusCompleted, Title: "大促窗口结束，变更闭环", Detail: "流量回落，无事故", Actor: reviewer.Name, CreatedAt: now.Add(-9 * 24 * time.Hour)},
+	)
 	return change
 }

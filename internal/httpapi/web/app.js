@@ -1802,9 +1802,15 @@ function renderAnalysis(analysis) {
 function renderAgentQAItem(item, options = {}) {
   const pending = !!options.pending;
   const tools = (item.tool_call_log || []).map(t => escapeHTML(t.name || "")).filter(Boolean);
+  const citations = (item.citations || []).length
+    ? `<div class="agent-qa-citations"><strong>证据链</strong><div class="agent-citation-list">${(item.citations || []).map(c => `<button type="button" class="agent-citation" data-route="risks" title="${escapeHTML(c.summary || c.title || "")}"><span class="agent-citation-kind">${escapeHTML(c.kind || "evidence")}</span><span>${escapeHTML(c.title || c.id || "")}</span><code>${escapeHTML(c.summary || "")}</code></button>`).join("")}</div></div>`
+    : "";
+  const trace = (item.trace || []).length
+    ? `<div class="agent-tool-log"><strong>工具轨迹</strong>${(item.trace || []).map(t => `<code>${escapeHTML(t.tool || "")}${t.output ? ` · ${escapeHTML(String(t.output).slice(0, 30))}` : ""}</code>`).join("")}</div>`
+    : "";
   const answerBody = pending
     ? `<div class="agent-qa-thinking"><span class="agent-qa-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>正在调用工具分析…</span></div>`
-    : `<p>${escapeHTML(item.answer || "").replaceAll("\n", "<br>")}</p>${tools.length ? `<div class="agent-tool-log">${tools.map(n => `<code>${n}</code>`).join("")}</div>` : ""}`;
+    : `<p>${escapeHTML(item.answer || "").replaceAll("\n", "<br>")}</p>${citations}${trace}${tools.length ? `<div class="agent-tool-log">${tools.map(n => `<code>${n}</code>`).join("")}</div>` : ""}`;
   return `<div class="agent-qa-item${pending ? " is-pending" : ""}" data-qa-id="${escapeHTML(item.id || "")}">
     <div class="agent-qa-q"><span class="avatar">${escapeHTML(initials(item.actor_name || actor()?.name || "审"))}</span>
       <div><div class="comment-meta"><strong>${escapeHTML(item.actor_name || actor()?.name || "审批人")}</strong><span>${formatDate(item.created_at || new Date().toISOString())}</span></div>
@@ -4175,14 +4181,24 @@ function bindEvents() {
       try {
         const result = await api("/api/changes/" + changeId + "/agent-ask", {method:"POST", body:JSON.stringify({question})});
         // 就地补丁 DOM，不再 renderPage 整页刷新
-        const ok = patchAgentQAUI(result?.entry, result?.change);
+        const entry = {
+          id: result?.id || "msg_" + Date.now(),
+          question: result?.question || question,
+          answer: result?.answer || result?.content || "",
+          citations: result?.citations || [],
+          trace: result?.trace || [],
+          proposals: result?.proposals || [],
+          created_at: result?.created_at || new Date().toISOString(),
+          actor_name: actor()?.name || "审批人",
+        };
+        const ok = patchAgentQAUI(entry, result?.change);
         if (!ok && result?.change) {
           // 极端情况：面板已离开详情页时才退回全量渲染
           state.currentChange = result.change;
           await renderPage();
         }
         if (area) { area.value = ""; area.disabled = false; area.focus(); }
-        toast("预审回答已写入", "success", result?.entry?.tool_calls ? `调用 ${result.entry.tool_calls} 次工具` : "已就地更新");
+        toast("预审回答已写入", "success", (result?.trace || []).length ? `读取 ${result.trace.length} 项证据` : "已就地更新");
       } catch (error) {
         document.querySelectorAll(".agent-qa-item.is-pending").forEach(node => node.remove());
         const list = document.querySelector("#agentQAList");
