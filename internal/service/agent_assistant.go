@@ -10,7 +10,7 @@ import (
 	"github.com/liufengxi/dbguard/internal/store"
 )
 
-// AskChangeAssistantInput is the payload for a change-scoped Clawbot question.
+// AskChangeAssistantInput is the payload for a change-scoped Evidence Navigator question.
 type AskChangeAssistantInput struct {
 	Question       string `json:"question"`
 	ConversationID string `json:"conversation_id,omitempty"`
@@ -46,7 +46,7 @@ func (s *Service) AskChangeAssistant(ctx context.Context, changeID, actorID stri
 	// The assistant answers purely from the deterministic evidence attached to
 	// this change plus a small set of read-only tools. It cannot approve,
 	// sign passports, deploy or mutate any governance state.
-	answer := buildAssistantAnswer(change, s.store, actor, question)
+	answer := buildAssistantAnswer(ctx, change, s.evidenceTools, question)
 
 	conversationID := strings.TrimSpace(input.ConversationID)
 	conversation, existing, err := s.conversationFor(actor, change, conversationID)
@@ -61,6 +61,7 @@ func (s *Service) AskChangeAssistant(ctx context.Context, changeID, actorID stri
 		Role:           "assistant",
 		Content:        answer.Answer,
 		Question:       question,
+		Intent:         answer.Intent,
 		Answer:         answer.Answer,
 		Citations:      answer.Citations,
 		Trace:          answer.Trace,

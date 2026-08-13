@@ -41,7 +41,7 @@ func (s *Store) CreateAgentConversation(conversation model.AgentConversation, fi
 	defer s.mu.Unlock()
 	s.data.AgentConversations = append(s.data.AgentConversations, conversation)
 	s.data.AgentMessages = append(s.data.AgentMessages, firstMessage)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	return s.saveLocked()
 }
 
@@ -63,6 +63,6 @@ func (s *Store) AppendAgentMessage(organizationID, conversationID string, messag
 	// Only the assistant message is appended here; the user question was
 	// persisted together with the assistant answer as one turn.
 	s.data.AgentMessages = append(s.data.AgentMessages, message)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	return s.saveLocked()
 }

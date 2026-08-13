@@ -312,6 +312,7 @@ func (r *Runtime) analyzeOneShot(ctx context.Context, change model.ChangeRequest
 	analysis.Tokens = usage.CompletionTokens
 	analysis.TraceID = newTraceID()
 	analysis.GeneratedAt = time.Now()
+	syncAdvisoryRisk(&analysis)
 	return analysis, nil
 }
 
@@ -399,6 +400,7 @@ func (r *Runtime) analyzeAgentLoop(ctx context.Context, change model.ChangeReque
 			analysis.TraceID = traceID
 			analysis.ToolCallLog = callLog
 			analysis.GeneratedAt = time.Now()
+			syncAdvisoryRisk(&analysis)
 			_ = start
 			return analysis, nil
 		}
@@ -416,11 +418,20 @@ func (r *Runtime) analyzeAgentLoop(ctx context.Context, change model.ChangeReque
 			fn, _ := call["function"].(map[string]any)
 			name, _ := fn["name"].(string)
 			argsRaw, _ := fn["arguments"].(string)
-			args := map[string]any{}
-			if strings.TrimSpace(argsRaw) != "" {
-				_ = json.Unmarshal([]byte(argsRaw), &args)
-			}
+			args, argsErr := decodeToolArguments(argsRaw)
 			t0 := time.Now()
+			if argsErr != nil {
+				errMessage := "工具参数无效：" + argsErr.Error()
+				callLog = append(callLog, model.AgentToolCallRecord{
+					Name: name, Args: compact(argsRaw, 200), Error: errMessage, DurationMs: time.Since(t0).Milliseconds(),
+				})
+				toolCalls++
+				content, _ := json.Marshal(map[string]any{"error": errMessage})
+				messages = append(messages, map[string]any{
+					"role": "tool", "tool_call_id": id, "content": string(content),
+				})
+				continue
+			}
 			output, err := reg.Call(ctx, name, change, args, r.dataSource)
 			rec := model.AgentToolCallRecord{
 				Name: name, Args: compact(argsRaw, 200), DurationMs: time.Since(t0).Milliseconds(),
@@ -470,6 +481,26 @@ func (r *Runtime) analyzeAgentLoop(ctx context.Context, change model.ChangeReque
 		}
 	}
 	return model.AgentAnalysis{}, errors.New("Agent 超过最大分析轮次")
+}
+
+func decodeToolArguments(raw string) (map[string]any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]any{}, nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var args map[string]any
+	if err := decoder.Decode(&args); err != nil {
+		return nil, fmt.Errorf("必须是合法 JSON 对象: %w", err)
+	}
+	if args == nil {
+		return nil, errors.New("必须是 JSON 对象，不能为 null")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, errors.New("JSON 对象后存在多余内容")
+	}
+	return args, nil
 }
 
 var requiredEvidenceTools = []string{"get_rule_findings", "get_experiment_report", "get_change_context"}
@@ -749,6 +780,17 @@ func parseAnalysis(input string) (model.AgentAnalysis, error) {
 	return model.AgentAnalysis{Risk: raw.Risk, Summary: raw.Summary, Reasons: raw.Reasons, Suggestions: raw.Suggestions, EvidenceIDs: raw.EvidenceIDs}, nil
 }
 
+func syncAdvisoryRisk(analysis *model.AgentAnalysis) {
+	if analysis == nil {
+		return
+	}
+	if analysis.AdvisoryRisk == "" {
+		analysis.AdvisoryRisk = analysis.Risk
+	}
+	// Keep the legacy field populated during the compatibility window.
+	analysis.Risk = analysis.AdvisoryRisk
+}
+
 func validateEvidenceReferences(analysis model.AgentAnalysis, change model.ChangeRequest) error {
 	return normalizeEvidenceReferences(&analysis, change)
 }
@@ -905,11 +947,13 @@ func fallback(change model.ChangeRequest, reason string) model.AgentAnalysis {
 			risk = model.RiskMedium
 		}
 	}
-	return model.AgentAnalysis{
-		Provider: "rules-fallback", Risk: risk, Summary: summary,
+	analysis := model.AgentAnalysis{
+		Provider: "rules-fallback", AdvisoryRisk: risk, Risk: risk, Summary: summary,
 		Reasons: unique(reasons), Suggestions: unique(suggestions), EvidenceIDs: unique(evidenceIDs),
 		Steps: 1, ToolCalls: 0, TraceID: newTraceID(), InjectionSuspected: injection, GeneratedAt: time.Now(),
 	}
+	syncAdvisoryRisk(&analysis)
+	return analysis
 }
 
 func unique(items []string) []string {

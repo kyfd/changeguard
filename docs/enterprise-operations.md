@@ -18,6 +18,10 @@ ChangeGuard instance(s)
 
 仓库保留 experiment 与 Outbox 作为 SQL 影子验证的异步执行通道。只有 mode=POSTGRES 且 SQL 与回滚脚本在隔离影子事务中均实际执行成功，结果才可作为 SQL 进入审批的证据；DEMO_ONLY、NOT_RUN 和历史模拟结果都不能放行。配置与 Kubernetes 不经过该通道。
 
+Outbox 的恢复边界是 `PREPARE → APPLY → FINALIZE`，不是语句级 checkpoint。`attempt_id` 在同一事件的重试/接管期间保持稳定，每次 claim 都递增 `lease_generation` fencing token；renew、fail、complete 与 finalize 同时校验 worker、generation 和未过期租约。当前 APPLY 是单体隔离事务，服务在 APPLY 中断或 lease 过期后由新 generation 建立新事务并完整重跑 SQL 与回滚验证，不能从某条语句继续。FINALIZE 原子绑定 `input_sha256`、报告 `result_digest` 和变更状态，同 attempt/同结果可安全重复，旧 generation 不得落报告。
+
+启动恢复时会为处于 EXPERIMENT_QUEUED/EXPERIMENT_RUNNING 且没有活动事件的变更补建 Outbox；未过期 lease 继续由原 worker 持有，过期 lease 可被新 worker claim。运维排障应核对 event 的 `attempt_id`、`lease_generation`、stage、stage 时间、input/result digest 和 LockedBy/LockedUntil，禁止人工降低 generation、清空输入摘要或把 APPLY 手工改成 FINALIZE。
+
 ## 2. 推荐环境
 
 | 场景 | 服务实例 | 业务存储 | 会话 | 适用范围 |
@@ -96,6 +100,7 @@ docker compose down
 | DBGUARD_EXPERIMENT_MODE | SQL 验证模式 | 生产签证场景使用 postgres；demo_only 不可放行 |
 | DBGUARD_SHADOW_DSN | 隔离 PostgreSQL 影子库 DSN | 与生产完全隔离、最小权限、从 secret 注入 |
 | DBGUARD_WORKERS | SQL 影子验证 Outbox worker 数；`0` 显式禁用后台协调与消费 | 生产按验证并发与影子库容量设置；只读迁移预演使用 `0` |
+| DBGUARD_ENABLE_UPGRADE_APPLY | 是否允许 HTTP API 创建高权限在线升级 apply 触发标记；默认关闭 | 保持 `false`；仅在升级包来源、备份恢复、回滚、watcher 权限和共享目录边界均完成验证后，才在受控升级窗口显式设为 `true` |
 
 不要把 DSN、OIDC client secret、Redis 凭据、metrics/Operations token 或变更通行证写入镜像、Git、日志和工单正文。
 
@@ -154,6 +159,11 @@ curl --fail   -H "Authorization: Bearer $DBGUARD_METRICS_TOKEN"   http://127.0.0
 PostgreSQL：
 
 - 使用专用数据库和最小权限账号；
+- 启动事务内幂等创建并回填 `changeguard_changes`、`changeguard_outbox`、`changeguard_passports`、`changeguard_audit_events`、`changeguard_idempotency_records`；重复执行迁移安全，失败时整个事务回滚；
+- 保留 `dbguard_state` 完整 JSONB 作为兼容 fallback 和迁移见证。组织、成员、应用、规则、集成/结果信号、Agent 等仍是 legacy-only，禁止在本阶段删除 legacy 行或把核心表投影称为完整权威模型；
+- Outbox claim、幂等 claim、通行证消费和审计链追加走专用 PostgreSQL 原子事务；普通 Store 保存仍以 legacy CAS 为业务兼容边界，并在同事务刷新核心表兼容投影；
+- 使用 `DBGUARD_TEST_POSTGRES_DSN` 运行可选多实例集成测试；没有该变量时测试会明确 skip，不能据此宣称 PostgreSQL 多实例已在目标环境验证；
+- 使用 `SELECT count(*)` 和按组织/状态查询核对回填，不要手工清空任一侧；回滚应用版本时保留新增表和 `dbguard_state`，数据库恢复另行演练；
 - 连接池总量按“实例数 × 每实例最大连接数”核算；
 - 关键状态迁移、审计写入和通行证消费放在一致事务中；
 - 对组织、应用、状态、过期时间和审计时间建立必要索引；
@@ -231,6 +241,10 @@ CHANGEGUARD_RESTORE_ROOT=/opt/changeguard/restore-staging \
 
 ## 10. 升级与回滚
 
+在线升级的版本、状态和历史查询不受 apply 开关影响。`POST /api/upgrade/apply` 属于可驱动 root watcher 的高权限执行边界，默认失败关闭：未显式设置 `DBGUARD_ENABLE_UPGRADE_APPLY=true` 时返回 HTTP 503、稳定错误码 `UPGRADE_APPLY_DISABLED` 和安全说明，前端不展示“立即升级”入口。仅设置 `DBGUARD_UPGRADE_DIR`、上传升级包或具备企业管理员/技术负责人角色都不会开启执行能力；角色鉴权在开关开启后仍然有效。
+
+显式启用前必须确认升级包来自受信发布流程并完成摘要/签名验证，当前数据与配置已有可恢复备份，失败回滚和健康检查经过演练，watcher 与核心服务权限隔离，且共享升级目录不能被非预期主体写入。升级窗口结束后应恢复为 `false` 并重启核心服务；该开关不是长期开放的便利功能，也不能替代不可变 release 安装、preflight 和人工流量切换。
+
 升级前：
 
 1. 备份数据库并验证可恢复；
@@ -253,6 +267,7 @@ CHANGEGUARD_RESTORE_ROOT=/opt/changeguard/restore-staging \
 
 - 核心使用专用 `changeguard` 用户，release/env 对运行用户只读，只有数据目录可写；
 - `DBGUARD_ENV_FILE=/etc/changeguard/core.env` 且 `DBGUARD_ENV_PROFILE=production`；
+- `DBGUARD_ENABLE_UPGRADE_APPLY=false`；如受控升级窗口临时启用，已完成来源、备份恢复、回滚、watcher 权限和共享目录边界验证，并安排窗口结束后关闭；
 - `DBGUARD_LISTEN_ADDRESS` 显式绑定 loopback，production 环境中未设置 `PORT`；
 - `dbguard --check-config` 与 `changeguard-core-preflight.sh` 均通过；
 - DBGUARD_ENABLE_DEMO_ACCOUNTS=false；

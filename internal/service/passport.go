@@ -106,7 +106,9 @@ func (s *Service) IssuePassport(changeID, actorID string, ttlSeconds int) (model
 		ApproverID: change.ReviewerID, ApproverName: change.ReviewerName, Status: model.PassportActive,
 		TokenSHA256: changegate.TokenSHA256(token), IssuedAt: now, ExpiresAt: expiresAt,
 	}
-	if err := s.store.CreatePassport(passport, audit(actor, change.ID, "PASSPORT_ISSUED", fmt.Sprintf("签发短时一次性通行证 %s，绑定制品 %s、环境 %s 和规则版本 %s", passport.ID, passport.ArtifactSHA256, passport.Environment, passport.RuleSetVersion))); err != nil {
+	issueAudit := auditPassport(audit(actor, change.ID, "PASSPORT_ISSUED", fmt.Sprintf("签发短时一次性通行证 %s，绑定制品 %s、环境 %s 和规则版本 %s", passport.ID, passport.ArtifactSHA256, passport.Environment, passport.RuleSetVersion)), passport.ID)
+	issueAudit.RequestDigest = change.ArtifactSHA256
+	if err := s.store.CreatePassport(passport, issueAudit); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			return model.PassportCredential{}, fmt.Errorf("%w：该变更已有有效通行证，请先消费、过期或撤销", ErrInvalidState)
 		}
@@ -170,7 +172,9 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 		action = "PASSPORT_CONSUMED"
 	}
 	gateActor := model.User{ID: "ci:" + consumer, OrganizationID: passport.OrganizationID, Name: consumer, Role: "CI", Active: true}
-	validated, err := s.store.UsePassport(passport.ID, changegate.TokenSHA256(token), consumer, now, consume, audit(gateActor, passport.ChangeID, action, fmt.Sprintf("CI 校验通行证 %s，制品与环境匹配", passport.ID)))
+	gateAudit := auditPassport(audit(gateActor, passport.ChangeID, action, fmt.Sprintf("CI 校验通行证 %s，制品与环境匹配", passport.ID)), passport.ID)
+	gateAudit.RequestDigest = input.ArtifactSHA256
+	validated, err := s.store.UsePassport(passport.ID, changegate.TokenSHA256(token), consumer, now, consume, gateAudit)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrPassportExpired):
@@ -187,7 +191,9 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 		}
 	}
 	if !consume {
-		_ = s.store.RecordAudit(audit(gateActor, passport.ChangeID, action, fmt.Sprintf("CI 验签通过：%s", passport.ID)))
+		verifyAudit := auditPassport(audit(gateActor, passport.ChangeID, action, fmt.Sprintf("CI 验签通过：%s", passport.ID)), passport.ID)
+		verifyAudit.RequestDigest = input.ArtifactSHA256
+		_ = s.store.RecordAudit(verifyAudit)
 	} else if completed, changeErr := s.store.Change(passport.ChangeID); changeErr == nil {
 		s.publish(completed, "CI 通行证已消费，生产变更自动完成")
 	}

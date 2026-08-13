@@ -1,6 +1,6 @@
 # 数据库事务优化治理
 
-ChangeGuard 把常见的 PostgreSQL 事务优化实践固化成**确定性规则 + 影子演练证据 + Clawbot 整改建议**，而不是只靠人工经验。
+ChangeGuard 把常见的 PostgreSQL 事务优化实践固化成**确定性规则 + 影子演练证据 + Evidence Navigator 整改建议**，而不是只靠人工经验。
 
 ## 规则（静态检查）
 
@@ -47,9 +47,9 @@ PostgreSQL 影子事务默认：
 - 采集：最慢语句耗时、事务内持锁数、缓冲命中增量、回滚同事务验证
 - 失败分类：`LOCK_TIMEOUT` / `STATEMENT_TIMEOUT` / `DEADLOCK` / `SERIALIZATION_FAILURE`
 
-## Clawbot
+## Evidence Navigator（变更证据助手）
 
-变更助手在命中上述规则时，会额外输出「事务优化建议」清单（分批、NOT VALID、CONCURRENTLY、超时声明、拆单等），并引用 finding / 演练证据，不直接改状态。
+变更证据助手在命中上述规则时，会按问题执行最小范围的只读查询，输出事务优化建议（分批、NOT VALID、CONCURRENTLY、超时声明、拆单等），并引用真实 finding / 演练证据。它不直接修改状态，也没有审批、签发通行证、部署、回滚或升级工具。
 
 ## 演示变更
 

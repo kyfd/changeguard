@@ -1,96 +1,191 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/store"
 )
 
 // assistantAnswer is the deterministic, evidence-carrying reply produced by the
-// change-scoped Clawbot. It is intentionally built from local governance state
-// so the assistant never depends on a paid model for v1, and it never mutates
-// anything.
+// change-scoped assistant. Tools in Trace are read-only queries that were
+// actually executed for the detected intent; unsupported questions execute no
+// evidence tools and safely fall back to guidance.
 type assistantAnswer struct {
+	Intent    model.AgentQuestionIntent
 	Answer    string
 	Citations []model.AgentCitation
 	Trace     []model.AgentToolTrace
 	Proposals []model.AgentActionProposal
 }
 
-// buildAssistantAnswer answers a question about a change from deterministic
-// evidence: current status, blocking findings, experiment state, approval
-// requirements, passports, and post-release outcome signals.
-func buildAssistantAnswer(change model.ChangeRequest, data *store.Store, actor model.User, question string) assistantAnswer {
-	answer := assistantAnswer{
-		Trace: []model.AgentToolTrace{{Tool: "get_change_context", Input: change.ID, Output: string(change.Status) + " / " + change.Title}},
-	}
+// buildAssistantAnswer routes a question to the minimum read-only evidence set
+// needed to answer it. Data and trace always come from the same registry
+// execution; failed queries remain visible and never produce citations.
+func buildAssistantAnswer(ctx context.Context, change model.ChangeRequest, registry *EvidenceQueryRegistry, question string) assistantAnswer {
+	intent := detectAssistantIntent(question)
+	answer := assistantAnswer{Intent: intent}
+	query := EvidenceQuery{Change: change, OrganizationID: change.OrganizationID}
 
-	// Blocking findings are the core of "why is this stuck".
-	blocking := make([]model.Finding, 0)
-	open := make([]model.Finding, 0)
-	for _, finding := range change.Findings {
-		if finding.Blocking {
-			blocking = append(blocking, finding)
+	switch intent {
+	case model.AgentIntentBlockingReason:
+		query.Input = "filter=unresolved_blocking"
+		result := registry.Execute(ctx, evidenceToolFindings, query)
+		answer.Trace = append(answer.Trace, result.Trace)
+		findings, ok := evidenceFindings(result)
+		if !ok {
+			answer.Answer = evidenceQueryFailureAnswer(result.Trace)
+			break
 		}
-		if finding.Status == model.FindingOpen || finding.Status == model.FindingAssigned {
-			open = append(open, finding)
+		answer.Citations = findingCitations(findings.Blocking)
+		answer.Answer, answer.Proposals = composeBlockingAnswer(change, findings.Blocking)
+	case model.AgentIntentNextStep:
+		query.Input = "filter=unresolved"
+		findingResult := registry.Execute(ctx, evidenceToolFindings, query)
+		query.Input = "change=" + change.ID
+		experimentResult := registry.Execute(ctx, evidenceToolExperiment, query)
+		answer.Trace = append(answer.Trace, findingResult.Trace, experimentResult.Trace)
+		findings, findingsOK := evidenceFindings(findingResult)
+		experiment, experimentOK := evidenceExperiment(experimentResult)
+		if !findingsOK || !experimentOK {
+			answer.Answer = evidenceQueryFailuresAnswer(findingResult, experimentResult)
+			break
 		}
+		answer.Citations = append(answer.Citations, changeCitation(change))
+		answer.Citations = append(answer.Citations, findingCitations(append(findings.Blocking, findings.Open...))...)
+		if experiment != nil {
+			answer.Citations = append(answer.Citations, experimentCitation(experiment))
+		}
+		answer.Answer, answer.Proposals = composeNextStepAnswer(change, findings.Blocking, findings.Open, experiment)
+	case model.AgentIntentFindingRemediation:
+		query.Input = "filter=unresolved"
+		result := registry.Execute(ctx, evidenceToolFindings, query)
+		answer.Trace = append(answer.Trace, result.Trace)
+		findings, ok := evidenceFindings(result)
+		if !ok {
+			answer.Answer = evidenceQueryFailureAnswer(result.Trace)
+			break
+		}
+		unresolved := append(append([]model.Finding{}, findings.Blocking...), findings.Open...)
+		answer.Citations = findingCitations(unresolved)
+		answer.Answer, answer.Proposals = composeRemediationAnswer(unresolved)
+	case model.AgentIntentPassportGate:
+		query.Input = "status=all"
+		passportResult := registry.Execute(ctx, evidenceToolPassports, query)
+		query.Input = "change=" + change.ID
+		experimentResult := registry.Execute(ctx, evidenceToolExperiment, query)
+		answer.Trace = append(answer.Trace, passportResult.Trace, experimentResult.Trace)
+		passports, passportsOK := evidencePassports(passportResult)
+		experiment, experimentOK := evidenceExperiment(experimentResult)
+		if !passportsOK || !experimentOK {
+			answer.Answer = evidenceQueryFailuresAnswer(passportResult, experimentResult)
+			break
+		}
+		answer.Citations = append(answer.Citations, changeCitation(change))
+		for _, passport := range passports {
+			answer.Citations = append(answer.Citations, passportCitation(passport))
+		}
+		if experiment != nil {
+			answer.Citations = append(answer.Citations, experimentCitation(experiment))
+		}
+		answer.Answer = composePassportGateAnswer(change, passports, experiment)
+	default:
+		answer.Answer = "我无法确定你要查询哪类变更证据，因此没有执行任何工具查询。你可以问：为什么被阻断、下一步做什么、finding 如何整改，或 passport/CI Gate 状态。助手只读取证据，不会执行审批、签发护照、消费门禁、发布或其他写操作。"
 	}
-	for _, finding := range blocking {
-		answer.Citations = append(answer.Citations, model.AgentCitation{
-			Kind: "rule_finding", ID: finding.ID, Title: finding.Title,
-			Summary: fmt.Sprintf("%s · %s", finding.Code, finding.Severity),
-		})
-	}
-	answer.Trace = append(answer.Trace, agentFindingTrace(blocking, open))
-
-	// Experiment evidence distinguishes real rehearsals from DEMO_ONLY.
-	if change.Experiment != nil {
-		experiment := change.Experiment
-		summary := fmt.Sprintf("%s / %s", experiment.Mode, experiment.Status)
-		answer.Citations = append(answer.Citations, model.AgentCitation{
-			Kind: "experiment", ID: experiment.ID, Title: "预发布演练", Summary: summary,
-		})
-		answer.Trace = append(answer.Trace, model.AgentToolTrace{Tool: "get_experiment_report", Input: experiment.ID, Output: summary})
-	}
-
-	// Passport status explains gate failures without exposing tokens.
-	passports := data.PassportsByChange(change.OrganizationID, change.ID)
-	for _, passport := range passports {
-		answer.Citations = append(answer.Citations, model.AgentCitation{
-			Kind: "passport", ID: passport.ID, Title: "发布门禁护照",
-			Summary: fmt.Sprintf("%s · 签发 %s", passport.Status, formatTime(passport.IssuedAt)),
-		})
-	}
-	answer.Trace = append(answer.Trace, agentPassportTrace(passports))
-
-	// Post-release outcome signals power the retrospective workflow.
-	signals := data.OutcomeSignalsByChange(change.OrganizationID, change.ID)
-	if len(signals) > 0 {
-		answer.Citations = append(answer.Citations, model.AgentCitation{
-			Kind: "outcome", ID: change.ID, Title: "发布后结果信号", Summary: fmt.Sprintf("%d 条结果信号", len(signals)),
-		})
-		answer.Trace = append(answer.Trace, model.AgentToolTrace{Tool: "get_outcome_signals", Input: change.ID, Output: fmt.Sprintf("%d signals", len(signals))})
-	}
-
-	answer.Answer, answer.Proposals = composeAssistantAnswer(change, blocking, open, answer.Citations)
 	return answer
 }
 
-func agentFindingTrace(blocking, open []model.Finding) model.AgentToolTrace {
-	output := fmt.Sprintf("%d blocking, %d open", len(blocking), len(open))
-	return model.AgentToolTrace{Tool: "get_rule_findings", Input: "blocking=true", Output: output}
+func evidenceFindings(result EvidenceQueryResult) (findingEvidence, bool) {
+	if result.Trace.Error != "" {
+		return findingEvidence{}, false
+	}
+	findings, ok := result.Data.(findingEvidence)
+	return findings, ok
 }
 
-func agentPassportTrace(passports []model.Passport) model.AgentToolTrace {
-	output := "无"
-	if len(passports) > 0 {
-		output = fmt.Sprintf("%d passports", len(passports))
+func evidenceExperiment(result EvidenceQueryResult) (*model.ExperimentReport, bool) {
+	if result.Trace.Error != "" {
+		return nil, false
 	}
-	return model.AgentToolTrace{Tool: "get_change_passports", Input: "status=all", Output: output}
+	experiment, ok := result.Data.(*model.ExperimentReport)
+	return experiment, ok
+}
+
+func evidencePassports(result EvidenceQueryResult) ([]model.Passport, bool) {
+	if result.Trace.Error != "" {
+		return nil, false
+	}
+	passports, ok := result.Data.([]model.Passport)
+	return passports, ok
+}
+
+func evidenceQueryFailureAnswer(trace model.AgentToolTrace) string {
+	return fmt.Sprintf("证据查询失败（%s）：%s。无法基于缺失证据给出通过结论；助手不会执行任何审批、门禁或发布写操作。", trace.Tool, trace.Error)
+}
+
+func evidenceQueryFailuresAnswer(results ...EvidenceQueryResult) string {
+	failures := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.Trace.Error != "" {
+			failures = append(failures, result.Trace.Tool+"："+result.Trace.Error)
+		}
+	}
+	if len(failures) == 0 {
+		failures = append(failures, "工具返回了无效证据")
+	}
+	return "证据查询失败（" + strings.Join(failures, "；") + "）。无法基于缺失证据给出通过结论；助手不会执行任何审批、门禁或发布写操作。"
+}
+
+func detectAssistantIntent(question string) model.AgentQuestionIntent {
+	normalized := strings.ToLower(strings.TrimSpace(question))
+	containsAny := func(values ...string) bool {
+		for _, value := range values {
+			if strings.Contains(normalized, value) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Specific evidence domains take precedence over generic words such as
+	// "为什么" and "下一步".
+	switch {
+	case containsAny("passport", "ci gate", "ci-gate", "gate", "护照", "门禁", "通行证"):
+		return model.AgentIntentPassportGate
+	case containsAny("finding", "发现项", "整改", "怎么修", "如何修", "修复", "remediat"):
+		return model.AgentIntentFindingRemediation
+	case containsAny("为什么不能", "为何不能", "为什么卡", "为何卡", "阻断原因", "被阻断", "卡住", "不能审批", "不能放行"):
+		return model.AgentIntentBlockingReason
+	case containsAny("下一步", "接下来", "然后呢", "该做什么", "怎么推进", "如何推进"):
+		return model.AgentIntentNextStep
+	default:
+		return model.AgentIntentUnknown
+	}
+}
+
+func findingCitations(findings []model.Finding) []model.AgentCitation {
+	citations := make([]model.AgentCitation, 0, len(findings))
+	for _, finding := range findings {
+		citations = append(citations, model.AgentCitation{
+			Kind: "rule_finding", ID: finding.ID, Title: finding.Title,
+			Summary: fmt.Sprintf("%s · %s · %s", finding.Code, finding.Severity, finding.Status),
+		})
+	}
+	return citations
+}
+
+func changeCitation(change model.ChangeRequest) model.AgentCitation {
+	return model.AgentCitation{Kind: "change", ID: change.ID, Title: change.Title, Summary: fmt.Sprintf("%s · %s", change.Status, change.Risk)}
+}
+
+func experimentCitation(experiment *model.ExperimentReport) model.AgentCitation {
+	return model.AgentCitation{Kind: "experiment", ID: experiment.ID, Title: "预发布演练", Summary: fmt.Sprintf("%s · %s", experiment.Mode, experiment.Status)}
+}
+
+func passportCitation(passport model.Passport) model.AgentCitation {
+	return model.AgentCitation{Kind: "passport", ID: passport.ID, Title: "发布门禁护照", Summary: fmt.Sprintf("%s · 签发 %s", passport.Status, formatTime(passport.IssuedAt))}
 }
 
 func formatTime(value time.Time) string {
@@ -100,77 +195,83 @@ func formatTime(value time.Time) string {
 	return value.Format("01-02 15:04")
 }
 
-// composeAssistantAnswer turns the change state into a plain-language verdict.
-// The verdict is deterministic and always ends with a concrete next step; it
-// never claims a release is safe when a blocking finding is unresolved.
-func composeAssistantAnswer(change model.ChangeRequest, blocking, open []model.Finding, citations []model.AgentCitation) (string, []model.AgentActionProposal) {
-	var lines []string
-	proposals := make([]model.ActionProposalType, 0)
-	next := "等待负责人处理阻断项后再继续"
-
-	if len(blocking) > 0 {
-		lines = append(lines, "结论：当前变更不能放行。")
-		lines = append(lines, fmt.Sprintf("原因：还有 %d 个阻断项未解决：", len(blocking)))
-		for _, finding := range blocking {
-			lines = append(lines, fmt.Sprintf("  - %s（%s）：%s", finding.Title, finding.Code, finding.Suggestion))
-		}
-		if hints := transactionRemediationHints(append(append([]model.Finding{}, blocking...), open...)); len(hints) > 0 {
-			lines = append(lines, "事务优化建议：")
-			lines = append(lines, hints...)
-		}
-		proposals = append(proposals, "remediate")
-		lines = append(lines, "下一步：先按建议完成整改，再由独立人员复核验证。")
-		next = "整改并提交复核"
-	} else if len(open) > 0 {
-		lines = append(lines, "结论：当前变更暂不能审批。")
-		lines = append(lines, fmt.Sprintf("原因：还有 %d 个待处理发现项（非阻断）：", len(open)))
-		for _, finding := range open {
-			lines = append(lines, fmt.Sprintf("  - %s（%s）", finding.Title, finding.Code))
-		}
-		if hints := transactionRemediationHints(open); len(hints) > 0 {
-			lines = append(lines, "事务优化建议：")
-			lines = append(lines, hints...)
-		}
-		proposals = append(proposals, "remediate", "review")
-		lines = append(lines, "下一步：处理非阻断项并在审批前确认无新增阻断。")
-		next = "处理发现项"
-	} else if change.Experiment != nil && strings.EqualFold(change.Experiment.Mode, "DEMO_ONLY") {
-		lines = append(lines, "结论：当前变更仍处于预发布验证阶段。")
-		lines = append(lines, "原因：演练证据为 DEMO_ONLY，不能作为真实放行依据。")
-		proposals = append(proposals, "rerun_experiment")
-		lines = append(lines, "下一步：使用真实 PostgreSQL 影子演练验证，并确认回滚已验证。")
-		next = "执行真实演练"
-	} else if change.Experiment != nil && (change.Experiment.LockWaitMS > 1000 || change.Experiment.DurationMS >= 5000) {
-		lines = append(lines, "结论：演练已完成，但事务成本偏高，建议优化后再审批。")
-		lines = append(lines, fmt.Sprintf("证据：锁/最慢语句约 %dms，总耗时 %dms。", change.Experiment.LockWaitMS, change.Experiment.DurationMS))
-		lines = append(lines, "事务优化建议：")
-		lines = append(lines, "  - 分批 DML（LIMIT + 主键游标），控制单事务行数")
-		lines = append(lines, "  - DDL 使用 CONCURRENTLY / NOT VALID 分阶段")
-		lines = append(lines, "  - 生产执行声明 lock_timeout 与 statement_timeout")
-		proposals = append(proposals, "remediate", "rerun_experiment")
-		next = "优化事务后重新演练"
-	} else if change.Status == model.StatusWaitingApproval {
-		lines = append(lines, "结论：当前变更可以进入审批环节。")
-		lines = append(lines, "状态：等待审批，且无阻断项、无未处理发现项。")
-		proposals = append(proposals, "review")
-		lines = append(lines, "下一步：由具备审批权限的独立 reviewer 审核并决定放行。")
-		next = "提交审批"
-	} else if change.Status == model.StatusApproved || change.Status == model.StatusCompleted {
-		lines = append(lines, "结论：当前变更已通过审批。")
-		lines = append(lines, "状态："+string(change.Status)+"。")
-		next = "查看发布结果"
-	} else {
-		lines = append(lines, "结论：当前变更处于「"+string(change.Status)+"」阶段。")
-		lines = append(lines, "尚无阻断项，也没有明确的可放行状态。")
-		next = "推进到预发布验证"
+func composeBlockingAnswer(change model.ChangeRequest, blocking []model.Finding) (string, []model.AgentActionProposal) {
+	if len(blocking) == 0 {
+		return "未查询到未解决的阻断 finding。当前状态为「" + string(change.Status) + "」；这不等于已通过审批或 CI Gate，仍需按状态完成后续治理步骤。", nil
 	}
+	lines := []string{fmt.Sprintf("当前有 %d 个未解决的阻断 finding：", len(blocking))}
+	for _, finding := range blocking {
+		lines = append(lines, fmt.Sprintf("- %s（%s）：%s", finding.Title, finding.Code, finding.Suggestion))
+	}
+	lines = append(lines, "这些 finding 完成整改并经独立人员复核前，不能放行，也不能描述为已放行。")
+	return strings.Join(lines, "\n"), assistantProposals([]model.ActionProposalType{model.ProposalRemediate})
+}
 
-	answer := strings.Join(lines, "\n") + "\n\n下一步：" + next
-	return answer, assistantProposals(proposals)
+func composeRemediationAnswer(findings []model.Finding) (string, []model.AgentActionProposal) {
+	if len(findings) == 0 {
+		return "未查询到 OPEN 或 ASSIGNED 的 finding。已解决或已验证的 finding 不会被重新描述为待整改项。", nil
+	}
+	lines := []string{fmt.Sprintf("以下 %d 个 finding 仍需整改：", len(findings))}
+	for _, finding := range findings {
+		lines = append(lines, fmt.Sprintf("- %s（%s）：%s", finding.Title, finding.Code, finding.Suggestion))
+	}
+	if hints := transactionRemediationHints(findings); len(hints) > 0 {
+		lines = append(lines, "事务优化建议：")
+		lines = append(lines, hints...)
+	}
+	lines = append(lines, "整改后应提交给独立人员复核；助手不会代为修改、指派或验证 finding。")
+	return strings.Join(lines, "\n"), assistantProposals([]model.ActionProposalType{model.ProposalRemediate})
+}
+
+func composeNextStepAnswer(change model.ChangeRequest, blocking, open []model.Finding, experiment *model.ExperimentReport) (string, []model.AgentActionProposal) {
+	if len(blocking) > 0 {
+		return fmt.Sprintf("下一步：先整改 %d 个阻断 finding，再由独立人员复核；当前不能放行。", len(blocking)), assistantProposals([]model.ActionProposalType{model.ProposalRemediate})
+	}
+	if len(open) > 0 {
+		return fmt.Sprintf("下一步：处理 %d 个非阻断 finding，并在审批前确认没有新增阻断。", len(open)), assistantProposals([]model.ActionProposalType{model.ProposalRemediate, model.ProposalReview})
+	}
+	if experimentNotReleaseEvidence(experiment) {
+		return "下一步：执行真实 PostgreSQL 影子演练并验证回滚。NOT_RUN 或 DEMO_ONLY 仅表示未取得真实放行证据，不能描述为演练通过。", assistantProposals([]model.ActionProposalType{model.ProposalRerunExperiment})
+	}
+	if experiment == nil {
+		return "下一步：执行预发布演练并验证回滚；当前没有演练报告，不能描述为验证通过。", assistantProposals([]model.ActionProposalType{model.ProposalRerunExperiment})
+	}
+	if !strings.EqualFold(experiment.Status, "PASSED") || !experiment.RollbackVerified {
+		return "下一步：修复演练失败项并重新执行真实演练，确认状态为 PASSED 且回滚已验证。", assistantProposals([]model.ActionProposalType{model.ProposalRerunExperiment})
+	}
+	if change.Status == model.StatusWaitingApproval {
+		return "下一步：由具备权限的独立 reviewer 人工审核。助手不会自动审批。", assistantProposals([]model.ActionProposalType{model.ProposalReview})
+	}
+	if change.Status == model.StatusApproved || change.Status == model.StatusCompleted {
+		return "下一步：按发布流程核对有效 passport/CI Gate，并观察发布后结果；审批通过不等于 CI Gate 已消费成功。", assistantProposals([]model.ActionProposalType{model.ProposalObserve})
+	}
+	return "下一步：按当前状态「" + string(change.Status) + "」推进治理流程；尚不能描述为审批或门禁已通过。", nil
+}
+
+func composePassportGateAnswer(change model.ChangeRequest, passports []model.Passport, experiment *model.ExperimentReport) string {
+	if experimentNotReleaseEvidence(experiment) {
+		return "CI Gate 当前没有可依赖的真实演练证据：演练为 NOT_RUN 或 DEMO_ONLY，不能描述为通过，也不应据此签发或消费 passport。助手只查询状态，不会签发或消费通行证。"
+	}
+	if change.Status != model.StatusApproved && change.Status != model.StatusCompleted {
+		return "变更当前状态为「" + string(change.Status) + "」，尚不能视为已通过 CI Gate。passport 必须由授权流程签发；助手不会自动审批、签发或消费。"
+	}
+	for _, passport := range passports {
+		if passport.Status == model.PassportActive && time.Now().UTC().Before(passport.ExpiresAt) {
+			return "查询到有效期内的 ACTIVE passport（" + passport.ID + "）。这仅表示存在可供 CI 校验的一次性凭据，不表示 CI Gate 已通过或已消费；助手不会执行门禁消费。"
+		}
+	}
+	if len(passports) == 0 {
+		return "变更已审批，但没有查询到 passport，因此不能描述为 CI Gate 已通过。请由授权人员按正式流程签发；助手不会代为签发。"
+	}
+	return "变更已审批，但查询到的 passport 均非有效 ACTIVE 状态，因此不能描述为 CI Gate 已通过。请由授权人员检查过期、撤销或已消费状态。"
+}
+
+func experimentNotReleaseEvidence(experiment *model.ExperimentReport) bool {
+	return experiment != nil && (strings.EqualFold(experiment.Mode, "DEMO_ONLY") || strings.EqualFold(experiment.Status, "NOT_RUN"))
 }
 
 // transactionRemediationHints maps transaction-optimization finding codes to
-// concrete, production-oriented next steps for Clawbot answers.
+// concrete, production-oriented next steps.
 func transactionRemediationHints(findings []model.Finding) []string {
 	seen := make(map[string]bool)
 	hints := make([]string, 0, 4)
@@ -200,17 +301,15 @@ func transactionRemediationHints(findings []model.Finding) []string {
 
 func assistantProposals(types []model.ActionProposalType) []model.AgentActionProposal {
 	labels := map[model.ActionProposalType]string{
-		"remediate":        "整改并提交复核",
-		"rerun_experiment": "重新执行真实演练",
-		"reassign":         "重新指派处理人",
-		"review":           "提交人工审批",
-		"observe":          "观察发布后指标",
+		model.ProposalRemediate:       "整改并提交复核",
+		model.ProposalRerunExperiment: "重新执行真实演练",
+		model.ProposalReassign:        "重新指派处理人",
+		model.ProposalReview:          "提交人工审批",
+		model.ProposalObserve:         "观察发布后指标",
 	}
 	result := make([]model.AgentActionProposal, 0, len(types))
 	for _, proposalType := range types {
-		result = append(result, model.AgentActionProposal{
-			Type: string(proposalType), Title: labels[proposalType],
-		})
+		result = append(result, model.AgentActionProposal{Type: string(proposalType), Title: labels[proposalType]})
 	}
 	return result
 }

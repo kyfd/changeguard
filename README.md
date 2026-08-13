@@ -98,11 +98,13 @@ docker compose up --build
 
 Compose 默认启用 PostgreSQL 影子验证，因此需要影子数据库服务正常就绪。
 
-## AI Agent 工程化与离线评测
+## AI 证据分析与离线评测
 
-Agent 通过 OpenAI-Compatible API 接入 DeepSeek 等模型，但只承担风险解释与整改建议：三个工具均为只读，模型不能执行命令、修改审批或触发发布；最终风险由 Go 后端与确定性规则取较高值。
+ChangeGuard 的模型能力是**只读的证据辅助层**，不是生产决策者：它通过 OpenAI-Compatible API 接入模型，调用固定允许列表内的只读工具，对确定性 finding、演练状态和变更上下文生成带引用的解释与整改建议。`ChangeRequest.risk` 只由 Go 规则引擎和真实验证证据决定；模型的 `advisory_risk` 单独展示，不能改变检查状态、审批角色、通行证条件或 CI Gate 结果。
 
-生产化保护包括可配置 HTTP 超时、仅针对网络/429/5xx 的有限重试、连续失败熔断、用户/组织/全局配额以及无模型时的本地证据归纳。`/metrics` 在原有 HTTP/Outbox 指标之外输出模型调用、成功/失败、重试、fallback、Tool Calling、耗时和熔断状态。
+变更详情中的 Evidence Navigator 只支持“阻断原因、下一步、finding 整改、通行证/CI Gate”四类证据问题。意图由确定性代码识别，每次回答只执行所需的只读证据查询并记录 Trace；未知问题安全降级。它没有 approve、issue-passport、deploy、rollback 或 upgrade 工具，也不会自动执行建议。
+
+生产化保护包括工具参数严格 JSON 校验、证据 ID 白名单、提示词注入检测、可配置 HTTP 超时、仅针对网络/429/5xx 的有限重试、连续失败熔断、用户/组织/全局配额以及无模型时的本地证据归纳。`/metrics` 在原有 HTTP/Outbox 指标之外输出模型调用、成功/失败、重试、fallback、Tool Calling、耗时和熔断状态。
 
 仓库内置 24 条完全离线的固定评测用例，不调用付费模型：
 
@@ -111,7 +113,7 @@ go run ./cmd/changeguard-agent-eval
 go run ./cmd/changeguard-agent-eval -json
 ```
 
-评测覆盖三项必需工具调用、风险等级一致性、提示词注入边界、伪造证据、缺失工具、错误 JSON、超时降级和临时 5xx 重试恢复。命令返回非零退出码时可直接阻断 CI。
+评测覆盖必需证据工具、风险字段隔离、提示词注入边界、伪造证据、缺失工具、非法工具参数、错误 JSON、超时降级和临时 5xx 重试恢复。固定用例验证的是协议与安全守卫，不代表真实模型业务准确率；真实模型版本仍需使用人工标注案例单独回归。命令返回非零退出码时可直接阻断 CI。
 
 ## CI/CD 接入
 
@@ -130,6 +132,21 @@ changeguard-gate consume -manifest .changeguard.json -consumer <pipeline-id>
 ```
 
 不要直接回传页面摘要，也不要把 Token 写进 JSON 请求体或命令日志。完整示例见 [CI/CD 接入指南](docs/ci-integration.md)。
+
+## 审计哈希链与离线证据包
+
+所有新业务审计事件先统一规范化，再按企业串行追加 SHA-256 哈希链；旧 JSON 中没有 `hash` 的历史事件仍可读取，并作为新链的规范化过渡锚点。链覆盖提交、审批、演练、通行证签发/验签/消费和幂等请求等核心关联字段。
+
+可从文件状态只读导出单个变更的 Evidence Bundle（不会创建或改写源状态文件）：
+
+```powershell
+go run ./cmd/changeguard-evidence export -data ./data/dbguard.json -change chg_... -out evidence.json
+go run ./cmd/changeguard-evidence verify -in evidence.json
+```
+
+Bundle 汇总变更/制品摘要、规则版本、check、findings、experiment、approval、通行证元数据、CI consumer/outcome，以及目标变更审计的链绑定事实（仅 `id/hash/prev_hash/canonical_digest`）和不泄漏其他变更正文的组织链证明。审计 Action/Result 等语义不以无法验证的脱敏投影重复展示，业务语义由 change/check/passport 等受 Manifest 保护的 section 提供。Manifest 对 binding、生成时间及每个 JSON section 计算稳定 SHA-256；离线 verify 同时校验 Manifest、change/digest binding 和企业审计哈希链，任何字段或文件篡改均非零退出。导出不包含制品正文、SQL 正文、明文 Token、Token 摘要或 secret；自由文本经过现有脱敏器处理。
+
+该哈希链是**应用级篡改检测**：能够发现导出后或持久化后的不一致，但不等同于第三方签名、可信时间戳或外部不可抵赖。后续可将链头定期锚定到外部 WORM、透明日志或签名服务。
 
 流水线状态同步接口：
 
@@ -150,13 +167,14 @@ node --check internal/httpapi/web/app.js
 docker build -t changeguard:local .
 ```
 
-本次已通过 `go test ./...` 与 `go vet ./...`；Docker、race、真实 PostgreSQL 影子库与浏览器端到端的执行状态，见 [系统测试记录](docs/final-test-report-2026-07-31.md)。
+本次工作树已通过 `go test ./...`、`go vet ./...` 与两个前端 JavaScript 语法检查；race、Docker、真实 PostgreSQL/Redis 和真实模型的实际执行边界见 [2026-08-13 风险收敛 MVP 验证记录](docs/verification-report-2026-08-13.md)，不要用历史报告替代当前版本证据。
 
 ## 项目结构
 
 ```text
 cmd/dbguard/                  服务入口
 cmd/changeguard-gate/         CI 实际文件摘要、验签与消费 CLI
+cmd/changeguard-evidence/     Evidence Bundle 只读导出与离线校验 CLI
 cmd/changeguard-agent-eval/   Agent 离线评测与 JSON 报告 CLI
 cmd/loadtest/                 负载测试入口
 internal/auth/                本地登录、会话、OIDC 与企业权限
@@ -194,8 +212,10 @@ ChangeGuard v1 刻意不做：
 - [产品定位与商业化](docs/product.md)
 - [业务流程](docs/business-flow.md)
 - [系统架构](docs/architecture.md)
+- [信任边界与演示验收](docs/trust-boundaries-demo.md)
 - [HTTP API](docs/api.md)
 - [CI/CD 接入](docs/ci-integration.md)
 - [企业部署](docs/enterprise-operations.md)
 - [Agent 离线评测报告](docs/agent-evaluation-report-2026-08-03.md)
-- [系统测试记录](docs/final-test-report-2026-07-31.md)
+- [风险收敛 MVP 验证记录](docs/verification-report-2026-08-13.md)
+- [历史系统测试记录](docs/final-test-report-2026-07-31.md)

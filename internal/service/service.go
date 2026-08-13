@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -44,11 +45,12 @@ type Service struct {
 	subs           map[chan Event]struct{}
 	passportSigner *changegate.Signer
 	passportTTL    time.Duration
+	evidenceTools  *EvidenceQueryRegistry
 }
 
 func New(data *store.Store, runner experiment.Runner, analyzer agent.Analyzer) *Service {
 	signer, ttl := passportSignerFromEnvironment()
-	return &Service{store: data, runner: runner, analyzer: analyzer, queue: make(chan string, 64), subs: make(map[chan Event]struct{}), passportSigner: signer, passportTTL: ttl}
+	return &Service{store: data, runner: runner, analyzer: analyzer, queue: make(chan string, 64), subs: make(map[chan Event]struct{}), passportSigner: signer, passportTTL: ttl, evidenceTools: defaultEvidenceQueryRegistry(data)}
 }
 
 func (s *Service) Start(ctx context.Context, workers int) {
@@ -630,9 +632,7 @@ func (s *Service) Submit(id, actorID string) (model.ChangeRequest, error) {
 	analysisInput.Risk = result.Risk
 	analysisInput.RuleSetVersion = ruleSetVersion
 	analysis := s.analyzer.Analyze(context.Background(), analysisInput)
-	if analysis.Risk != "" {
-		result.Risk = maxRiskLevel(result.Risk, analysis.Risk)
-	}
+	normalizeAdvisoryRisk(&analysis)
 	updated, err := s.store.UpdateChange(id, func(item *model.ChangeRequest) error {
 		item.Findings = result.Findings
 		item.CheckRun = checkRun
@@ -646,11 +646,22 @@ func (s *Service) Submit(id, actorID string) (model.ChangeRequest, error) {
 			item.Timeline = append(item.Timeline, timeline(next, "生成 AI 参考意见", "模型仅输出参考结论，不参与放行决策；provider="+analysis.Provider, "系统"))
 		}
 		return nil
-	}, audit(actor, id, "SUBMIT_CHECK", detail))
+	}, auditChangeVersion(audit(actor, id, "SUBMIT_CHECK", detail), change))
 	if err == nil {
 		s.publish(updated, detail)
 	}
 	return updated, err
+}
+
+func normalizeAdvisoryRisk(analysis *model.AgentAnalysis) {
+	if analysis == nil {
+		return
+	}
+	if analysis.AdvisoryRisk == "" {
+		analysis.AdvisoryRisk = analysis.Risk
+	}
+	// Preserve the legacy JSON field while making its advisory semantics explicit.
+	analysis.Risk = analysis.AdvisoryRisk
 }
 
 func (s *Service) QueueExperiment(id, actorID string) (model.ChangeRequest, error) {
@@ -680,7 +691,7 @@ func (s *Service) QueueExperiment(id, actorID string) (model.ChangeRequest, erro
 		return nil
 	}, model.OutboxEvent{
 		OrganizationID: actor.OrganizationID, AggregateType: "change", AggregateID: id,
-		EventType: "experiment.requested", Status: model.OutboxPending, MaxAttempts: 5,
+		EventType: "experiment.requested", Status: model.OutboxPending, MaxAttempts: 5, InputSHA256: change.ArtifactSHA256,
 	}, audit(actor, id, "QUEUE_EXPERIMENT", "提交影子库演练任务并写入事务 Outbox"))
 	if err != nil {
 		return model.ChangeRequest{}, err
@@ -1112,7 +1123,7 @@ func (s *Service) Approve(id, actorID, comment string) (model.ChangeRequest, err
 		item.ReviewComment = comment
 		item.Timeline = append(item.Timeline, timeline(model.StatusApproved, "审批通过", comment, actor.Name))
 		return nil
-	}, audit(actor, id, "APPROVE", comment))
+	}, auditChangeVersion(audit(actor, id, "APPROVE", comment), change))
 	if err == nil {
 		s.publish(updated, "变更审批通过")
 	}
@@ -1210,9 +1221,7 @@ func (s *Service) processOutboxEvent(ctx context.Context, workerID string) bool 
 				renewDone <- nil
 				return
 			case <-ticker.C:
-				if renewErr := retryConcurrentWrite(func() error {
-					return s.store.RenewOutbox(event.ID, workerID, lease)
-				}); renewErr != nil {
+				if renewErr := s.store.RenewOutbox(event.ID, workerID, event.LeaseGeneration, lease); renewErr != nil {
 					renewDone <- renewErr
 					cancel()
 					return
@@ -1223,7 +1232,7 @@ func (s *Service) processOutboxEvent(ctx context.Context, workerID string) bool 
 	var processErr error
 	switch event.EventType {
 	case "experiment.requested":
-		processErr = s.runExperiment(processingCtx, event.AggregateID)
+		processErr = s.runExperiment(processingCtx, event, workerID)
 	default:
 		processErr = fmt.Errorf("unsupported outbox event %s", event.EventType)
 	}
@@ -1232,13 +1241,9 @@ func (s *Service) processOutboxEvent(ctx context.Context, workerID string) bool 
 		processErr = fmt.Errorf("续租异步任务失败: %w", renewErr)
 	}
 	if processErr != nil {
-		_ = retryConcurrentWrite(func() error {
-			return s.store.FailOutbox(event.ID, workerID, processErr)
-		})
+		_ = s.store.FailOutbox(event.ID, workerID, event.LeaseGeneration, processErr)
 	} else {
-		_ = retryConcurrentWrite(func() error {
-			return s.store.CompleteOutbox(event.ID, workerID)
-		})
+		_ = s.store.CompleteOutbox(event.ID, workerID, event.LeaseGeneration)
 	}
 	return true
 }
@@ -1255,23 +1260,39 @@ func retryConcurrentWrite(action func() error) error {
 	return err
 }
 
-func (s *Service) runExperiment(ctx context.Context, id string) error {
-	change, err := s.store.Change(id)
+func (s *Service) runExperiment(ctx context.Context, event model.OutboxEvent, workerID string) error {
+	change, err := s.store.Change(event.AggregateID)
 	if err != nil {
 		return err
+	}
+	if event.InputSHA256 == "" || event.InputSHA256 != change.ArtifactSHA256 {
+		return fmt.Errorf("演练输入摘要与当前制品不一致")
+	}
+	if event.ResultDigest != "" {
+		// FINALIZE and the business report were committed atomically. A restart
+		// only needs to complete the outbox envelope; it must not rerun APPLY.
+		return nil
 	}
 	if change.Status != model.StatusExperimentQueued && change.Status != model.StatusExperimentRunning {
 		return nil
 	}
+	if err := s.store.CheckpointExperimentOutbox(event.ID, workerID, event.LeaseGeneration, model.OutboxStagePrepare, event.InputSHA256); err != nil {
+		return err
+	}
 	systemActor := model.User{ID: "system_worker", OrganizationID: change.OrganizationID, Name: "演练 Worker", Role: "系统", Active: true}
-	running, err := s.store.UpdateChange(id, func(item *model.ChangeRequest) error {
+	running, err := s.store.UpdateChange(event.AggregateID, func(item *model.ChangeRequest) error {
+		if item.ArtifactSHA256 != event.InputSHA256 {
+			return fmt.Errorf("演练输入摘要与当前制品不一致")
+		}
 		if item.Status != model.StatusExperimentQueued && item.Status != model.StatusExperimentRunning {
 			return ErrInvalidState
 		}
-		item.Status = model.StatusExperimentRunning
-		item.Timeline = append(item.Timeline, timeline(model.StatusExperimentRunning, "开始预发布验证", "执行数据库演练、制品检查、回滚验证和发布指标核对", systemActor.Name))
+		if item.Status == model.StatusExperimentQueued {
+			item.Status = model.StatusExperimentRunning
+			item.Timeline = append(item.Timeline, timeline(model.StatusExperimentRunning, "开始预发布验证", "执行单体隔离影子事务；中断后由新 lease generation 从 APPLY 重跑", systemActor.Name))
+		}
 		return nil
-	}, audit(systemActor, id, "EXPERIMENT_START", "可靠 Worker 开始执行"))
+	}, auditExperiment(audit(systemActor, event.AggregateID, "EXPERIMENT_START", fmt.Sprintf("Worker 开始执行 attempt=%s generation=%d", event.AttemptID, event.LeaseGeneration)), event.ID, event.AttemptID))
 	if err != nil {
 		return err
 	}
@@ -1279,17 +1300,30 @@ func (s *Service) runExperiment(ctx context.Context, id string) error {
 	if strings.TrimSpace(change.SQL) == "" {
 		return fmt.Errorf("非 SQL 变更不执行数据库影子演练")
 	}
+	if err := s.store.CheckpointExperimentOutbox(event.ID, workerID, event.LeaseGeneration, model.OutboxStageApply, event.InputSHA256); err != nil {
+		return err
+	}
 	report := s.runner.Run(ctx, change)
 	enrichReleaseReport(&report, change)
+	report.AttemptID = event.AttemptID
+	report.LeaseGeneration = event.LeaseGeneration
+	report.InputSHA256 = event.InputSHA256
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	latest, err := s.store.Change(id)
+	latest, err := s.store.Change(event.AggregateID)
 	if err != nil {
 		return err
 	}
+	if latest.ArtifactSHA256 != event.InputSHA256 {
+		return fmt.Errorf("演练完成时输入摘要已变化")
+	}
 	latest.Experiment = &report
 	analysis := s.analyzer.Analyze(ctx, latest)
+	normalizeAdvisoryRisk(&analysis)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	next := model.StatusWaitingApproval
 	title := "预发布验证完成，等待审批"
 	detail := "规则、数据库演练、制品检查、发布策略和智能分析证据已汇总"
@@ -1298,14 +1332,22 @@ func (s *Service) runExperiment(ctx context.Context, id string) error {
 		title = "预发布验证失败"
 		detail = defaultString(report.ExecutionError, "验证未通过，请修正后重新提交")
 	}
-	updated, err := s.store.UpdateChange(id, func(item *model.ChangeRequest) error {
+	digestInput, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	resultDigest := changegate.SHA256(string(digestInput))
+	report.ResultDigest = resultDigest
+	updated, err := s.store.FinalizeExperimentOutbox(event.ID, workerID, event.LeaseGeneration, event.AttemptID, event.InputSHA256, resultDigest, func(item *model.ChangeRequest) error {
+		if item.ArtifactSHA256 != event.InputSHA256 {
+			return fmt.Errorf("演练完成时输入摘要已变化")
+		}
 		item.Experiment = &report
 		item.Analysis = &analysis
-		item.Risk = maxRiskLevel(item.Risk, analysis.Risk)
 		item.Status = next
 		item.Timeline = append(item.Timeline, timeline(next, title, detail, systemActor.Name))
 		return nil
-	}, audit(systemActor, id, "EXPERIMENT_FINISH", detail))
+	}, auditExperiment(audit(systemActor, event.AggregateID, "EXPERIMENT_FINISH", fmt.Sprintf("%s；attempt=%s generation=%d", detail, event.AttemptID, event.LeaseGeneration)), event.ID, event.AttemptID))
 	if err != nil {
 		return err
 	}
@@ -1557,7 +1599,36 @@ func timeline(status model.ChangeStatus, title, detail, actor string) model.Time
 }
 
 func audit(actor model.User, changeID, action, detail string) model.AuditEvent {
-	return model.AuditEvent{OrganizationID: actor.OrganizationID, ID: store.NewID("audit_"), ChangeID: changeID, ActorID: actor.ID, ActorName: actor.Name, Action: action, Detail: detail, CreatedAt: time.Now()}
+	actorType, authMethod := "USER", "SESSION"
+	if strings.HasPrefix(strings.ToLower(actor.ID), "ci:") {
+		actorType, authMethod = "CI", "BEARER_PASSPORT"
+	} else if strings.HasPrefix(strings.ToLower(actor.ID), "system") || strings.HasPrefix(strings.ToLower(actor.ID), "integration") {
+		actorType, authMethod = "SYSTEM", "INTERNAL"
+	}
+	return model.AuditEvent{
+		OrganizationID: actor.OrganizationID, ID: store.NewID("audit_"), ChangeID: changeID,
+		ActorID: actor.ID, ActorName: actor.Name, ActorType: actorType, AuthMethod: authMethod,
+		Action: action, ResourceType: "CHANGE", ResourceID: changeID, Result: "SUCCESS",
+		Detail: detail, CreatedAt: time.Now().UTC(),
+	}
+}
+
+func auditChangeVersion(event model.AuditEvent, before model.ChangeRequest) model.AuditEvent {
+	event.ResourceVersionBefore = before.Version
+	event.ResourceVersionAfter = before.Version + 1
+	event.RequestDigest = before.ArtifactSHA256
+	return event
+}
+
+func auditPassport(event model.AuditEvent, passportID string) model.AuditEvent {
+	event.PassportID = passportID
+	return event
+}
+
+func auditExperiment(event model.AuditEvent, relatedEventID, attemptID string) model.AuditEvent {
+	event.RelatedEventID = relatedEventID
+	event.AttemptID = attemptID
+	return event
 }
 
 func normalizeArtifacts(items []model.ChangeArtifact, sqlText string) ([]model.ChangeArtifact, error) {

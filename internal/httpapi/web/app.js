@@ -1784,9 +1784,10 @@ function renderAnalysis(analysis) {
   const tools = (analysis.tool_call_log || []).length
     ? `<div class="agent-tool-log"><strong>工具轨迹</strong>${(analysis.tool_call_log || []).map(t => `<code>${escapeHTML(t.name || "")}</code>`).join("")}</div>`
     : "";
+  const advisoryRisk = analysis.advisory_risk || analysis.risk;
   return `<div class="analysis-card analysis-panel">
-    <div class="analysis-card-head"><h4>辅助分析</h4><div class="analysis-head-meta">${sourceBadge}${riskBadge(analysis.risk)}${analysis.injection_suspected ? `<span class="status status-failed"><i></i>疑似注入</span>` : ""}</div></div>
-    <p class="analysis-disclaimer">参考用。规则阻断与审批结论以人工和确定性检查为准。</p>
+    <div class="analysis-card-head"><h4>AI 建议分析</h4><div class="analysis-head-meta">${sourceBadge}${riskBadge(advisoryRisk)}${analysis.injection_suspected ? `<span class="status status-failed"><i></i>疑似注入</span>` : ""}</div></div>
+    <p class="analysis-disclaimer">AI 建议风险仅供参考，不写入治理风险，也不参与阻断、审批层级或放行决策。治理结论仅由确定性规则与真实验证证据决定。</p>
     ${upgradeHint}
     <p class="analysis-summary">${escapeHTML(analysis.summary)}</p>
     <div class="analysis-columns">
@@ -2982,6 +2983,8 @@ async function renderSettings(main) {
   let upgradeInfo = { current: null, status: { state: "idle" }, history: [] };
   try { upgradeInfo = await api("/api/upgrade/status"); } catch (_) { /* upgrade API 不可用（本地模式） */ }
   const upgradeStateLabel = ({idle:"空闲",pending:"待应用",applying:"升级中…",success:"升级成功",failed:"升级失败",rollback:"已回滚"})[upgradeInfo.status?.state] || upgradeInfo.status?.state || "空闲";
+  const upgradePending = upgradeInfo.status?.state === "pending";
+  const upgradeApplyEnabled = upgradeInfo.apply_enabled === true;
   const eventRows = (events || []).length
     ? events.map(item => {
         const changeLink = item.change_id
@@ -3203,7 +3206,7 @@ async function renderSettings(main) {
     </article>
   </div>
   <article class="panel" style="margin-top:16px">
-    <header class="panel-header"><div><h3>系统升级</h3><p>上传 ChangeGuard 升级包，在线完成版本更新与自动回滚</p></div>
+    <header class="panel-header"><div><h3>系统升级</h3><p>版本与升级状态保持可查询；执行在线升级需要运维显式开启高权限 apply</p></div>
       <span id="upgradeCurrentBadge" class="status status-approved"><i></i>当前 ${escapeHTML(upgradeInfo.current?.version || "dev")}</span>
     </header>
     <div class="panel-body" id="upgradePanelBody">
@@ -3218,8 +3221,9 @@ async function renderSettings(main) {
         </label>
         <span id="upgradeFileName" class="muted"></span>
         <button type="button" class="button button-primary" id="upgradeUploadButton" disabled>上传升级包</button>
-        <button type="button" class="button button-primary" id="upgradeApplyButton" hidden>立即升级</button>
-        <button type="button" class="button button-danger" id="upgradeAbortButton" hidden>取消升级</button>
+        ${upgradeApplyEnabled && upgradePending ? '<button type="button" class="button button-primary" id="upgradeApplyButton">立即升级</button>' : ""}
+        ${upgradePending ? '<button type="button" class="button button-danger" id="upgradeAbortButton">取消升级</button>' : ""}
+        ${!upgradeApplyEnabled ? '<span class="field-hint">在线升级执行默认关闭；由运维完成安全验证并显式启用后才显示执行入口。</span>' : ""}
       </div>
       <div id="upgradeHistory" class="upgrade-history">${renderUpgradeHistory(upgradeInfo.history || [])}</div>
     </div>

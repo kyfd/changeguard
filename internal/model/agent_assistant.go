@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// AgentConversation is a persisted change-scoped Clawbot conversation. Each
+// AgentConversation is a persisted change-scoped Evidence Navigator conversation. Each
 // conversation is bound to one organization, one change and one creator so the
 // assistant can never leak context across tenants or change tickets.
 type AgentConversation struct {
@@ -27,12 +27,25 @@ type AgentMessage struct {
 	Role           string                `json:"role"` // user | assistant
 	Content        string                `json:"content"`
 	Question       string                `json:"question,omitempty"`
+	Intent         AgentQuestionIntent   `json:"intent,omitempty"`
 	Answer         string                `json:"answer,omitempty"`
 	Citations      []AgentCitation       `json:"citations"`
 	Trace          []AgentToolTrace      `json:"trace"`
 	Proposals      []AgentActionProposal `json:"proposals"`
 	CreatedAt      time.Time             `json:"created_at"`
 }
+
+// AgentQuestionIntent is the deterministic evidence domain selected for a
+// question. Unknown questions run no evidence query and receive safe guidance.
+type AgentQuestionIntent string
+
+const (
+	AgentIntentUnknown            AgentQuestionIntent = "unknown"
+	AgentIntentBlockingReason     AgentQuestionIntent = "blocking_reason"
+	AgentIntentNextStep           AgentQuestionIntent = "next_step"
+	AgentIntentFindingRemediation AgentQuestionIntent = "finding_remediation"
+	AgentIntentPassportGate       AgentQuestionIntent = "passport_ci_gate"
+)
 
 // AgentCitation is a single verifiable evidence reference attached to an answer.
 type AgentCitation struct {
@@ -48,6 +61,7 @@ type AgentToolTrace struct {
 	Tool     string `json:"tool"`
 	Input    string `json:"input,omitempty"`
 	Output   string `json:"output,omitempty"`
+	Error    string `json:"error,omitempty"`
 	Duration string `json:"duration,omitempty"`
 }
 

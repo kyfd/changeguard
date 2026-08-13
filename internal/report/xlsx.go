@@ -204,10 +204,14 @@ func analysisSheet(change model.ChangeRequest) sheet {
 		rows = append(rows, row("分析状态", "等待预发布验证证据"))
 	} else {
 		analysis := change.Analysis
+		advisoryRisk := analysis.AdvisoryRisk
+		if advisoryRisk == "" {
+			advisoryRisk = analysis.Risk
+		}
 		rows = append(rows,
 			row("服务商", analysis.Provider),
 			row("模型", analysis.Model),
-			row("风险判断", string(analysis.Risk)),
+			row("AI 建议风险（仅供参考，不参与放行）", string(advisoryRisk)),
 			row("分析结论", analysis.Summary),
 			row("主要依据", strings.Join(analysis.Reasons, "\n")),
 			row("上线建议", strings.Join(analysis.Suggestions, "\n")),

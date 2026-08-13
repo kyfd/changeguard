@@ -69,7 +69,11 @@ func NewPostgres(ctx context.Context, dsn string) (*Store, error) {
 	}
 	if _, err := pool.Exec(ctx, postgresStateMigration); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("migrate postgres: %w", err)
+		return nil, fmt.Errorf("migrate postgres state: %w", err)
+	}
+	if err := backend.migrateNormalized(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("migrate normalized postgres tables: %w", err)
 	}
 	s := &Store{backend: backend}
 	payload, version, err := backend.Load(ctx)
@@ -114,22 +118,43 @@ func (b *postgresBackend) Load(ctx context.Context) ([]byte, int64, error) {
 }
 
 func (b *postgresBackend) Save(ctx context.Context, payload []byte, expectedVersion int64) (int64, error) {
+	var data state
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return 0, fmt.Errorf("decode state projection: %w", err)
+	}
+	tx, err := b.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
 	if expectedVersion == 0 {
-		result, err := b.pool.Exec(ctx, "INSERT INTO dbguard_state(id, version, payload, updated_at) VALUES (1, 1, $1, now()) ON CONFLICT (id) DO NOTHING", string(payload))
+		result, err := tx.Exec(ctx, "INSERT INTO dbguard_state(id, version, payload, updated_at) VALUES (1, 1, $1, now()) ON CONFLICT (id) DO NOTHING", payload)
 		if err != nil {
 			return 0, err
 		}
 		if result.RowsAffected() != 1 {
 			return 0, ErrConcurrentWrite
 		}
+		if err := syncNormalizedState(ctx, tx, data); err != nil {
+			return 0, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return 0, err
+		}
 		return 1, nil
 	}
-	result, err := b.pool.Exec(ctx, "UPDATE dbguard_state SET version = version + 1, payload = $1, updated_at = now() WHERE id = 1 AND version = $2", string(payload), expectedVersion)
+	result, err := tx.Exec(ctx, "UPDATE dbguard_state SET version = version + 1, payload = $1, updated_at = now() WHERE id = 1 AND version = $2", payload, expectedVersion)
 	if err != nil {
 		return 0, err
 	}
 	if result.RowsAffected() != 1 {
 		return 0, ErrConcurrentWrite
+	}
+	if err := syncNormalizedState(ctx, tx, data); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
 	}
 	return expectedVersion + 1, nil
 }
