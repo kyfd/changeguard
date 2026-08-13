@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liufengxi/dbguard/internal/audit"
 	"github.com/liufengxi/dbguard/internal/changegate"
 	"github.com/liufengxi/dbguard/internal/model"
 )
@@ -26,19 +28,22 @@ var demoCredentials = []model.UserCredential{
 }
 
 type state struct {
-	Organizations     []model.Organization       `json:"organizations"`
-	Invites           []model.OrganizationInvite `json:"invites"`
-	Credentials       []model.UserCredential     `json:"credentials"`
-	Applications      []model.Application        `json:"applications"`
-	Users             []model.User               `json:"users"`
-	Changes           []model.ChangeRequest      `json:"changes"`
-	Audits            []model.AuditEvent         `json:"audits"`
-	Policies          []model.RiskPolicy         `json:"policies"`
-	ApplicationGrants []model.ApplicationGrant   `json:"application_grants"`
-	Outbox            []model.OutboxEvent        `json:"outbox"`
-	Passports         []model.StoredPassport     `json:"passports"`
-	IntegrationEvents []model.IntegrationEvent   `json:"integration_events"`
-	OutcomeSignals    []model.OutcomeSignal      `json:"outcome_signals"`
+	Organizations      []model.Organization       `json:"organizations"`
+	Invites            []model.OrganizationInvite `json:"invites"`
+	Credentials        []model.UserCredential     `json:"credentials"`
+	Applications       []model.Application        `json:"applications"`
+	Users              []model.User               `json:"users"`
+	Changes            []model.ChangeRequest      `json:"changes"`
+	Audits             []model.AuditEvent         `json:"audits"`
+	Policies           []model.RiskPolicy         `json:"policies"`
+	ApplicationGrants  []model.ApplicationGrant   `json:"application_grants"`
+	Outbox             []model.OutboxEvent        `json:"outbox"`
+	Passports          []model.StoredPassport     `json:"passports"`
+	IntegrationEvents  []model.IntegrationEvent   `json:"integration_events"`
+	OutcomeSignals     []model.OutcomeSignal      `json:"outcome_signals"`
+	AgentConversations []model.AgentConversation  `json:"agent_conversations,omitempty"`
+	AgentMessages      []model.AgentMessage       `json:"agent_messages,omitempty"`
+	IdempotencyRecords []model.IdempotencyRecord  `json:"idempotency_records,omitempty"`
 }
 
 type Store struct {
@@ -99,10 +104,50 @@ func New(path string) (*Store, error) {
 	return s, nil
 }
 
+func OpenReadOnlySnapshot(path string) (*Store, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{path: ""}
+	decoder := json.NewDecoder(strings.NewReader(string(content)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&s.data); err != nil {
+		return nil, err
+	}
+	if decoder.More() {
+		return nil, errors.New("unexpected trailing state JSON")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("unexpected trailing state JSON")
+		}
+		return nil, err
+	}
+	if len(s.data.Organizations) == 0 {
+		return nil, errors.New("state snapshot has no organizations")
+	}
+	normalizeState(&s.data)
+	return s, nil
+}
+
 func NewMemory() *Store {
 	data := seedState()
 	normalizeState(&data)
 	return &Store{data: data}
+}
+
+func materializeExpiredPassports(data *state, now time.Time) bool {
+	changed := false
+	for index := range data.Passports {
+		passport := &data.Passports[index]
+		if passport.Status == model.PassportActive && !now.Before(passport.ExpiresAt) {
+			passport.Status = model.PassportExpired
+			changed = true
+		}
+	}
+	return changed
 }
 
 func normalizeState(data *state) {
@@ -290,6 +335,7 @@ func normalizeState(data *state) {
 			signal.ReceivedAt = signal.OccurredAt
 		}
 	}
+	materializeExpiredPassports(data, now)
 	for index := range data.Audits {
 		if data.Audits[index].OrganizationID == "" {
 			data.Audits[index].OrganizationID = defaultOrganization.ID
@@ -480,7 +526,7 @@ func (s *Store) CreatePolicy(policy model.RiskPolicy, audit model.AuditEvent) er
 		}
 	}
 	s.data.Policies = append(s.data.Policies, policy)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	return s.saveLocked()
 }
 
@@ -496,7 +542,7 @@ func (s *Store) UpdatePolicy(id string, update func(*model.RiskPolicy) error, au
 		}
 		s.data.Policies[index].Version++
 		s.data.Policies[index].UpdatedAt = time.Now()
-		s.data.Audits = append(s.data.Audits, audits...)
+		s.appendAuditsLocked(audits...)
 		if err := s.saveLocked(); err != nil {
 			return model.RiskPolicy{}, err
 		}
@@ -582,7 +628,7 @@ func (s *Store) CreateChange(change model.ChangeRequest, audit model.AuditEvent)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data.Changes = append(s.data.Changes, change)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	return s.saveLocked()
 }
 
@@ -598,7 +644,7 @@ func (s *Store) UpdateChange(id string, update func(*model.ChangeRequest) error,
 		}
 		s.data.Changes[i].UpdatedAt = time.Now()
 		s.data.Changes[i].Version++
-		s.data.Audits = append(s.data.Audits, audits...)
+		s.appendAuditsLocked(audits...)
 		if err := s.saveLocked(); err != nil {
 			return model.ChangeRequest{}, err
 		}
@@ -627,7 +673,7 @@ func (s *Store) RecordIntegrationEvent(event model.IntegrationEvent, audit model
 		}
 	}
 	s.data.IntegrationEvents = append(s.data.IntegrationEvents, event)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	if err := s.saveLocked(); err != nil {
 		return model.IntegrationEvent{}, false, err
 	}
@@ -643,7 +689,7 @@ func (s *Store) RecordOutcomeSignal(signal model.OutcomeSignal, audit model.Audi
 		}
 	}
 	s.data.OutcomeSignals = append(s.data.OutcomeSignals, signal)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	if err := s.saveLocked(); err != nil {
 		return model.OutcomeSignal{}, false, err
 	}
@@ -668,6 +714,33 @@ func (s *Store) OutcomeSignals(organizationID string, limit int) []model.Outcome
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
 	}
+	return items
+}
+
+// OutcomeSignalsByChange returns outcome signals scoped to one change.
+func (s *Store) OutcomeSignalsByChange(organizationID, changeID string) []model.OutcomeSignal {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]model.OutcomeSignal, 0, 4)
+	for _, signal := range s.data.OutcomeSignals {
+		if signal.OrganizationID == organizationID && signal.ChangeID == changeID {
+			items = append(items, signal)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].OccurredAt.After(items[j].OccurredAt) })
+	return items
+}
+
+func (s *Store) IntegrationEventsByChange(organizationID, changeID string) []model.IntegrationEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]model.IntegrationEvent, 0)
+	for _, event := range s.data.IntegrationEvents {
+		if event.OrganizationID == organizationID && event.ChangeID == changeID {
+			items = append(items, event)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].OccurredAt.Before(items[j].OccurredAt) })
 	return items
 }
 
@@ -739,6 +812,66 @@ func (s *Store) Dashboard() model.Dashboard {
 		dashboard.AverageExperimentSec = float64(durationTotal) / float64(experimentCount) / 1000
 	}
 	return dashboard
+}
+
+func (s *Store) enrichAuditLocked(event model.AuditEvent) model.AuditEvent {
+	if event.ChangeID != "" {
+		event.ResourceType = "CHANGE"
+		event.ResourceID = event.ChangeID
+		for _, change := range s.data.Changes {
+			if change.ID != event.ChangeID || change.OrganizationID != event.OrganizationID {
+				continue
+			}
+			if event.ResourceVersionAfter == 0 {
+				event.ResourceVersionAfter = change.Version
+			}
+			if event.ResourceVersionBefore == 0 && change.Version > 1 {
+				event.ResourceVersionBefore = change.Version - 1
+			}
+			if event.RequestDigest == "" {
+				event.RequestDigest = change.ArtifactSHA256
+			}
+			break
+		}
+	}
+	return event
+}
+
+func (s *Store) appendAuditsLocked(events ...model.AuditEvent) {
+	for _, event := range events {
+		if event.ID == "" {
+			event.ID = NewID("audit_")
+		}
+		if event.CreatedAt.IsZero() {
+			event.CreatedAt = time.Now().UTC()
+		}
+		event = s.enrichAuditLocked(event)
+		var previous *model.AuditEvent
+		for index := len(s.data.Audits) - 1; index >= 0; index-- {
+			if s.data.Audits[index].OrganizationID == event.OrganizationID {
+				candidate := s.data.Audits[index]
+				previous = &candidate
+				break
+			}
+		}
+		linked, err := audit.Link(event, previous)
+		if err != nil {
+			panic("canonical audit payload cannot fail: " + err.Error())
+		}
+		s.data.Audits = append(s.data.Audits, linked)
+	}
+}
+
+func (s *Store) VerifyAuditChain(organizationID string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]model.AuditEvent, 0, len(s.data.Audits))
+	for _, event := range s.data.Audits {
+		if organizationID == "" || event.OrganizationID == organizationID {
+			items = append(items, event)
+		}
+	}
+	return audit.Verify(items)
 }
 
 func (s *Store) saveLocked() error {

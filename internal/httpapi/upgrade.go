@@ -1,4 +1,4 @@
-﻿package httpapi
+package httpapi
 
 import (
 	"crypto/sha256"
@@ -20,19 +20,23 @@ import (
 // root 升级 watcher 轮询该目录执行安装/切换/重启，并回写状态文件。
 //
 // 目录约定（由 watcher 与 web 服务共享）：
-//   UPGRADE_DIR/
-//     pending/          待处理升级包（changeguard-<version>.tar.gz）
-//     status.json       升级状态（go 读、watcher 写）
-//     history.json      升级历史
+//
+//	UPGRADE_DIR/
+//	  pending/          待处理升级包（changeguard-<version>.tar.gz）
+//	  status.json       升级状态（go 读、watcher 写）
+//	  history.json      升级历史
 const (
-	envUpgradeDir = "DBGUARD_UPGRADE_DIR"
+	envUpgradeDir          = "DBGUARD_UPGRADE_DIR"
+	envUpgradeApplyEnabled = "DBGUARD_ENABLE_UPGRADE_APPLY"
 
-	upgradeStateIdle     = "idle"
-	upgradeStatePending  = "pending"
-	upgradeStateApplying = "applying"
-	upgradeStateSuccess  = "success"
-	upgradeStateFailed   = "failed"
-	upgradeStateRollback = "rollback"
+	upgradeApplyDisabledCode    = "UPGRADE_APPLY_DISABLED"
+	upgradeApplyDisabledMessage = "在线升级执行已关闭；仅在完成升级包来源、备份恢复、回滚和 watcher 权限边界验证后，显式设置 DBGUARD_ENABLE_UPGRADE_APPLY=true 才可启用"
+	upgradeStateIdle            = "idle"
+	upgradeStatePending         = "pending"
+	upgradeStateApplying        = "applying"
+	upgradeStateSuccess         = "success"
+	upgradeStateFailed          = "failed"
+	upgradeStateRollback        = "rollback"
 )
 
 type upgradeStatus struct {
@@ -54,6 +58,15 @@ type upgradeHistoryEntry struct {
 	Message         string    `json:"message"`
 	AppliedAt       time.Time `json:"applied_at"`
 	PreviousVersion string    `json:"previous_version,omitempty"`
+}
+
+func upgradeApplyEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envUpgradeApplyEnabled))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func upgradeRoot() string {
@@ -129,11 +142,12 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status := readUpgradeStatus()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"current":  buildinfo.Current(),
-		"status":   status,
-		"history":  readUpgradeHistory(),
-		"dir":      upgradeRoot(),
-		"enabled":  os.Getenv(envUpgradeDir) != "" || filepath.IsAbs(upgradeRoot()),
+		"current":       buildinfo.Current(),
+		"status":        status,
+		"history":       readUpgradeHistory(),
+		"dir":           upgradeRoot(),
+		"enabled":       os.Getenv(envUpgradeDir) != "" || filepath.IsAbs(upgradeRoot()),
+		"apply_enabled": upgradeApplyEnabled(),
 	})
 }
 
@@ -232,9 +246,13 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if !upgradeApplyEnabled() {
+		writeUpgradeApplyDisabled(w)
+		return
+	}
 	actor := actorID(r)
 	if s.service == nil {
-		writeError(w, http.StatusForbidden, "只有企业管理员或技术负责人可以上传升级包")
+		writeError(w, http.StatusForbidden, "只有企业管理员或技术负责人可以触发升级")
 		return
 	}
 	user, err := s.service.ActorFor(actor)
@@ -258,6 +276,14 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Printf("upgrade apply requested archive=%s actor=%s", current.ArchiveName, actor)
 	writeJSON(w, http.StatusOK, map[string]any{"triggered": true, "message": "升级已触发，系统将自动应用并重启"})
+}
+
+func writeUpgradeApplyDisabled(w http.ResponseWriter) {
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		"error":   upgradeApplyDisabledMessage,
+		"code":    upgradeApplyDisabledCode,
+		"message": upgradeApplyDisabledMessage,
+	})
 }
 
 // handleUpgradeAbort POST /api/upgrade/abort

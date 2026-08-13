@@ -140,7 +140,7 @@ func TestFrontendUsesSelfContainedEnterpriseShellAndAgentRuntimeView(t *testing.
 		t.Fatal(err)
 	}
 	index := string(indexBytes)
-	for _, marker := range []string{`content="light"`, `href="/styles.css?v=20260808-enterprise-agent3"`, `id="authGate"`, `src="/app.js?v=20260808-enterprise-agent3"`} {
+	for _, marker := range []string{`content="light"`, `href="/styles.css?v=20260812-clawbot"`, `id="authGate"`, `src="/app.js?v=20260812-clawbot"`} {
 		if !strings.Contains(index, marker) {
 			t.Fatalf("enterprise shell is incomplete: missing %q", marker)
 		}

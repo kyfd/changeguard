@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -381,8 +384,12 @@ func (s *Server) handleChangeReport(w http.ResponseWriter, id, format, requestAc
 		}
 	}
 	if change.Analysis != nil {
-		fmt.Fprintf(&document, "\n## 智能辅助分析\n\n- 提供方：%s\n- 模型：%s\n- 风险：%s\n- 结论：%s\n- 引用证据：%s\n",
-			change.Analysis.Provider, change.Analysis.Model, change.Analysis.Risk, change.Analysis.Summary, strings.Join(change.Analysis.EvidenceIDs, "、"))
+		advisoryRisk := change.Analysis.AdvisoryRisk
+		if advisoryRisk == "" {
+			advisoryRisk = change.Analysis.Risk
+		}
+		fmt.Fprintf(&document, "\n## 智能辅助分析（仅供参考，不参与放行）\n\n- 提供方：%s\n- 模型：%s\n- AI 建议风险：%s\n- 结论：%s\n- 引用证据：%s\n",
+			change.Analysis.Provider, change.Analysis.Model, advisoryRisk, change.Analysis.Summary, strings.Join(change.Analysis.EvidenceIDs, "、"))
 		for _, reason := range change.Analysis.Reasons {
 			fmt.Fprintf(&document, "- 依据：%s\n", reason)
 		}
@@ -1065,6 +1072,45 @@ func (s *Server) handleChange(w http.ResponseWriter, r *http.Request) {
 		s.handleChangePassports(w, r, id, parts)
 		return
 	}
+	if action == "agent-ask" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		var input service.AskChangeAssistantInput
+		if err := decodeJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "问题格式不正确")
+			return
+		}
+		message, err := s.service.AskChangeAssistant(r.Context(), id, actorID(r), input)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, message)
+		return
+	}
+	if action == "agent-conversations" {
+		switch {
+		case len(parts) == 2 && r.Method == http.MethodGet:
+			items, err := s.service.AgentConversationsForChange(id, actorID(r))
+			if err != nil {
+				writeServiceError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, items)
+		case len(parts) == 3 && r.Method == http.MethodGet:
+			summary, err := s.service.AgentConversationFor(id, parts[2], actorID(r))
+			if err != nil {
+				writeServiceError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, summary)
+		default:
+			methodNotAllowed(w)
+		}
+		return
+	}
 	if action == "report" {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
@@ -1093,7 +1139,20 @@ func (s *Server) handleChange(w http.ResponseWriter, r *http.Request) {
 	case "submit":
 		change, err = s.service.Submit(id, actorID(r))
 	case "experiment":
-		change, err = s.service.QueueExperiment(id, actorID(r))
+		key, ok := validatedIdempotencyKey(w, r)
+		if !ok {
+			return
+		}
+		if key == "" {
+			w.Header().Set("Idempotency-Status", "not-requested")
+			change, err = s.service.QueueExperiment(id, actorID(r))
+		} else {
+			var replayed bool
+			change, replayed, err = s.service.QueueExperimentIdempotent(id, actorID(r), key, requestDigest(action, id, nil))
+			if replayed {
+				w.Header().Set("Idempotency-Replayed", "true")
+			}
+		}
 	case "approve", "reject":
 		var body struct{ Comment string }
 		if decodeErr := decodeJSON(r, &body); decodeErr != nil {
@@ -1101,7 +1160,20 @@ func (s *Server) handleChange(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if action == "approve" {
-			change, err = s.service.Approve(id, actorID(r), strings.TrimSpace(body.Comment))
+			key, ok := validatedIdempotencyKey(w, r)
+			if !ok {
+				return
+			}
+			if key == "" {
+				w.Header().Set("Idempotency-Status", "not-requested")
+				change, err = s.service.Approve(id, actorID(r), strings.TrimSpace(body.Comment))
+			} else {
+				var replayed bool
+				change, replayed, err = s.service.ApproveIdempotent(id, actorID(r), key, requestDigest(action, id, body), strings.TrimSpace(body.Comment))
+				if replayed {
+					w.Header().Set("Idempotency-Replayed", "true")
+				}
+			}
 		} else {
 			change, err = s.service.Reject(id, actorID(r), strings.TrimSpace(body.Comment))
 		}
@@ -1139,13 +1211,32 @@ func (s *Server) handleChangePassports(w http.ResponseWriter, r *http.Request, c
 				writeError(w, http.StatusBadRequest, "签发参数格式不正确")
 				return
 			}
-			credential, err := s.service.IssuePassport(changeID, actorID(r), input.TTLSeconds)
+			key, ok := validatedIdempotencyKey(w, r)
+			if !ok {
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			if key == "" {
+				w.Header().Set("Idempotency-Status", "not-requested")
+				credential, err := s.service.IssuePassport(changeID, actorID(r), input.TTLSeconds)
+				if err != nil {
+					writeServiceError(w, err)
+					return
+				}
+				writeJSON(w, http.StatusCreated, credential)
+				return
+			}
+			result, replayed, err := s.service.IssuePassportIdempotent(changeID, actorID(r), key, requestDigest("passports", changeID, input), input.TTLSeconds)
 			if err != nil {
 				writeServiceError(w, err)
 				return
 			}
-			w.Header().Set("Cache-Control", "no-store")
-			writeJSON(w, http.StatusCreated, credential)
+			if replayed {
+				w.Header().Set("Idempotency-Replayed", "true")
+				writeJSON(w, http.StatusOK, result)
+				return
+			}
+			writeJSON(w, http.StatusCreated, result.Credential)
 		default:
 			methodNotAllowed(w)
 		}
@@ -1338,6 +1429,30 @@ func writeEventStream(w http.ResponseWriter, flusher http.Flusher, payload strin
 	flusher.Flush()
 	return true
 }
+func requestDigest(operation, resource string, body any) string {
+	encoded, _ := json.Marshal(struct {
+		Operation string `json:"operation"`
+		Resource  string `json:"resource"`
+		Body      any    `json:"body,omitempty"`
+	}{operation, resource, body})
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
+}
+
+var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
+
+func validatedIdempotencyKey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		return "", true
+	}
+	if !idempotencyKeyPattern.MatchString(key) {
+		writeCodedError(w, http.StatusBadRequest, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key 必须为 8 到 128 个 ASCII 字符，仅允许字母、数字、点、下划线、冒号和连字符")
+		return "", false
+	}
+	return key, true
+}
+
 func actorID(r *http.Request) string {
 	if value, ok := auth.ActorID(r.Context()); ok {
 		return value
@@ -1378,6 +1493,10 @@ func decodeJSON(r *http.Request, target any) error {
 }
 func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, service.ErrIdempotencyConflict):
+		writeCodedError(w, http.StatusConflict, "IDEMPOTENCY_KEY_CONFLICT", err.Error())
+	case errors.Is(err, service.ErrIdempotencyInProgress):
+		writeCodedError(w, http.StatusConflict, "IDEMPOTENCY_REQUEST_IN_PROGRESS", err.Error())
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "记录不存在")
 	case errors.Is(err, service.ErrForbidden):
@@ -1399,6 +1518,10 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeCodedError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{"error": message, "code": code, "message": message})
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

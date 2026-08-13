@@ -102,6 +102,18 @@ func (s *Store) ChangesByOrganization(organizationID string) []model.ChangeReque
 	return items
 }
 
+func (s *Store) AuditsByOrganizationAppendOrder(organizationID string) []model.AuditEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]model.AuditEvent, 0)
+	for _, item := range s.data.Audits {
+		if item.OrganizationID == organizationID {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 func (s *Store) AuditsByOrganization(organizationID string, limit int) []model.AuditEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -293,7 +305,7 @@ func (s *Store) CreateEnterprise(organization model.Organization, user model.Use
 	s.data.Users = append(s.data.Users, user)
 	s.data.Credentials = append(s.data.Credentials, credential)
 	s.data.Policies = append(s.data.Policies, policies...)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	return s.saveLocked()
 }
 
@@ -324,7 +336,7 @@ func (s *Store) UpdateOrganization(id string, update func(*model.Organization) e
 		}
 		candidate.UpdatedAt = time.Now()
 		s.data.Organizations[index] = candidate
-		s.data.Audits = append(s.data.Audits, audit)
+		s.appendAuditsLocked(audit)
 		if err := s.saveLocked(); err != nil {
 			return model.Organization{}, err
 		}
@@ -345,7 +357,7 @@ func (s *Store) CreateInvite(invite model.OrganizationInvite, audit model.AuditE
 		}
 	}
 	s.data.Invites = append(s.data.Invites, invite)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	return s.saveLocked()
 }
 
@@ -412,7 +424,7 @@ func (s *Store) AcceptInvite(inviteID string, user model.User, credential model.
 		invite.AcceptedAt = &now
 		s.data.Users = append(s.data.Users, user)
 		s.data.Credentials = append(s.data.Credentials, credential)
-		s.data.Audits = append(s.data.Audits, audit)
+		s.appendAuditsLocked(audit)
 		if err := s.saveLocked(); err != nil {
 			return model.User{}, err
 		}
@@ -448,7 +460,7 @@ func (s *Store) CreateSSOUser(user model.User, credential model.UserCredential, 
 	}
 	s.data.Users = append(s.data.Users, user)
 	s.data.Credentials = append(s.data.Credentials, credential)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	if err := s.saveLocked(); err != nil {
 		return model.User{}, err
 	}
@@ -482,7 +494,7 @@ func (s *Store) UpdateIdentityLogin(userID string, updateUser func(*model.User),
 		updateCredential(&credential)
 		s.data.Credentials = append(s.data.Credentials, credential)
 	}
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	if err := s.saveLocked(); err != nil {
 		return model.User{}, err
 	}
@@ -540,7 +552,7 @@ func (s *Store) UpdateMember(organizationID, userID string, update func(*model.U
 			}
 		}
 		s.data.Users[index] = candidate
-		s.data.Audits = append(s.data.Audits, audit)
+		s.appendAuditsLocked(audit)
 		if err := s.saveLocked(); err != nil {
 			return model.User{}, err
 		}
@@ -595,7 +607,7 @@ func (s *Store) RevokeInvite(organizationID, inviteID string, audit model.AuditE
 		invite := &s.data.Invites[index]
 		if invite.ID == inviteID && invite.OrganizationID == organizationID && invite.Status == model.InvitePending {
 			invite.Status = model.InviteRevoked
-			s.data.Audits = append(s.data.Audits, audit)
+			s.appendAuditsLocked(audit)
 			return s.saveLocked()
 		}
 	}
@@ -630,7 +642,7 @@ func (s *Store) UpsertSSOUser(identity model.User, audit model.AuditEvent) (mode
 		audit.OrganizationID = user.OrganizationID
 		audit.ActorID = user.ID
 		audit.ActorName = user.Name
-		s.data.Audits = append(s.data.Audits, audit)
+		s.appendAuditsLocked(audit)
 		if err := s.saveLocked(); err != nil {
 			return model.User{}, err
 		}
@@ -729,7 +741,7 @@ func (s *Store) UpsertSSOUser(identity model.User, audit model.AuditEvent) (mode
 	audit.ActorName = identity.Name
 	s.data.Users = append(s.data.Users, identity)
 	s.data.Credentials = append(s.data.Credentials, credential)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	if err := s.saveLocked(); err != nil {
 		return model.User{}, err
 	}
@@ -787,7 +799,7 @@ func (s *Store) CreateApplication(application model.Application, audit model.Aud
 			break
 		}
 	}
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	return s.saveLocked()
 }
 
@@ -814,7 +826,7 @@ func (s *Store) UpdateApplication(organizationID, applicationID string, update f
 		}
 		s.data.Applications[index] = candidate
 		application = &s.data.Applications[index]
-		s.data.Audits = append(s.data.Audits, audit)
+		s.appendAuditsLocked(audit)
 		if err := s.saveLocked(); err != nil {
 			return model.Application{}, err
 		}

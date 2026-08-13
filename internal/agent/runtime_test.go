@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -45,6 +46,9 @@ func TestFallbackAnalysisUsesEvidence(t *testing.T) {
 	}
 	if len(result.EvidenceIDs) != 2 {
 		t.Fatalf("expected evidence ids, got %#v", result.EvidenceIDs)
+	}
+	if result.AdvisoryRisk != model.RiskMedium || result.Risk != result.AdvisoryRisk {
+		t.Fatalf("fallback must expose advisory risk and legacy alias, got %#v", result)
 	}
 }
 
@@ -98,8 +102,179 @@ func TestAgentOneShotAcceptsValidConclusion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid one-shot analysis failed: %v", err)
 	}
-	if result.Provider != "openai-compatible" || result.Risk != model.RiskHigh || result.Steps != 1 || result.ToolCalls != 3 {
+	if result.Provider != "openai-compatible" || result.AdvisoryRisk != model.RiskHigh || result.Risk != model.RiskHigh || result.Steps != 1 || result.ToolCalls != 3 {
 		t.Fatalf("unexpected analysis: %#v", result)
+	}
+}
+
+func TestAgentLoopRejectsInvalidToolArgumentsWithoutExecuting(t *testing.T) {
+	var rounds, executions int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		rounds++
+		if rounds == 1 {
+			message := requiredToolMessage()
+			calls := message["tool_calls"].([]map[string]any)
+			message["tool_calls"] = append(calls, map[string]any{
+				"id": "call_probe", "type": "function",
+				"function": map[string]any{"name": "probe", "arguments": `{"value":`},
+			})
+			writeModelMessage(w, message)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"risk\":\"LOW\",\"summary\":\"证据已读取\",\"reasons\":[\"规则通过\"],\"suggestions\":[\"继续评审\"],\"evidenceIds\":[\"ev_rule\"]}"}}]}`))
+	}))
+	defer server.Close()
+
+	registry := DefaultToolRegistry()
+	registry.Register(Tool{
+		Name: "probe", Parameters: emptyObjectSchema(),
+		Execute: func(context.Context, model.ChangeRequest, map[string]any, DataSource) (any, error) {
+			executions++
+			return map[string]any{"ok": true}, nil
+		},
+	})
+	runtime := &Runtime{baseURL: server.URL, apiKey: "test", model: "test", maxTokens: 128, client: server.Client(), mode: "loop", maxRounds: 3, registry: registry}
+	result, err := runtime.analyzeWithTools(context.Background(), model.ChangeRequest{
+		ID: "chg_invalid_args", Findings: []model.Finding{{ID: "ev_rule", Severity: model.RiskLow}},
+	}, LLMConfig{BaseURL: server.URL, APIKey: "test", Model: "test", MaxTokens: 128})
+	if err != nil {
+		t.Fatalf("analysis failed: %v", err)
+	}
+	if executions != 0 {
+		t.Fatalf("invalid arguments must not execute tool, executions=%d", executions)
+	}
+	var invalidCall *model.AgentToolCallRecord
+	for i := range result.ToolCallLog {
+		if result.ToolCallLog[i].Name == "probe" {
+			invalidCall = &result.ToolCallLog[i]
+			break
+		}
+	}
+	if invalidCall == nil || !strings.Contains(invalidCall.Error, "工具参数无效") {
+		t.Fatalf("invalid arguments must be auditable, log=%+v", result.ToolCallLog)
+	}
+}
+
+func TestAgentLoopValidatesToolParameterSchemaBeforeExecution(t *testing.T) {
+	tests := []struct {
+		name       string
+		arguments  string
+		parameters map[string]any
+		wantCalls  int
+		wantLimit  int64
+	}{
+		{
+			name: "valid integer limit", arguments: `{"limit":10}`, wantCalls: 1, wantLimit: 10,
+			parameters: map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "additionalProperties": false},
+		},
+		{
+			name: "string limit", arguments: `{"limit":"10"}`,
+			parameters: map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "additionalProperties": false},
+		},
+		{
+			name: "fractional limit", arguments: `{"limit":10.5}`,
+			parameters: map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "additionalProperties": false},
+		},
+		{
+			name: "negative limit", arguments: `{"limit":-1}`,
+			parameters: map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "additionalProperties": false},
+		},
+		{
+			name: "limit above maximum", arguments: `{"limit":21}`,
+			parameters: map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}, "additionalProperties": false},
+		},
+		{name: "unknown field in empty schema", arguments: `{"unexpected":1}`, parameters: emptyObjectSchema()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var rounds, executions int
+			var observedLimit int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				rounds++
+				if rounds == 1 {
+					message := requiredToolMessage()
+					calls := message["tool_calls"].([]map[string]any)
+					message["tool_calls"] = append(calls, map[string]any{
+						"id": "call_probe", "type": "function",
+						"function": map[string]any{"name": "probe", "arguments": tt.arguments},
+					})
+					writeModelMessage(w, message)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"risk\":\"LOW\",\"summary\":\"证据已读取\",\"reasons\":[\"规则通过\"],\"suggestions\":[\"继续评审\"],\"evidenceIds\":[\"ev_rule\"]}"}}]}`))
+			}))
+			defer server.Close()
+
+			registry := DefaultToolRegistry()
+			registry.Register(Tool{
+				Name: "probe", Parameters: tt.parameters,
+				Execute: func(_ context.Context, _ model.ChangeRequest, args map[string]any, _ DataSource) (any, error) {
+					executions++
+					if raw, ok := args["limit"].(json.Number); ok {
+						observedLimit, _ = raw.Int64()
+					}
+					return map[string]any{"ok": true}, nil
+				},
+			})
+			runtime := &Runtime{baseURL: server.URL, apiKey: "test", model: "test", maxTokens: 128, client: server.Client(), mode: "loop", maxRounds: 3, registry: registry}
+			result, err := runtime.analyzeWithTools(context.Background(), model.ChangeRequest{
+				ID: "chg_schema_args", Findings: []model.Finding{{ID: "ev_rule", Severity: model.RiskLow}},
+			}, LLMConfig{BaseURL: server.URL, APIKey: "test", Model: "test", MaxTokens: 128})
+			if err != nil {
+				t.Fatalf("analysis failed: %v", err)
+			}
+			if executions != tt.wantCalls {
+				t.Fatalf("tool executions=%d, want %d", executions, tt.wantCalls)
+			}
+			if tt.wantCalls == 1 && observedLimit != tt.wantLimit {
+				t.Fatalf("observed limit=%d, want %d", observedLimit, tt.wantLimit)
+			}
+			var probeLog *model.AgentToolCallRecord
+			for i := range result.ToolCallLog {
+				if result.ToolCallLog[i].Name == "probe" {
+					probeLog = &result.ToolCallLog[i]
+					break
+				}
+			}
+			if probeLog == nil {
+				t.Fatalf("missing probe audit log: %+v", result.ToolCallLog)
+			}
+			if tt.wantCalls == 0 && !strings.Contains(probeLog.Error, "schema") {
+				t.Fatalf("invalid schema arguments must be audited: %+v", probeLog)
+			}
+			if tt.wantCalls == 1 && probeLog.Error != "" {
+				t.Fatalf("valid arguments must not record error: %+v", probeLog)
+			}
+		})
+	}
+}
+
+type limitRecordingDataSource struct {
+	recentLimit int
+}
+
+func (*limitRecordingDataSource) Policies(string) []model.RiskPolicy { return nil }
+func (d *limitRecordingDataSource) RecentChanges(_, _ string, limit int) []model.ChangeRequest {
+	d.recentLimit = limit
+	return nil
+}
+func (*limitRecordingDataSource) Application(string, string) (model.Application, bool) {
+	return model.Application{}, false
+}
+
+func TestSearchHistoricalAcceptsJSONNumberLimit(t *testing.T) {
+	args, err := decodeToolArguments(`{"limit":10}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := &limitRecordingDataSource{}
+	if _, err := DefaultToolRegistry().Call(context.Background(), "search_historical_changes", model.ChangeRequest{}, args, ds); err != nil {
+		t.Fatalf("valid limit should execute: %v", err)
+	}
+	if ds.recentLimit != 11 {
+		t.Fatalf("data source limit=%d, want requested limit+1 (11)", ds.recentLimit)
 	}
 }
 

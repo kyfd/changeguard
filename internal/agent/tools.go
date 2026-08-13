@@ -74,6 +74,9 @@ func (r *ToolRegistry) Call(ctx context.Context, name string, change model.Chang
 	if !ok {
 		return nil, fmt.Errorf("不允许的工具：%s", name)
 	}
+	if err := validateToolArguments(args, t.Parameters); err != nil {
+		return nil, fmt.Errorf("工具参数不符合 schema：%w", err)
+	}
 	if t.Execute == nil {
 		return nil, fmt.Errorf("工具未实现：%s", name)
 	}
@@ -102,6 +105,82 @@ func (r *ToolRegistry) OpenAITools() []map[string]any {
 
 func emptyObjectSchema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+}
+
+// validateToolArguments implements the small JSON Schema subset used by local
+// Agent tools: object properties, additionalProperties, and integer bounds.
+func validateToolArguments(args map[string]any, schema map[string]any) error {
+	if schema == nil {
+		schema = emptyObjectSchema()
+	}
+	if schemaType, _ := schema["type"].(string); schemaType != "" && schemaType != "object" {
+		return fmt.Errorf("根类型 %q 不受支持", schemaType)
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	additionalAllowed, _ := schema["additionalProperties"].(bool)
+	for name, value := range args {
+		rawProperty, known := properties[name]
+		if !known {
+			if !additionalAllowed {
+				return fmt.Errorf("未知字段 %q", name)
+			}
+			continue
+		}
+		property, ok := rawProperty.(map[string]any)
+		if !ok {
+			return fmt.Errorf("字段 %q 的 schema 无效", name)
+		}
+		if err := validateToolArgumentValue(name, value, property); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateToolArgumentValue(name string, value any, schema map[string]any) error {
+	switch schemaType, _ := schema["type"].(string); schemaType {
+	case "":
+		return nil
+	case "integer":
+		number, ok := value.(json.Number)
+		if !ok {
+			return fmt.Errorf("字段 %q 必须是整数", name)
+		}
+		integer, err := number.Int64()
+		if err != nil {
+			return fmt.Errorf("字段 %q 必须是整数", name)
+		}
+		if minimum, ok := schemaIntegerBound(schema["minimum"]); ok && integer < minimum {
+			return fmt.Errorf("字段 %q 不能小于 %d", name, minimum)
+		}
+		if maximum, ok := schemaIntegerBound(schema["maximum"]); ok && integer > maximum {
+			return fmt.Errorf("字段 %q 不能大于 %d", name, maximum)
+		}
+		return nil
+	case "string":
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("字段 %q 必须是字符串", name)
+		}
+		return nil
+	default:
+		return fmt.Errorf("字段 %q 的类型 %q 不受支持", name, schemaType)
+	}
+}
+
+func schemaIntegerBound(value any) (int64, bool) {
+	switch bound := value.(type) {
+	case int:
+		return int64(bound), true
+	case int64:
+		return bound, true
+	case float64:
+		return int64(bound), bound == float64(int64(bound))
+	case json.Number:
+		parsed, err := bound.Int64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 // DefaultToolRegistry 注册第一版 4 个本地工具 + 原有 3 个证据工具。
@@ -149,7 +228,7 @@ func DefaultToolRegistry() *ToolRegistry {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"limit": map[string]any{"type": "integer", "description": "返回条数，默认 5，最大 20"},
+				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "返回条数，默认 5，最大 20"},
 			},
 			"additionalProperties": false,
 		},
@@ -321,11 +400,12 @@ func toolScanSQL(_ context.Context, change model.ChangeRequest, _ map[string]any
 
 func toolSearchHistorical(_ context.Context, change model.ChangeRequest, args map[string]any, ds DataSource) (any, error) {
 	limit := 5
-	if n, ok := args["limit"].(float64); ok && int(n) > 0 {
+	if raw, ok := args["limit"]; ok {
+		n, err := raw.(json.Number).Int64()
+		if err != nil {
+			return nil, fmt.Errorf("limit 必须是整数: %w", err)
+		}
 		limit = int(n)
-	}
-	if limit > 20 {
-		limit = 20
 	}
 	if ds == nil {
 		return map[string]any{"items": []any{}, "message": "历史数据源未注入"}, nil
@@ -337,9 +417,6 @@ func toolSearchHistorical(_ context.Context, change model.ChangeRequest, args ma
 			continue
 		}
 		risk := string(c.Risk)
-		if c.Analysis != nil && c.Analysis.Risk != "" {
-			risk = string(c.Analysis.Risk)
-		}
 		out = append(out, map[string]any{
 			"id": c.ID, "title": c.Title, "status": c.Status, "risk": risk,
 			"environment": c.Environment, "change_type": c.ChangeType,

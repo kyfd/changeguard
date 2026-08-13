@@ -9,6 +9,8 @@
 - Gate Token 只能放在 `Authorization: Bearer <token>`；请求体中的 `token` 字段会被拒绝。
 - 通行证签发响应包含一次性明文 Token，并设置 `Cache-Control: no-store`；服务端仅保存 Token SHA-256。
 - 新建变更只接受 `DATABASE`、`CONFIG`、`KUBERNETES` 三类制品。
+- `POST /api/changes/{id}/experiment`、`POST /api/changes/{id}/approve`、`POST /api/changes/{id}/passports` 支持 `Idempotency-Key`。Key 可省略以兼容旧客户端（响应含 `Idempotency-Status: not-requested`，明确该调用非幂等）；提供时必须为 8～128 个 ASCII 字符，仅允许字母、数字、`.`、`_`、`:`、`-`。
+- 幂等范围为企业、操作者、操作和资源。同 Key、同请求摘要重试返回首次成功结果并设置 `Idempotency-Replayed: true`；同 Key、不同请求摘要返回 `409 IDEMPOTENCY_KEY_CONFLICT`，不会再次排队、审批或签发。
 
 普通错误响应：
 
@@ -66,6 +68,15 @@ Gate 错误响应：
 | GET | `/api/audits?limit=250` | 审计列表 |
 | GET | `/api/events` | 服务端事件流 |
 | GET | `/api/operations/outbox` | 异步演练 Outbox 状态 |
+
+新审计 JSON 在兼容既有字段的基础上增加 `request_id`、`actor_type`、`auth_method`、`resource_type`、`resource_id`、`resource_version_before/after`、`request_digest`、`result`、`reason_code`、`related_event_id`、`attempt_id`、`passport_id`、`prev_hash`、`hash`。旧事件的 hash 可以为空；新事件按企业链接。Evidence Bundle 当前通过只读 CLI 提供，而不是新增 HTTP 下载端点：
+
+```text
+go run ./cmd/changeguard-evidence export -data ./data/dbguard.json -change <change-id> -out evidence.json
+go run ./cmd/changeguard-evidence verify -in evidence.json
+```
+
+`verify` 完全离线，成功退出 0；Manifest、change binding 或 audit chain 任一不匹配均非零退出。Bundle 不包含 artifact/SQL 正文、明文 Token、Token hash 或未脱敏 secret。
 
 ## 4. 变更单
 
@@ -158,6 +169,18 @@ Gate 错误响应：
 ```
 
 同一变更存在尚未过期的 `ACTIVE` 通行证时，重复签发会失败；应先消费、撤销或等待过期。
+
+携带 `Idempotency-Key` 的首次签发成功仍只返回一次明文 Token。相同请求重试不会持久化或重显 Token，也不会再签发；返回 `200`、`Idempotency-Replayed: true` 和稳定安全结果：
+
+```json
+{
+  "passport": { "id": "pass_...", "status": "ACTIVE" },
+  "code": "PASSPORT_ALREADY_ISSUED_TOKEN_NOT_REPLAYABLE",
+  "message": "通行证已签发；明文 Token 仅在首次成功响应中显示，不能重显或重新签发"
+}
+```
+
+客户端若丢失首次响应中的 Token，应撤销该通行证后使用新的 Idempotency-Key 显式重新签发；幂等记录仅保存公开通行证快照和 `passport:<id>` 安全引用，不保存明文 Token。
 
 ## 6. CI Gate
 

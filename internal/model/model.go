@@ -168,6 +168,10 @@ type ExperimentReport struct {
 	ExecutionError     string     `json:"execution_error,omitempty"`
 	ArtifactSHA256     string     `json:"artifact_sha256,omitempty"`
 	RuleSetVersion     string     `json:"rule_set_version,omitempty"`
+	AttemptID          string     `json:"attempt_id,omitempty"`
+	LeaseGeneration    uint64     `json:"lease_generation,omitempty"`
+	InputSHA256        string     `json:"input_sha256,omitempty"`
+	ResultDigest       string     `json:"result_digest,omitempty"`
 	Evidence           []Evidence `json:"evidence"`
 }
 
@@ -184,8 +188,13 @@ type AgentToolCallRecord struct {
 }
 
 type AgentAnalysis struct {
-	Provider           string                `json:"provider"`
-	Model              string                `json:"model,omitempty"`
+	Provider string `json:"provider"`
+	Model    string `json:"model,omitempty"`
+	// AdvisoryRisk is the Agent's non-authoritative risk opinion. It is never
+	// used to set ChangeRequest.Risk or to drive approval/state transitions.
+	AdvisoryRisk RiskLevel `json:"advisory_risk"`
+	// Risk is retained as a backwards-compatible alias for API consumers.
+	// New consumers should use AdvisoryRisk.
 	Risk               RiskLevel             `json:"risk"`
 	Summary            string                `json:"summary"`
 	Reasons            []string              `json:"reasons"`
@@ -259,14 +268,29 @@ type ChangeComment struct {
 }
 
 type AuditEvent struct {
-	OrganizationID string    `json:"organization_id"`
-	ID             string    `json:"id"`
-	ChangeID       string    `json:"change_id,omitempty"`
-	ActorID        string    `json:"actor_id"`
-	ActorName      string    `json:"actor_name"`
-	Action         string    `json:"action"`
-	Detail         string    `json:"detail"`
-	CreatedAt      time.Time `json:"created_at"`
+	OrganizationID        string    `json:"organization_id"`
+	ID                    string    `json:"id"`
+	ChangeID              string    `json:"change_id,omitempty"`
+	RequestID             string    `json:"request_id,omitempty"`
+	ActorID               string    `json:"actor_id"`
+	ActorName             string    `json:"actor_name"`
+	ActorType             string    `json:"actor_type,omitempty"`
+	AuthMethod            string    `json:"auth_method,omitempty"`
+	Action                string    `json:"action"`
+	ResourceType          string    `json:"resource_type,omitempty"`
+	ResourceID            string    `json:"resource_id,omitempty"`
+	ResourceVersionBefore int       `json:"resource_version_before,omitempty"`
+	ResourceVersionAfter  int       `json:"resource_version_after,omitempty"`
+	RequestDigest         string    `json:"request_digest,omitempty"`
+	Result                string    `json:"result,omitempty"`
+	ReasonCode            string    `json:"reason_code,omitempty"`
+	RelatedEventID        string    `json:"related_event_id,omitempty"`
+	AttemptID             string    `json:"attempt_id,omitempty"`
+	PassportID            string    `json:"passport_id,omitempty"`
+	Detail                string    `json:"detail"`
+	CreatedAt             time.Time `json:"created_at"`
+	PrevHash              string    `json:"prev_hash,omitempty"`
+	Hash                  string    `json:"hash,omitempty"`
 }
 
 type ConflictReason struct {
@@ -521,23 +545,38 @@ const (
 	OutboxDead       OutboxStatus = "DEAD"
 )
 
+type OutboxStage string
+
+const (
+	OutboxStagePrepare  OutboxStage = "PREPARE"
+	OutboxStageApply    OutboxStage = "APPLY"
+	OutboxStageFinalize OutboxStage = "FINALIZE"
+)
+
 type OutboxEvent struct {
-	ID             string          `json:"id"`
-	OrganizationID string          `json:"organization_id"`
-	AggregateType  string          `json:"aggregate_type"`
-	AggregateID    string          `json:"aggregate_id"`
-	EventType      string          `json:"event_type"`
-	Payload        json.RawMessage `json:"payload,omitempty"`
-	Status         OutboxStatus    `json:"status"`
-	Attempts       int             `json:"attempts"`
-	MaxAttempts    int             `json:"max_attempts"`
-	NextAttemptAt  time.Time       `json:"next_attempt_at"`
-	LockedBy       string          `json:"locked_by,omitempty"`
-	LockedUntil    *time.Time      `json:"locked_until,omitempty"`
-	LastError      string          `json:"last_error,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	ID              string          `json:"id"`
+	OrganizationID  string          `json:"organization_id"`
+	AggregateType   string          `json:"aggregate_type"`
+	AggregateID     string          `json:"aggregate_id"`
+	EventType       string          `json:"event_type"`
+	Payload         json.RawMessage `json:"payload,omitempty"`
+	Status          OutboxStatus    `json:"status"`
+	Attempts        int             `json:"attempts"`
+	MaxAttempts     int             `json:"max_attempts"`
+	AttemptID       string          `json:"attempt_id,omitempty"`
+	LeaseGeneration uint64          `json:"lease_generation,omitempty"`
+	Stage           OutboxStage     `json:"stage,omitempty"`
+	StageStartedAt  *time.Time      `json:"stage_started_at,omitempty"`
+	StageUpdatedAt  *time.Time      `json:"stage_updated_at,omitempty"`
+	InputSHA256     string          `json:"input_sha256,omitempty"`
+	ResultDigest    string          `json:"result_digest,omitempty"`
+	NextAttemptAt   time.Time       `json:"next_attempt_at"`
+	LockedBy        string          `json:"locked_by,omitempty"`
+	LockedUntil     *time.Time      `json:"locked_until,omitempty"`
+	LastError       string          `json:"last_error,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
 }
 
 type OperationsSummary struct {

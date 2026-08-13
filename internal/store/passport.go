@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"sort"
@@ -31,10 +32,29 @@ func (s *Store) CreatePassport(passport model.Passport, audit model.AuditEvent) 
 	}
 	oldPassports := append([]model.StoredPassport(nil), s.data.Passports...)
 	oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
+	for index := range s.data.Passports {
+		item := &s.data.Passports[index]
+		if item.OrganizationID != passport.OrganizationID || item.ChangeID != passport.ChangeID || item.Status != model.PassportActive || now.Before(item.ExpiresAt) {
+			continue
+		}
+		item.Status = model.PassportExpired
+		expiryAudit := model.AuditEvent{
+			OrganizationID: item.OrganizationID,
+			ChangeID:       item.ChangeID,
+			ActorID:        "system",
+			ActorName:      "ChangeGuard",
+			ActorType:      "SYSTEM",
+			Action:         "PASSPORT_EXPIRED",
+			PassportID:     item.ID,
+			Detail:         "签发新通行证前物化既有通行证自然过期状态",
+			CreatedAt:      now,
+		}
+		s.appendAuditsLocked(expiryAudit)
+	}
 	stored := model.StoredPassport{Passport: passport, TokenSHA256Stored: passport.TokenSHA256}
 	stored.Passport.TokenSHA256 = ""
 	s.data.Passports = append(s.data.Passports, stored)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	if err := s.saveLocked(); err != nil {
 		s.data.Passports = oldPassports
 		s.data.Audits = oldAudits
@@ -74,6 +94,17 @@ func (s *Store) PassportsByChange(organizationID, changeID string) []model.Passp
 func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, consume bool, audit model.AuditEvent) (model.Passport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		passport, payload, version, err := backend.usePassport(ctx, id, tokenSHA256, consumer, at, consume, audit)
+		if len(payload) > 0 {
+			if installErr := s.installPostgresSnapshot(payload, version); installErr != nil {
+				return model.Passport{}, installErr
+			}
+		}
+		return passport, err
+	}
 	for index := range s.data.Passports {
 		item := &s.data.Passports[index]
 		if item.ID != id {
@@ -81,6 +112,9 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 		}
 		if subtle.ConstantTimeCompare([]byte(item.TokenSHA256Stored), []byte(tokenSHA256)) != 1 {
 			return model.Passport{}, ErrPassportTokenMismatch
+		}
+		if item.Status == model.PassportExpired {
+			return model.Passport{}, ErrPassportExpired
 		}
 		if item.Status != model.PassportActive {
 			return model.Passport{}, ErrPassportInactive
@@ -90,7 +124,7 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 			oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
 			item.Status = model.PassportExpired
 			audit.Action = "PASSPORT_EXPIRED"
-			s.data.Audits = append(s.data.Audits, audit)
+			s.appendAuditsLocked(audit)
 			if err := s.saveLocked(); err != nil {
 				s.data.Passports[index] = oldItem
 				s.data.Audits = oldAudits
@@ -142,7 +176,7 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 			})
 			audit.Action = "PASSPORT_CONSUMED_AND_CHANGE_COMPLETED"
 			audit.Detail += "；变更状态已原子更新为 COMPLETED"
-			s.data.Audits = append(s.data.Audits, audit)
+			s.appendAuditsLocked(audit)
 			if err := s.saveLocked(); err != nil {
 				s.data.Passports[index] = oldItem
 				s.data.Changes[changeIndex] = oldChange
@@ -171,7 +205,7 @@ func (s *Store) RevokePassport(organizationID, id, actorID string, at time.Time,
 		item.Status = model.PassportRevoked
 		item.RevokedAt = &at
 		item.RevokedByID = actorID
-		s.data.Audits = append(s.data.Audits, audit)
+		s.appendAuditsLocked(audit)
 		if err := s.saveLocked(); err != nil {
 			s.data.Passports[index] = model.StoredPassport{Passport: oldItem.Passport, TokenSHA256Stored: oldItem.TokenSHA256Stored}
 			s.data.Audits = oldAudits
@@ -201,7 +235,7 @@ func (s *Store) RevokePassportsByChange(organizationID, changeID, actorID string
 	if !changed {
 		return nil
 	}
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	if err := s.saveLocked(); err != nil {
 		s.data.Passports = oldPassports
 		s.data.Audits = oldAudits
@@ -213,8 +247,17 @@ func (s *Store) RevokePassportsByChange(organizationID, changeID, actorID string
 func (s *Store) RecordAudit(audit model.AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, payload, version, err := backend.appendAudit(ctx, audit)
+		if err != nil {
+			return err
+		}
+		return s.installPostgresSnapshot(payload, version)
+	}
 	oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
-	s.data.Audits = append(s.data.Audits, audit)
+	s.appendAuditsLocked(audit)
 	if err := s.saveLocked(); err != nil {
 		s.data.Audits = oldAudits
 		return err

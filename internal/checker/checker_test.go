@@ -188,6 +188,89 @@ func TestSafeReleaseProducesNoSyntheticFinding(t *testing.T) {
 	}
 }
 
+func TestTransactionOptimizationRules(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		code string
+	}{
+		{
+			name: "unbatched update",
+			sql:  "UPDATE orders SET status='archived' WHERE created_at < NOW() - INTERVAL '90 days';",
+			code: "UNBATCHED_LARGE_DML",
+		},
+		{
+			name: "fk without not valid",
+			sql:  "ALTER TABLE inventory_reservation ADD CONSTRAINT fk_reservation_sku FOREIGN KEY (sku_id) REFERENCES sku(id);",
+			code: "FK_WITHOUT_NOT_VALID",
+		},
+		{
+			name: "for update unbounded",
+			sql:  "SELECT * FROM orders WHERE status='PENDING' FOR UPDATE;",
+			code: "SELECT_FOR_UPDATE_UNBOUNDED",
+		},
+		{
+			name: "heavy ddl rewrite",
+			sql:  "VACUUM FULL orders;",
+			code: "HEAVY_DDL_REWRITE",
+		},
+		{
+			name: "missing lock timeout on ddl",
+			sql:  "CREATE INDEX idx_orders_status ON orders(status);",
+			code: "MISSING_LOCK_TIMEOUT",
+		},
+		{
+			name: "mixed ddl and bulk dml",
+			sql:  "ALTER TABLE orders ADD COLUMN note text; UPDATE orders SET note='x' WHERE id > 0;",
+			code: "MIXED_DDL_DML_TRANSACTION",
+		},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			result := Check(item.sql, "SELECT 1;")
+			if !containsFinding(result.Findings, item.code) {
+				t.Fatalf("expected %s, got %+v", item.code, codesOf(result.Findings))
+			}
+		})
+	}
+}
+
+func TestBatchedDMLWithTimeoutIsClean(t *testing.T) {
+	sql := `
+SET LOCAL lock_timeout = '2s';
+SET LOCAL statement_timeout = '30s';
+UPDATE member_points SET status='EXPIRED'
+WHERE expires_at < NOW() - INTERVAL '7 days' AND status='ACTIVE'
+LIMIT 10000;
+`
+	result := Check(sql, "UPDATE member_points SET status='ACTIVE' WHERE status='EXPIRED' AND updated_at >= NOW() - INTERVAL '1 hour' LIMIT 10000;")
+	for _, code := range []string{"UNBATCHED_LARGE_DML", "MISSING_LOCK_TIMEOUT", "UPDATE_WITHOUT_WHERE"} {
+		if containsFinding(result.Findings, code) {
+			t.Fatalf("batched DML with timeouts should not hit %s: %+v", code, codesOf(result.Findings))
+		}
+	}
+}
+
+func TestForeignKeyNotValidIsAccepted(t *testing.T) {
+	sql := `
+SET LOCAL lock_timeout = '2s';
+ALTER TABLE inventory_reservation
+  ADD CONSTRAINT fk_reservation_sku FOREIGN KEY (sku_id) REFERENCES sku(id) NOT VALID;
+`
+	result := Check(sql, "ALTER TABLE inventory_reservation DROP CONSTRAINT IF EXISTS fk_reservation_sku;")
+	if containsFinding(result.Findings, "FK_WITHOUT_NOT_VALID") {
+		t.Fatalf("NOT VALID foreign key must not be flagged: %+v", codesOf(result.Findings))
+	}
+}
+
+func codesOf(findings []model.Finding) []string {
+	codes := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		codes = append(codes, finding.Code)
+	}
+	return codes
+}
+
 func containsFinding(findings []model.Finding, code string) bool {
 	for _, finding := range findings {
 		if finding.Code == code {

@@ -13,6 +13,18 @@ import (
 
 type fakeRunner struct{}
 
+type countingRunner struct {
+	targetID string
+	runs     int
+}
+
+func (r *countingRunner) Run(ctx context.Context, change model.ChangeRequest) model.ExperimentReport {
+	if change.ID == r.targetID {
+		r.runs++
+	}
+	return fakeRunner{}.Run(ctx, change)
+}
+
 func (fakeRunner) Run(_ context.Context, change model.ChangeRequest) model.ExperimentReport {
 	now := time.Now()
 	return model.ExperimentReport{
@@ -80,6 +92,65 @@ func TestZeroWorkersLeaveQueuedBusinessWorkUntouched(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected queued outbox evidence")
+	}
+}
+
+func TestStartupRecoveryTakesOverExpiredApplyGeneration(t *testing.T) {
+	data := store.NewMemory()
+	runner := &countingRunner{}
+	svc := New(data, runner, fakeAnalyzer{})
+	change, err := svc.Create(model.CreateChangeInput{
+		Title: "startup lease recovery", ApplicationID: "app_order", ChangeType: "DDL",
+		SQL: "CREATE INDEX CONCURRENTLY idx_recover ON orders(status);", RollbackSQL: "DROP INDEX CONCURRENTLY IF EXISTS idx_recover;",
+	}, "usr_developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.targetID = change.ID
+	change, err = svc.Submit(change.ID, "usr_developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.QueueExperiment(change.ID, "usr_developer"); err != nil {
+		t.Fatal(err)
+	}
+	oldLease, err := data.ClaimOutbox("crashed-worker", time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := data.CheckpointExperimentOutbox(oldLease.ID, "crashed-worker", oldLease.LeaseGeneration, model.OutboxStageApply, oldLease.InputSHA256); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc.Start(ctx, 1)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		change, err = svc.Change(change.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if change.Status == model.StatusWaitingApproval {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if change.Status != model.StatusWaitingApproval || runner.runs != 1 {
+		t.Fatalf("startup takeover did not rerun one isolated APPLY: status=%s runs=%d", change.Status, runner.runs)
+	}
+	events := data.OutboxByOrganization(change.OrganizationID, true, 0)
+	var recovered model.OutboxEvent
+	for _, event := range events {
+		if event.ID == oldLease.ID {
+			recovered = event
+		}
+	}
+	if recovered.Status != model.OutboxCompleted || recovered.LeaseGeneration <= oldLease.LeaseGeneration || recovered.AttemptID != oldLease.AttemptID || recovered.ResultDigest == "" {
+		t.Fatalf("unexpected recovered outbox: %+v", recovered)
+	}
+	if change.Experiment == nil || change.Experiment.AttemptID != recovered.AttemptID || change.Experiment.LeaseGeneration != recovered.LeaseGeneration || change.Experiment.InputSHA256 != change.ArtifactSHA256 {
+		t.Fatalf("report is not bound to recovered attempt: %+v", change.Experiment)
 	}
 }
 
@@ -489,6 +560,49 @@ func TestEnterpriseApplicationOnboarding(t *testing.T) {
 	}
 }
 
+type highRiskAnalyzer struct{}
+
+func (highRiskAnalyzer) Analyze(_ context.Context, _ model.ChangeRequest) model.AgentAnalysis {
+	return model.AgentAnalysis{
+		Provider: "test", Risk: model.RiskHigh, Summary: "模型建议按高风险复核",
+		GeneratedAt: time.Now(),
+	}
+}
+
+func TestAgentHighRiskDoesNotEscalateGovernanceApproval(t *testing.T) {
+	data := store.NewMemory()
+	svc := New(data, fakeRunner{}, highRiskAnalyzer{})
+	change, err := svc.Create(model.CreateChangeInput{
+		Title: "安全配置调整", ApplicationID: "app_order", ChangeType: "配置变更", Environment: "生产环境",
+		Artifacts:    []model.ChangeArtifact{{Kind: model.ArtifactConfig, Name: "application.yaml", Content: "debug: false\nauth_enabled: true\ntls_verify: true"}},
+		RollbackPlan: "恢复上一版本配置并重新加载服务",
+		ReleasePlan:  model.ReleasePlan{Strategy: "金丝雀发布", CanaryPercent: 10, ObservationMinutes: 15, SuccessMetrics: []string{"HTTP 5xx", "P99 延迟"}},
+	}, "usr_developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, err = svc.Submit(change.ID, "usr_developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change.Status != model.StatusWaitingApproval {
+		t.Fatalf("deterministic gate should reach approval, got %s", change.Status)
+	}
+	if change.Risk == model.RiskHigh {
+		t.Fatalf("model HIGH must not escalate governance risk, got %s", change.Risk)
+	}
+	if change.Analysis == nil || change.Analysis.AdvisoryRisk != model.RiskHigh || change.Analysis.Risk != model.RiskHigh {
+		t.Fatalf("AI HIGH should be retained only as advisory risk with legacy alias: %+v", change.Analysis)
+	}
+	approved, err := svc.Approve(change.ID, "usr_reviewer", "确定性门禁证据已核对")
+	if err != nil {
+		t.Fatalf("ordinary reviewer should approve based on governance risk, got %v", err)
+	}
+	if approved.Status != model.StatusApproved {
+		t.Fatalf("expected approved, got %s", approved.Status)
+	}
+}
+
 type lowRiskAnalyzer struct{}
 
 func (lowRiskAnalyzer) Analyze(_ context.Context, _ model.ChangeRequest) model.AgentAnalysis {
@@ -556,6 +670,12 @@ func TestAgentCannotDowngradeDeterministicRisk(t *testing.T) {
 	}
 	if change.Risk != model.RiskHigh {
 		t.Fatalf("agent must not downgrade deterministic risk, got %s", change.Risk)
+	}
+	if change.Analysis == nil || change.Analysis.AdvisoryRisk != model.RiskLow || change.Analysis.Risk != model.RiskLow {
+		t.Fatalf("model LOW should remain an advisory value only: %+v", change.Analysis)
+	}
+	if _, err = svc.Approve(change.ID, "usr_reviewer", "尝试由数据库审核人放行"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("model LOW must not lower deterministic HIGH approval requirement, got %v", err)
 	}
 }
 

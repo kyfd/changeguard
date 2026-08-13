@@ -53,6 +53,16 @@ flowchart LR
 
 负责状态迁移、角色/应用授权、禁止自审、检查批次、发现项、审批和审计。所有关键校验必须在服务端执行，并在一次状态变更中保存业务数据和审计证据。
 
+### 4.3.1 统一审计与 Evidence Bundle
+
+`AuditEvent` 使用统一 schema 记录 request、actor/auth、resource/version、request digest、result/reason 以及 related event、attempt、passport 关联。Store 的所有审计追加点经过同一规范化入口，并在持有写锁时按企业链接前序事件；canonical payload 明确排除 `hash` 自身。持久化失败时 Store 从已持久化快照恢复业务状态和审计尾部。旧事件可以没有 hash，但只能位于企业链的历史前缀；新哈希链开始后的空 hash 会被离线校验拒绝。
+
+`internal/evidence` 将一个 change 的制品摘要、规则/check/findings、演练、审批、通行证公开元数据、CI event/outcome 和 audit chain proof 打包为 JSON。目标审计摘要只重复 `id/hash/prev_hash/canonical_digest` 这些可与 proof 逐字段核对的链事实；Action、Result、actor、版本等 canonical 语义既不能在脱敏后由单向 digest 证明，也不应泄漏原文，因此不在审计摘要中重复，相关业务语义由 change/check/passport 等 Manifest section 提供。Manifest 绑定企业、change ID、change digest、生成时间和各 section 的 compact-JSON SHA-256。`cmd/changeguard-evidence export` 使用严格、只读的文件快照加载，不保存或创建源状态；`verify` 不需要服务端、数据库或签名 secret，即可验证 Manifest、change binding 和 audit chain。
+
+证据包按结构排除 artifact/SQL 正文、明文 Token 和 Token hash，自由文本使用统一脱敏器。这里的 SHA-256 链仅提供应用级篡改检测，并非第三方见证或密码学不可抵赖；外部 WORM、透明日志或可信时间戳锚定仍是后续能力。
+
+PostgreSQL 模式已拆出 `changeguard_changes`（每变更一行 JSONB）、`changeguard_outbox`、`changeguard_passports`、`changeguard_audit_events` 和 `changeguard_idempotency_records`。Outbox claim 使用 `FOR UPDATE SKIP LOCKED`，幂等 claim 依赖唯一主键，通行证消费使用条件 UPDATE，审计按组织事务 advisory lock 串行链尾。`dbguard_state` 仍保留完整 legacy JSONB，作为兼容 fallback 与迁移见证；组织、成员、应用、规则、集成事件、结果信号和 Agent 数据等低频实体仍只在 legacy state。普通 Store 保存产生的核心表内容是兼容投影，不应视为全部业务已经规范化或可独立删除 legacy state。
+
 ### 4.4 确定性规则检查器
 
 v1 只处理三类生产制品：
@@ -110,6 +120,9 @@ stateDiagram-v2
 
 核心约束：
 
+- SQL 演练 Outbox 的一次业务尝试由稳定 `attempt_id` 标识；每次领取（包括租约过期接管）递增 `lease_generation`，它同时是 fencing token。续租、失败、完成和最终报告写入都必须匹配 worker、generation 且租约仍有效，旧 worker 即使稍后返回也不能覆盖新 generation 的结果。
+- Outbox 持久化真实 runner 边界 `PREPARE → APPLY → FINALIZE`、阶段开始/更新时间、`input_sha256` 和 `result_digest`。当前 Runner 的 APPLY 是包含执行 SQL 与回滚 SQL 的单体隔离 PostgreSQL 事务，不声称支持语句级或步骤级恢复；进程中断或租约过期后，新 generation 从新的隔离事务重新执行整个 APPLY。
+- `FINALIZE` 在同一存储原子写中校验当前 generation、绑定输入摘要，并写入变更报告和结果摘要。同一 `attempt_id` 与相同结果的重复 finalize 幂等；输入或结果摘要不一致时失败关闭。服务启动只补建缺失的活动 Outbox，并接管已过期 lease；已经持久化 FINALIZE 结果的事件不会重新执行 APPLY。
 - 制品内容、目标环境、应用或规则版本发生变化后，旧审批和旧通行证失效；
 - CHECK_FAILED 不能批准；
 - 提交人不能批准自己的变更；

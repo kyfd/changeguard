@@ -18,6 +18,46 @@ func passportFixture(now time.Time, ruleSetVersion string) (model.ChangeRequest,
 	return change, passport
 }
 
+func TestCreatePassportMaterializesExpiredActiveBeforeReissue(t *testing.T) {
+	data := NewMemory()
+	now := time.Now().UTC()
+	change, expired := passportFixture(now.Add(-20*time.Minute), changegate.RuleSetVersion(data.PoliciesByOrganization("org_demo")))
+	expired.ExpiresAt = now.Add(-time.Minute)
+	expired.ID = "pass_expired_reissue"
+	if err := data.CreateChange(change, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_create_reissue", ChangeID: change.ID, CreatedAt: now.Add(-20 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := data.CreatePassport(expired, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_issue_old", ChangeID: change.ID, CreatedAt: now.Add(-20 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := expired
+	fresh.ID = "pass_fresh_reissue"
+	fresh.IssuedAt = now
+	fresh.ExpiresAt = now.Add(10 * time.Minute)
+	fresh.TokenSHA256 = "fresh-token-hash"
+	if err := data.CreatePassport(fresh, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_issue_fresh", ChangeID: change.ID, CreatedAt: now}); err != nil {
+		t.Fatalf("expired ACTIVE must not block reissue: %v", err)
+	}
+	old, err := data.Passport(expired.ID)
+	if err != nil || old.Status != model.PassportExpired {
+		t.Fatalf("natural expiry was not materialized: passport=%+v err=%v", old, err)
+	}
+	foundExpiryAudit := false
+	for _, event := range data.Audits(0) {
+		if event.Action == "PASSPORT_EXPIRED" && event.PassportID == expired.ID && event.ActorType == "SYSTEM" {
+			foundExpiryAudit = true
+			break
+		}
+	}
+	if !foundExpiryAudit {
+		t.Fatal("reissue must audit materialization of the old natural expiry")
+	}
+	current, err := data.Passport(fresh.ID)
+	if err != nil || current.Status != model.PassportActive {
+		t.Fatalf("fresh passport not active: passport=%+v err=%v", current, err)
+	}
+}
+
 func TestUsePassportConcurrentConsumeCompletesChangeOnce(t *testing.T) {
 	data := NewMemory()
 	now := time.Now().UTC()
