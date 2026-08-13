@@ -16,7 +16,10 @@ var (
 	ErrIdempotencyInProgress = errors.New("相同幂等请求正在处理中")
 )
 
-const PassportAlreadyIssuedCode = "PASSPORT_ALREADY_ISSUED_TOKEN_NOT_REPLAYABLE"
+const (
+	PassportAlreadyIssuedCode = "PASSPORT_ALREADY_ISSUED_TOKEN_NOT_REPLAYABLE"
+	idempotencyRecoveryGrace  = 2 * time.Second
+)
 
 type PassportIssueResult struct {
 	Credential *model.PassportCredential `json:"credential,omitempty"`
@@ -167,6 +170,18 @@ func (s *Service) claimIdempotency(record model.IdempotencyRecord, reconcile fun
 			time.Sleep(10 * time.Millisecond)
 			continue
 		case errors.Is(err, store.ErrIdempotencyPending):
+			// A fresh PENDING record belongs to an in-flight request. Give that
+			// executor time to finish instead of fencing it merely because another
+			// identical request arrived concurrently. Reconciliation is reserved for
+			// stale records whose business side effect may have completed before the
+			// idempotency result was persisted.
+			if time.Since(existing.UpdatedAt) < idempotencyRecoveryGrace {
+				if time.Now().Before(deadline) {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				return model.IdempotencyRecord{}, false, ErrIdempotencyInProgress
+			}
 			if reconcile != nil {
 				result, responseRef, status, recovered, reconcileErr := reconcile(existing)
 				if reconcileErr != nil {

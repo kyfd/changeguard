@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/liufengxi/dbguard/internal/model"
 	"github.com/liufengxi/dbguard/internal/store"
@@ -21,7 +22,7 @@ func TestPendingIdempotencyRecordsReconcileWithoutDuplicateEffects(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	queueRecord := model.IdempotencyRecord{OrganizationID: queued.OrganizationID, ActorID: "usr_developer", Operation: "QUEUE_EXPERIMENT", Resource: queued.ID, Key: "recover-queue-01", RequestDigest: "digest"}
+	queueRecord := model.IdempotencyRecord{OrganizationID: queued.OrganizationID, ActorID: "usr_developer", Operation: "QUEUE_EXPERIMENT", Resource: queued.ID, Key: "recover-queue-01", RequestDigest: "digest", CreatedAt: time.Now().Add(-idempotencyRecoveryGrace - time.Second)}
 	if _, _, err = data.BeginIdempotency(queueRecord); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestPendingIdempotencyRecordsReconcileWithoutDuplicateEffects(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	approveRecord := model.IdempotencyRecord{OrganizationID: approved.OrganizationID, ActorID: "usr_reviewer", Operation: "APPROVE", Resource: approved.ID, Key: "recover-approve", RequestDigest: "digest"}
+	approveRecord := model.IdempotencyRecord{OrganizationID: approved.OrganizationID, ActorID: "usr_reviewer", Operation: "APPROVE", Resource: approved.ID, Key: "recover-approve", RequestDigest: "digest", CreatedAt: time.Now().Add(-idempotencyRecoveryGrace - time.Second)}
 	if _, _, err = data.BeginIdempotency(approveRecord); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func TestPendingPassportRecordReconcilesWithoutTokenReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := model.IdempotencyRecord{OrganizationID: change.OrganizationID, ActorID: "usr_reviewer", Operation: "ISSUE_PASSPORT", Resource: change.ID, Key: "recover-passport", RequestDigest: "digest"}
+	record := model.IdempotencyRecord{OrganizationID: change.OrganizationID, ActorID: "usr_reviewer", Operation: "ISSUE_PASSPORT", Resource: change.ID, Key: "recover-passport", RequestDigest: "digest", CreatedAt: time.Now().Add(-idempotencyRecoveryGrace - time.Second)}
 	if _, _, err = data.BeginIdempotency(record); err != nil {
 		t.Fatal(err)
 	}
