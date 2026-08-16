@@ -2,6 +2,9 @@
 # ChangeGuard 新服务器部署脚本（Ubuntu）
 set -euo pipefail
 
+# 对外主机地址：部署前 export PUBLIC_HOST=<你的服务器IP>，默认仅本机验证
+PUBLIC_HOST="${PUBLIC_HOST:-127.0.0.1}"
+
 echo "==> 1. 安装基础软件"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -28,9 +31,9 @@ ln -sfn "/opt/changeguard/releases/$REL_ID" /opt/changeguard/current
 cd "/opt/changeguard/releases/$REL_ID" && sha256sum -c SHA256SUMS
 
 echo "==> 5. 生成 core.env"
-cat > /etc/changeguard/core.env <<'EOF'
+cat > /etc/changeguard/core.env <<EOF
 DBGUARD_LISTEN_ADDRESS=127.0.0.1:8080
-DBGUARD_PUBLIC_URL=http://47.95.235.213
+DBGUARD_PUBLIC_URL=http://${PUBLIC_HOST}
 DBGUARD_TRUST_PROXY_HEADERS=true
 
 DBGUARD_AUTH_MODE=local
@@ -126,6 +129,6 @@ ln -sf /etc/nginx/sites-available/changeguard /etc/nginx/sites-enabled/changegua
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl enable nginx && systemctl restart nginx
 sleep 2
-curl -sf -H "Host: 47.95.235.213" http://127.0.0.1/ | head -c 120 && echo " nginx-ok"
+curl -sf -H "Host: ${PUBLIC_HOST}" http://127.0.0.1/ | head -c 120 && echo " nginx-ok"
 
 echo "deploy=passed"
