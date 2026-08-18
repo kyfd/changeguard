@@ -234,7 +234,19 @@ print(f"audit_records={expected - 1}")
 PY
 
 python3 -c 'import json,sys; state=json.load(open(sys.argv[1], encoding="utf-8")); assert state["schema"] == "changeguard-agent-metrics/v1" and state["hmac_sha256"]' "$staging/agent/metrics.json"
-copy_required /www/server/panel/vhost/nginx/liufengxi.top.conf "$staging/config/liufengxi.top.conf"
+nginx_conf="${CHANGEGUARD_NGINX_CONF:-}"
+if [ -z "$nginx_conf" ]; then
+  for candidate in \
+    /etc/nginx/sites-available/changeguard.conf \
+    /etc/nginx/conf.d/changeguard.conf; do
+    if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+      nginx_conf="$candidate"
+      break
+    fi
+  done
+fi
+[ -n "$nginx_conf" ] || { printf 'CHANGEGUARD_NGINX_CONF is unset and no default nginx vhost was found\n' >&2; exit 1; }
+copy_required "$nginx_conf" "$staging/config/nginx.conf"
 copy_required /etc/systemd/system/changeguard-agent-gateway.service "$staging/config/changeguard-agent-gateway.service"
 copy_optional /etc/systemd/system/changeguard-agent-monitor.service "$staging/config/changeguard-agent-monitor.service"
 copy_optional /etc/systemd/system/changeguard-agent-monitor.timer "$staging/config/changeguard-agent-monitor.timer"

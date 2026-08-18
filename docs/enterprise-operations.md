@@ -210,7 +210,7 @@ CI secret 应设为 masked/protected，且通行证消费步骤紧邻生产部�
 - OIDC、Redis 和 metrics secret 由部署平台重新注入；
 - CI Gate 对旧令牌继续失败关闭。
 
-file 模式备份必须把 `dbguard.json`、回滚迁移证据侧车和 `.required` 标记作为一个不可拆分的恢复单元。`deploy/production/changeguard-backup.sh` 会对三者执行稳定副本重试，校验侧车自摘要，并确认数据文件 SHA-256 匹配侧车的 current 或 previous 快照；只恢复主 JSON、遗漏侧车的操作应被视为无效备份。脚本优先读取 `/etc/changeguard/core.env`，迁移前可回退到 legacy release 的 `.env`，也可通过 `CHANGEGUARD_CORE_ENV_FILE` 和 `CHANGEGUARD_CORE_DATA_FILE` 显式指定只读来源；备份 metadata 会固定核心数据、环境、witness 和 marker 摘要。
+file 模式备份必须把 `dbguard.json`、回滚迁移证据侧车和 `.required` 标记作为一个不可拆分的恢复单元。`deploy/production/changeguard-backup.sh` 会对三者执行稳定副本重试，校验侧车自摘要，并确认数据文件 SHA-256 匹配侧车的 current 或 previous 快照；只恢复主 JSON、遗漏侧车的操作应被视为无效备份。脚本优先读取 `/etc/changeguard/core.env`，迁移前可回退到 legacy release 的 `.env`，也可通过 `CHANGEGUARD_CORE_ENV_FILE` 和 `CHANGEGUARD_CORE_DATA_FILE` 显式指定只读来源；备份 metadata 会固定核心数据、环境、witness 和 marker 摘要。Nginx 站点配置用 `CHANGEGUARD_NGINX_CONF` 指定，未设置时回退到 `/etc/nginx/sites-available/changeguard.conf` 或 `/etc/nginx/conf.d/changeguard.conf`，快照里统一写成 `config/nginx.conf`。
 
 恢复不得直接覆盖生产目录。`deploy/production/changeguard-restore.sh` 只支持两步：
 

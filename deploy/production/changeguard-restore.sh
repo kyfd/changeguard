@@ -133,7 +133,6 @@ required = (
     "agent/metrics.json",
     "agent/ready.json",
     "agent/slo.json",
-    "config/liufengxi.top.conf",
     "config/changeguard-agent-gateway.service",
     "config/agent-release.txt",
     "config/ui-release.txt",
@@ -143,6 +142,15 @@ for relative in required:
     path = root / relative
     if not path.is_file() or path.is_symlink():
         raise SystemExit(f"required backup member missing: {relative}")
+
+nginx_path = root / "config/nginx.conf"
+legacy_nginx = [
+    path for path in (root / "config").glob("*.conf")
+    if path.is_file() and not path.is_symlink() and path.name != "nginx.conf"
+]
+if not nginx_path.is_file() or nginx_path.is_symlink():
+    if len(legacy_nginx) != 1:
+        raise SystemExit("required backup member missing: config/nginx.conf")
 
 data_path = root / "core/dbguard.json"
 json.loads(data_path.read_text(encoding="utf-8"))
