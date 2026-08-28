@@ -107,13 +107,18 @@ func main() {
 			errorsCount++
 			continue
 		}
-		latencies = append(latencies, item.duration)
 		statuses[item.status]++
+		if item.status < 200 || item.status >= 300 {
+			errorsCount++
+			continue
+		}
+		latencies = append(latencies, item.duration)
 	}
 	elapsed := time.Since(started)
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	fmt.Printf("target=%s concurrency=%d elapsed=%s\n", *target, *concurrency, elapsed.Round(time.Millisecond))
-	fmt.Printf("requests=%d errors=%d qps=%.2f status=%v\n", sent.Load(), errorsCount, float64(sent.Load())/elapsed.Seconds(), statuses)
+	success := len(latencies)
+	fmt.Printf("requests=%d success=%d errors=%d success_qps=%.2f status=%v\n", sent.Load(), success, errorsCount, float64(success)/elapsed.Seconds(), statuses)
 	if len(latencies) > 0 {
 		fmt.Printf("latency min=%s p50=%s p95=%s p99=%s max=%s\n", latencies[0], percentile(latencies, 50), percentile(latencies, 95), percentile(latencies, 99), latencies[len(latencies)-1])
 	}

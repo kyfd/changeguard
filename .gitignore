@@ -13,12 +13,15 @@ coverage.out
 *.exe
 *.EXE
 
-# Local screenshots and UI test captures
+# Images: keep the repository code-only
 screenshots/
 screenshot/
-*screenshot*.png
-*Screenshot*.png
-*截图*.png
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.bmp
 
 # Local agent plans and release source archives
 .zcode/
@@ -32,3 +35,6 @@ source.tar.gz
 
 # Deployment secrets
 deploy/k8s/secret.yaml
+
+# Stray files from CLI flag typos
+--*
