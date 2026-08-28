@@ -18,6 +18,7 @@ import (
 	"github.com/liufengxi/dbguard/internal/conflict"
 	"github.com/liufengxi/dbguard/internal/experiment"
 	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/liufengxi/dbguard/internal/report"
 	"github.com/liufengxi/dbguard/internal/store"
 )
 
@@ -219,6 +220,27 @@ func (s *Service) AuditsForChange(changeID, actorID string) ([]model.AuditEvent,
 		return nil, err
 	}
 	return s.store.AuditsByChange(change.OrganizationID, change.ID), nil
+}
+
+// AuditMonthlyReport 渲染指定自然月的审计月报 HTML。可见范围与 AuditsFor
+// 完全一致（组织隔离 + 应用授权过滤），月度归档给合规部门用。
+func (s *Service) AuditMonthlyReport(actorID string, month time.Time) ([]byte, error) {
+	actor, err := s.activeActor(actorID)
+	if err != nil {
+		return nil, err
+	}
+	events, err := s.AuditsFor(actorID, 0)
+	if err != nil {
+		return nil, err
+	}
+	return report.MonthlyAudit(report.MonthlyAuditInput{
+		OrganizationName: actor.OrganizationName,
+		GeneratedBy:      actor.Name,
+		GeneratedRole:    actor.Role,
+		GeneratedAt:      time.Now().UTC(),
+		Month:            month,
+		Audits:           events,
+	})
 }
 
 func (s *Service) ConflictRadarFor(actorID string, from, to time.Time) (model.ConflictRadar, error) {

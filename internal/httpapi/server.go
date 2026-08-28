@@ -111,6 +111,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/gate/verify", s.handleGateVerify)
 	mux.HandleFunc("/api/gate/consume", s.handleGateConsume)
 	mux.HandleFunc("/api/audits", s.handleAudits)
+	mux.HandleFunc("/api/audits/export", s.handleAuditsExport)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/operations/outbox", s.handleOutbox)
 	mux.HandleFunc("/api/operations/outbox/", s.handleOutboxEvent)
@@ -1384,6 +1385,33 @@ func (s *Server) handleAudits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, audits)
+}
+
+// handleAuditsExport 输出审计月报（打印即 PDF 的自包含 HTML）。
+// GET 请求仅需会话 Cookie，新标签页打开即可通过认证；可见范围与 /api/audits 一致。
+func (s *Server) handleAuditsExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	now := time.Now().UTC()
+	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	if query := strings.TrimSpace(r.URL.Query().Get("month")); query != "" {
+		parsed, err := report.ParseMonth(query)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "month 必须是 YYYY-MM 格式")
+			return
+		}
+		month = parsed
+	}
+	document, err := s.service.AuditMonthlyReport(actorID(r), month)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="changeguard-audit-%s.html"`, month.Format("2006-01")))
+	_, _ = w.Write(document)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
