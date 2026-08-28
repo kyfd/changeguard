@@ -88,6 +88,20 @@ func (s *Store) PassportsByChange(organizationID, changeID string) []model.Passp
 	return items
 }
 
+func (s *Store) PassportsByOrganization(organizationID string) []model.Passport {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]model.Passport, 0)
+	for _, item := range s.data.Passports {
+		if item.OrganizationID != organizationID {
+			continue
+		}
+		items = append(items, publicPassport(item, false))
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].IssuedAt.After(items[j].IssuedAt) })
+	return items
+}
+
 // UsePassport validates state and token binding while holding the store lock.
 // consume=true performs the one-time state transition atomically, preventing
 // concurrent CI jobs from replaying the same authorization.

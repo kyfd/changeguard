@@ -194,3 +194,39 @@ func TestUsePassportPersistsExpiryAndAudit(t *testing.T) {
 		t.Fatal("passport expiry audit was not persisted")
 	}
 }
+
+func TestPassportsByOrganizationScopesAndOmitsTokenHash(t *testing.T) {
+	data := NewMemory()
+	now := time.Now().UTC()
+	ownChange, own := passportFixture(now, changegate.RuleSetVersion(data.PoliciesByOrganization("org_demo")))
+	own.ID = "pass_org_own"
+	own.TokenSHA256 = "own-token-hash"
+	if err := data.CreateChange(ownChange, model.AuditEvent{OrganizationID: ownChange.OrganizationID, ID: "audit_create_own", ChangeID: ownChange.ID, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := data.CreatePassport(own, model.AuditEvent{OrganizationID: own.OrganizationID, ID: "audit_issue_own", ChangeID: own.ChangeID, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	foreignChange := ownChange
+	foreignChange.ID = "chg_foreign"
+	foreignChange.OrganizationID = "org_isolated"
+	foreign := own
+	foreign.ID = "pass_org_foreign"
+	foreign.OrganizationID = "org_isolated"
+	foreign.ChangeID = foreignChange.ID
+	foreign.TokenSHA256 = "foreign-token-hash"
+	if err := data.CreateChange(foreignChange, model.AuditEvent{OrganizationID: foreignChange.OrganizationID, ID: "audit_create_foreign", ChangeID: foreignChange.ID, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := data.CreatePassport(foreign, model.AuditEvent{OrganizationID: foreign.OrganizationID, ID: "audit_issue_foreign", ChangeID: foreign.ChangeID, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := data.PassportsByOrganization("org_demo")
+	if len(got) != 1 || got[0].ID != own.ID || got[0].TokenSHA256 != "" {
+		t.Fatalf("organization list leaked foreign passport or token hash: %+v", got)
+	}
+	if empty := data.PassportsByOrganization("org_missing"); len(empty) != 0 {
+		t.Fatalf("unknown organization must return empty, got %+v", empty)
+	}
+}

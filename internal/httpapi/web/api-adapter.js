@@ -197,7 +197,7 @@
     integrationStatus: () => softRequest("/api/integrations/status", {}),
     integrationEvents: limit => softRequest(`/api/integrations/events?limit=${encodeURIComponent(limit || 100)}`, []),
     async passports(changes) {
-      const globalResult = await optionalRequest(["/api/gate/passports", "/api/passports", "/api/ci/passports"]);
+      const globalResult = await optionalRequest(["/api/passports", "/api/gate/passports", "/api/ci/passports"]);
       if (globalResult.supported) return normalizePassportBundle(globalResult, changes);
       const rows = await Promise.all(changes.map(async change => {
         const result = await optionalRequest([`/api/changes/${encodeURIComponent(change.id)}/passports`]);

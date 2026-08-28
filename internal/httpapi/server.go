@@ -106,6 +106,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/policies/", s.handlePolicy)
 	mux.HandleFunc("/api/changes", s.handleChanges)
 	mux.HandleFunc("/api/changes/", s.handleChange)
+	mux.HandleFunc("/api/passports", s.handlePassports)
 	mux.HandleFunc("/api/conflicts", s.handleConflicts)
 	mux.HandleFunc("/api/gate/verify", s.handleGateVerify)
 	mux.HandleFunc("/api/gate/consume", s.handleGateConsume)
@@ -1193,6 +1194,19 @@ func (s *Server) handleChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, change)
+}
+
+func (s *Server) handlePassports(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	items, err := s.service.PassportsFor(actorID(r))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) handleChangePassports(w http.ResponseWriter, r *http.Request, changeID string, parts []string) {

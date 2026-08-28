@@ -139,7 +139,8 @@ go run ./cmd/changeguard-evidence verify -in evidence.json
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/changes/{id}/passports` | 查询通行证元数据，不返回明文 Token |
+| GET | `/api/passports` | 查询当前身份可见的通行证元数据，不返回明文 Token |
+| GET | `/api/changes/{id}/passports` | 查询单张变更的通行证元数据，不返回明文 Token |
 | POST | `/api/changes/{id}/passports` | 由实际审批人签发短时一次性通行证 |
 | POST | `/api/changes/{id}/passports/{passportId}/revoke` | 撤销尚未消费的通行证 |
 

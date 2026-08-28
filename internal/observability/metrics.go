@@ -153,7 +153,7 @@ func normalizedRoute(path string) string {
 		"health": true, "auth": true, "users": true, "apps": true, "dashboard": true,
 		"changes": true, "policies": true, "audits": true, "events": true,
 		"config": true, "enterprise": true, "operations": true, "outbox": true,
-		"conflicts": true, "gate": true, "integrations": true,
+		"conflicts": true, "gate": true, "integrations": true, "passports": true,
 	}
 	if !known[parts[1]] {
 		return "/api/{unknown}"

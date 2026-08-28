@@ -42,6 +42,30 @@ func (s *Service) PassportsForChange(changeID, actorID string) ([]model.Passport
 	return s.store.PassportsByChange(change.OrganizationID, change.ID), nil
 }
 
+func (s *Service) PassportsFor(actorID string) ([]model.Passport, error) {
+	actor, err := s.activeActor(actorID)
+	if err != nil {
+		return nil, err
+	}
+	passports := s.store.PassportsByOrganization(actor.OrganizationID)
+	if actor.EnterpriseAdmin || actor.Role == model.RoleOwner || !s.store.HasApplicationGrants(actor.OrganizationID) {
+		return passports, nil
+	}
+	allowedChanges := make(map[string]bool)
+	for _, change := range s.store.ChangesByOrganization(actor.OrganizationID) {
+		if s.canUseApplication(actor, change.ApplicationID, "view") {
+			allowedChanges[change.ID] = true
+		}
+	}
+	visible := make([]model.Passport, 0, len(passports))
+	for _, passport := range passports {
+		if allowedChanges[passport.ChangeID] {
+			visible = append(visible, passport)
+		}
+	}
+	return visible, nil
+}
+
 func (s *Service) IssuePassport(changeID, actorID string, ttlSeconds int) (model.PassportCredential, error) {
 	if s.passportSigner == nil {
 		return model.PassportCredential{}, ErrPassportUnavailable
