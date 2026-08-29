@@ -147,13 +147,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS changeguard_passports_one_active_idx
 const postgresNormalizedBackfill = `
 INSERT INTO changeguard_changes(id, organization_id, version, payload)
 SELECT item->>'id', item->>'organization_id', COALESCE(NULLIF(item->>'version','')::bigint, 0), item
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'changes','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'changes')='array' THEN s.payload->'changes' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO changeguard_outbox(id, organization_id, aggregate_id, event_type, status, next_attempt_at, locked_until, lease_generation, updated_at, payload)
 SELECT item->>'id', item->>'organization_id', item->>'aggregate_id', item->>'event_type', item->>'status',
        COALESCE(NULLIF(item->>'next_attempt_at','')::timestamptz, now()), NULLIF(item->>'locked_until','')::timestamptz,
        COALESCE(NULLIF(item->>'lease_generation','')::bigint,0), COALESCE(NULLIF(item->>'updated_at','')::timestamptz,now()), item
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'outbox','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'outbox')='array' THEN s.payload->'outbox' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO changeguard_passports(id, organization_id, change_id, token_sha256, status, expires_at, issued_at, payload)
 SELECT item->>'id', item->>'organization_id', item->>'change_id', item->>'token_sha256',
@@ -161,16 +161,16 @@ SELECT item->>'id', item->>'organization_id', item->>'change_id', item->>'token_
        (item->>'expires_at')::timestamptz, (item->>'issued_at')::timestamptz,
        CASE WHEN item->>'status' = 'ACTIVE' AND (item->>'expires_at')::timestamptz <= now()
             THEN jsonb_set(item, '{status}', '"EXPIRED"'::jsonb, true) ELSE item END
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'passports','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'passports')='array' THEN s.payload->'passports' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO changeguard_audit_events(organization_id,id,created_at,hash,prev_hash,payload)
 SELECT item->>'organization_id', item->>'id', (item->>'created_at')::timestamptz, COALESCE(item->>'hash',''), COALESCE(item->>'prev_hash',''), item
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'audits','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'audits')='array' THEN s.payload->'audits' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (organization_id,id) DO NOTHING;
 INSERT INTO changeguard_idempotency_records(organization_id,actor_id,operation,resource,idempotency_key,request_digest,status,updated_at,payload)
 SELECT item->>'organization_id', item->>'actor_id', item->>'operation', item->>'resource', item->>'key', item->>'request_digest', item->>'status',
        COALESCE(NULLIF(item->>'updated_at','')::timestamptz,now()), item
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'idempotency_records','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'idempotency_records')='array' THEN s.payload->'idempotency_records' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (organization_id,actor_id,operation,resource,idempotency_key) DO NOTHING;
 INSERT INTO changeguard_normalization_migrations(name) VALUES ('core-v1') ON CONFLICT (name) DO NOTHING;
 `
