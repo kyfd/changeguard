@@ -7,7 +7,7 @@ version="${CHANGEGUARD_VERSION:?CHANGEGUARD_VERSION is required}"
 commit="${CHANGEGUARD_COMMIT:?CHANGEGUARD_COMMIT is required}"
 built_at="${CHANGEGUARD_BUILT_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 output="${CHANGEGUARD_OUTPUT:-$repository/dist/dbguard}"
-source_sha256="$($script_directory/source-tree-sha256.sh "$repository")"
+source_sha256="$(bash "$script_directory/source-tree-sha256.sh" "$repository")"
 
 [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$ ]] || { printf 'invalid CHANGEGUARD_VERSION\n' >&2; exit 1; }
 [[ "$commit" =~ ^[0-9a-f]{7,64}$ ]] || { printf 'invalid CHANGEGUARD_COMMIT\n' >&2; exit 1; }
