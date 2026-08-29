@@ -3,13 +3,13 @@ package model
 import "time"
 
 type CheckRun struct {
-	ID              string    `json:"id"`
-	ArtifactSHA256  string    `json:"artifact_sha256"`
-	RuleSetVersion  string    `json:"rule_set_version"`
-	Status          string    `json:"status"`
-	Findings        int       `json:"findings"`
-	Blocking        int       `json:"blocking"`
-	CheckedAt       time.Time `json:"checked_at"`
+	ID             string    `json:"id"`
+	ArtifactSHA256 string    `json:"artifact_sha256"`
+	RuleSetVersion string    `json:"rule_set_version"`
+	Status         string    `json:"status"`
+	Findings       int       `json:"findings"`
+	Blocking       int       `json:"blocking"`
+	CheckedAt      time.Time `json:"checked_at"`
 }
 
 type PassportStatus string

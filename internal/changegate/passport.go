@@ -21,16 +21,16 @@ var (
 )
 
 type PassportClaims struct {
-	Version         int    `json:"v"`
-	PassportID      string `json:"jti"`
-	OrganizationID  string `json:"org"`
-	ChangeID        string `json:"change"`
-	ArtifactSHA256  string `json:"sha256"`
-	Environment     string `json:"env"`
-	RuleSetVersion  string `json:"rules"`
-	ApproverID      string `json:"approver"`
-	IssuedAtUnix    int64  `json:"iat"`
-	ExpiresAtUnix   int64  `json:"exp"`
+	Version        int    `json:"v"`
+	PassportID     string `json:"jti"`
+	OrganizationID string `json:"org"`
+	ChangeID       string `json:"change"`
+	ArtifactSHA256 string `json:"sha256"`
+	Environment    string `json:"env"`
+	RuleSetVersion string `json:"rules"`
+	ApproverID     string `json:"approver"`
+	IssuedAtUnix   int64  `json:"iat"`
+	ExpiresAtUnix  int64  `json:"exp"`
 }
 
 type Signer struct {
