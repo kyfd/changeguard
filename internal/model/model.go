@@ -517,6 +517,9 @@ type GovernanceOutcomeSummary struct {
 	WindowDays           int                          `json:"window_days"`
 	WindowStartedAt      time.Time                    `json:"window_started_at"`
 	GeneratedAt          time.Time                    `json:"generated_at"`
+	DefinitionVersion    string                       `json:"definition_version"`
+	SourceWatermark      time.Time                    `json:"source_watermark"`
+	PilotCohort          string                       `json:"pilot_cohort,omitempty"`
 	Scope                string                       `json:"scope"`
 	TotalChanges         int                          `json:"total_changes"`
 	ProductionChanges    int                          `json:"production_changes"`

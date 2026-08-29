@@ -12,6 +12,9 @@ dist/
 coverage.out
 *.exe
 *.EXE
+node_modules/
+test-results/
+playwright-report/
 
 # Images: keep the repository code-only
 screenshots/

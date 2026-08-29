@@ -48,10 +48,12 @@ jobs:
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Verify frontend JavaScript syntax
+      - name: Verify formatting and frontend JavaScript syntax
         run: |
-          node --check internal/httpapi/web/api-adapter.js
-          node --check internal/httpapi/web/app.js
+          test -z "$(gofmt -l .)"
+          for file in internal/httpapi/web/*.js internal/httpapi/web/*.mjs; do
+            node --check "$file"
+          done
 
       - name: Run Go tests and vet
         run: |
@@ -63,10 +65,12 @@ jobs:
 
       - name: Generate verification evidence
         id: evidence
+        env:
+          VERIFICATION_PATH: ${{ runner.temp }}/verification.json
         run: |
-          python3 - "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.tag }}" <<'PY'
-          import json, os, subprocess, sys
-          version, tag = sys.argv[1], sys.argv[2]
+          python3 - "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.tag }}" "$VERIFICATION_PATH" <<'PY'
+          import json, subprocess, sys
+          version, tag, output = sys.argv[1], sys.argv[2], sys.argv[3]
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
           source = subprocess.check_output(["bash", "deploy/production/source-tree-sha256.sh", "."], text=True).strip()
           evidence = {
@@ -84,10 +88,10 @@ jobs:
                   {"command": "go test ./... -count=1", "status": "passed"},
                   {"command": "go vet ./...", "status": "passed"},
                   {"command": "go test -race ./... -count=1", "status": "passed"},
-                  {"command": "node --check internal/httpapi/web/app.js", "status": "passed"},
+                  {"command": "node --check internal/httpapi/web/*.js internal/httpapi/web/*.mjs", "status": "passed"},
               ],
           }
-          with open("verification.json", "w", encoding="utf-8") as handle:
+          with open(output, "w", encoding="utf-8") as handle:
               json.dump(evidence, handle, ensure_ascii=False, indent=2)
               handle.write("\n")
           print(f"verification written for {commit} sha {source[:16]}")
@@ -99,11 +103,12 @@ jobs:
           CHANGEGUARD_VERSION="${{ steps.version.outputs.version }}" \
           CHANGEGUARD_RELEASE_TAG="${{ steps.version.outputs.tag }}" \
           CHANGEGUARD_RELEASE_DIRECTORY="${{ runner.temp }}/release" \
-          CHANGEGUARD_VERIFICATION_EVIDENCE="${{ github.workspace }}/verification.json" \
+          CHANGEGUARD_VERIFICATION_EVIDENCE="${{ runner.temp }}/verification.json" \
           CHANGEGUARD_GOMODCACHE="$(go env GOMODCACHE)" \
           bash deploy/production/build-core-git-release.sh
 
       - name: Package upgrade archive
+        id: archive
         run: |
           RELEASE_ID="${{ steps.version.outputs.release_id }}"
           RELEASE_DIR="${{ runner.temp }}/release"

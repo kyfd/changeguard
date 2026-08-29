@@ -123,6 +123,8 @@ func (s *Store) CompleteIdempotency(record model.IdempotencyRecord, result any, 
 		item.ResponseRef = responseRef
 		item.UpdatedAt = now
 		item.CompletedAt = &now
+		expiresAt := now.Add(72 * time.Hour)
+		item.ExpiresAt = &expiresAt
 		if err := s.saveLocked(); err != nil {
 			s.data.IdempotencyRecords = previousRecords
 			return model.IdempotencyRecord{}, err
@@ -203,6 +205,31 @@ func (s *Store) TakeoverIdempotency(observed model.IdempotencyRecord) (model.Ide
 		return *item, nil
 	}
 	return model.IdempotencyRecord{}, ErrNotFound
+}
+
+func (s *Store) CleanupExpiredIdempotency(organizationID string, at time.Time, limit int) (int, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	kept := make([]model.IdempotencyRecord, 0, len(s.data.IdempotencyRecords))
+	for _, item := range s.data.IdempotencyRecords {
+		if removed < limit && item.OrganizationID == organizationID && item.Status == IdempotencySucceeded && item.ExpiresAt != nil && !at.Before(*item.ExpiresAt) {
+			removed++
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	s.data.IdempotencyRecords = kept
+	if err := s.saveLocked(); err != nil {
+		return 0, err
+	}
+	return removed, nil
 }
 
 func assignIdempotencyClaim(record *model.IdempotencyRecord) error {

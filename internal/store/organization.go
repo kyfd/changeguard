@@ -98,7 +98,12 @@ func (s *Store) ChangesByOrganization(organizationID string) []model.ChangeReque
 			items = append(items, item)
 		}
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID > items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
 	return items
 }
 
@@ -577,13 +582,8 @@ func (s *Store) HasApplicationGrants(organizationID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, organization := range s.data.Organizations {
-		if organization.ID == organizationID && organization.ApplicationAccessControlled {
-			return true
-		}
-	}
-	for _, grant := range s.data.ApplicationGrants {
-		if grant.OrganizationID == organizationID {
-			return true
+		if organization.ID == organizationID {
+			return organization.ApplicationAccessControlled
 		}
 	}
 	return false

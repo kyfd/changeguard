@@ -159,6 +159,27 @@ func normalizeState(data *state) {
 			return
 		}
 	}
+	for index := range data.Organizations {
+		organization := &data.Organizations[index]
+		if organization.Retention.AuditDays <= 0 {
+			organization.Retention.AuditDays = 365
+		}
+		if organization.Retention.IntegrationEventDays <= 0 {
+			organization.Retention.IntegrationEventDays = 180
+		}
+		if organization.Retention.OutcomeSignalDays <= 0 {
+			organization.Retention.OutcomeSignalDays = 180
+		}
+		if organization.Retention.IdempotencyHours <= 0 {
+			organization.Retention.IdempotencyHours = 72
+		}
+		if organization.Retention.AgentConversationDays <= 0 {
+			organization.Retention.AgentConversationDays = 90
+		}
+		if organization.Retention.ArtifactBodyDays <= 0 {
+			organization.Retention.ArtifactBodyDays = 30
+		}
+	}
 	defaultOrganization := data.Organizations[0]
 	for index := range data.Applications {
 		application := &data.Applications[index]

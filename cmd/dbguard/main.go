@@ -79,7 +79,7 @@ func main() {
 		logger.Fatalf("invalid HTTP listener configuration: %v", err)
 	}
 	server := &http.Server{
-		Addr: address, Handler: httpapi.New(app, authManager, logger, analyzer),
+		Addr: address, Handler: httpapi.New(app, authManager, logger, analyzer, data),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 		WriteTimeout:   60 * time.Second, IdleTimeout: 90 * time.Second,

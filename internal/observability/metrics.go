@@ -23,11 +23,24 @@ type metricKey struct {
 type requestMetric struct {
 	Count    uint64
 	Duration time.Duration
+	Buckets  [8]uint64
+}
+
+var requestDurationBuckets = [...]time.Duration{
+	10 * time.Millisecond,
+	25 * time.Millisecond,
+	50 * time.Millisecond,
+	100 * time.Millisecond,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	1 * time.Second,
+	5 * time.Second,
 }
 
 type Metrics struct {
-	mu       sync.RWMutex
-	requests map[metricKey]requestMetric
+	mu        sync.RWMutex
+	requests  map[metricKey]requestMetric
+	readiness float64
 }
 
 func New() *Metrics { return &Metrics{requests: make(map[metricKey]requestMetric)} }
@@ -78,7 +91,13 @@ func (m *Metrics) Middleware(next http.Handler, logger *log.Logger) http.Handler
 		value := m.requests[key]
 		value.Count++
 		value.Duration += duration
+		for index, upperBound := range requestDurationBuckets {
+			if duration <= upperBound {
+				value.Buckets[index]++
+			}
+		}
 		m.requests[key] = value
+
 		m.mu.Unlock()
 		entry, _ := json.Marshal(map[string]any{"kind": "http_access", "request_id": requestID, "method": r.Method, "path": r.URL.Path, "route": route, "status": recorder.status, "duration_ms": float64(duration.Microseconds()) / 1000, "remote": r.RemoteAddr})
 		logger.Print(string(entry))
@@ -103,14 +122,37 @@ func (m *Metrics) Handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = fmt.Fprintln(w, "# HELP dbguard_http_requests_total Total HTTP requests.")
 	_, _ = fmt.Fprintln(w, "# TYPE dbguard_http_requests_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP dbguard_http_request_duration_seconds HTTP request duration histogram.")
+	_, _ = fmt.Fprintln(w, "# TYPE dbguard_http_request_duration_seconds histogram")
 	for _, key := range keys {
 		value := m.requests[key]
 		labels := fmt.Sprintf("method=%q,route=%q,status=%q", key.Method, key.Route, strconv.Itoa(key.Status))
 		_, _ = fmt.Fprintf(w, "dbguard_http_requests_total{%s} %d\n", labels, value.Count)
+		for index, upperBound := range requestDurationBuckets {
+			_, _ = fmt.Fprintf(w, "dbguard_http_request_duration_seconds_bucket{%s,le=%q} %d\n", labels, prometheusDuration(upperBound), value.Buckets[index])
+		}
+		_, _ = fmt.Fprintf(w, "dbguard_http_request_duration_seconds_bucket{%s,le=%q} %d\n", labels, "+Inf", value.Count)
 		_, _ = fmt.Fprintf(w, "dbguard_http_request_duration_seconds_sum{%s} %.6f\n", labels, value.Duration.Seconds())
 		_, _ = fmt.Fprintf(w, "dbguard_http_request_duration_seconds_count{%s} %d\n", labels, value.Count)
 	}
+	_, _ = fmt.Fprintln(w, "# HELP dbguard_readiness Whether the most recent readiness check succeeded.")
+	_, _ = fmt.Fprintln(w, "# TYPE dbguard_readiness gauge")
+	_, _ = fmt.Fprintf(w, "dbguard_readiness %.0f\n", m.readiness)
 	m.mu.RUnlock()
+}
+
+func (m *Metrics) SetReadiness(ready bool) {
+	m.mu.Lock()
+	if ready {
+		m.readiness = 1
+	} else {
+		m.readiness = 0
+	}
+	m.mu.Unlock()
+}
+
+func prometheusDuration(value time.Duration) string {
+	return strconv.FormatFloat(value.Seconds(), 'f', -1, 64)
 }
 
 func normalizedRoute(path string) string {

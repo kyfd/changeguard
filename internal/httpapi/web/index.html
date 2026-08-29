@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="/styles.css?v=20260812-clawbot">
 </head>
 <body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
 <div class="auth-gate" id="authGate" hidden></div>
   <div class="app-shell">
     <aside class="sidebar" id="sidebar">
@@ -69,7 +70,7 @@
           </button>
         </div>
       </header>
-      <main class="main-content" id="mainContent">
+      <main class="main-content" id="mainContent" tabindex="-1">
         <div class="page-loading">
           <div class="skeleton skeleton-title"></div>
           <div class="skeleton-grid"><i></i><i></i><i></i><i></i></div>
@@ -131,7 +132,7 @@
   <div class="modal-layer" id="reviewModal" aria-hidden="true">
     <div class="modal-backdrop" data-close-review></div>
     <section class="modal modal-small" role="dialog" aria-modal="true">
-      <header class="modal-header"><div><span class="eyebrow" id="reviewEyebrow">人工审批</span><h2 id="reviewTitle">审批变更</h2><p id="reviewDescription">请核对规则、演练和分析证据。</p></div><button class="icon-button" data-close-review>×</button></header>
+      <header class="modal-header"><div><span class="eyebrow" id="reviewEyebrow">人工审批</span><h2 id="reviewTitle">审批变更</h2><p id="reviewDescription">请核对规则、演练和分析证据。</p></div><button class="icon-button" data-close-review aria-label="关闭审批对话框">×</button></header>
       <form id="reviewForm"><div class="modal-body"><label class="field"><span>审批意见</span><textarea name="comment" rows="5" placeholder="填写审批依据、执行要求或驳回原因"></textarea></label></div><footer class="modal-footer"><span>审批人与提交人必须分离</span><div><button type="button" class="button button-secondary" data-close-review>取消</button><button class="button button-primary" id="reviewSubmitButton">确认</button></div></footer></form>
     </section>
   </div>
@@ -287,7 +288,15 @@
       </form>
     </section>
   </div>
+  <div class="modal-layer" id="passportTokenModal" aria-hidden="true">
+    <div class="modal-backdrop" data-close-passport-token></div>
+    <section class="modal modal-small" role="dialog" aria-modal="true" aria-labelledby="passportTokenTitle">
+      <header class="modal-header"><div><span class="eyebrow">变更通行证</span><h2 id="passportTokenTitle">立即保存通行证 token</h2><p>这是 bearer 凭据，完整值仅展示这一次。</p></div><button class="icon-button" type="button" data-close-passport-token aria-label="关闭通行证 token 对话框">×</button></header>
+      <div class="modal-body"><div class="approval-notice">关闭或刷新后无法再次查看。请立即复制到受保护的 CI/CD secret，勿写入日志或聊天记录。</div><label class="field" style="margin-top:14px"><span>一次性 token</span><textarea id="passportTokenValue" rows="6" readonly spellcheck="false"></textarea></label></div>
+      <footer class="modal-footer"><span>服务器仅持久化 token 哈希</span><div><button type="button" class="button button-secondary" data-close-passport-token>我已安全保存</button><button type="button" class="button button-primary" data-copy-passport-token>复制 token</button></div></footer>
+    </section>
+  </div>
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
-  <script src="/app.js?v=20260812-clawbot" defer></script>
+  <script type="module" src="/ui-utils.mjs?v=20260829-accessibility"></script>
 </body>
 </html>

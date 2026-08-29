@@ -1,0 +1,6 @@
+service: order-service
+runtime:
+  log_level: INFO
+  request_timeout_ms: 1500
+features:
+  config_sql_golden_path: true

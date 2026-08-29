@@ -1892,7 +1892,8 @@ func governanceOutcomesForEvidence(changes []model.ChangeRequest, integrationEve
 	now = now.UTC()
 	windowStart := now.Add(-time.Duration(windowDays) * 24 * time.Hour)
 	result := model.GovernanceOutcomeSummary{
-		WindowDays: windowDays, WindowStartedAt: windowStart, GeneratedAt: now, Scope: scope,
+		WindowDays: windowDays, WindowStartedAt: windowStart, GeneratedAt: now,
+		DefinitionVersion: "governance-outcomes-v3", SourceWatermark: now, Scope: scope,
 	}
 	eligibleChanges := make(map[string]bool)
 	var checkRuns, artifactEvidence, rollbackPlans, successMetrics int

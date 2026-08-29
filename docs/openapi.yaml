@@ -1,0 +1,498 @@
+openapi: 3.1.0
+info:
+  title: ChangeGuard Core API
+  version: 3.0.0
+  description: |
+    Contract for the authentication, change-governance, passport, deployment-gate,
+    integration webhook, event-stream, and export endpoints implemented by the core service.
+    JSON request bodies reject unknown fields and are limited to 2 MiB unless an operation
+    documents a different media type. Cookie-authenticated state changes require X-CSRF-Token.
+servers:
+  - url: /
+tags:
+  - name: Authentication
+  - name: Changes
+  - name: Passports
+  - name: Gate
+  - name: Integrations
+  - name: Events
+  - name: Exports
+paths:
+  /api/auth/status:
+    get:
+      tags: [Authentication]
+      operationId: getAuthStatus
+      security: []
+      responses:
+        '200': {description: Authentication configuration, content: {application/json: {schema: {$ref: '#/components/schemas/JSONObject'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /api/auth/me:
+    get:
+      tags: [Authentication]
+      operationId: getCurrentUser
+      responses:
+        '200': {description: Current user, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /api/auth/session:
+    get:
+      tags: [Authentication]
+      operationId: getSession
+      responses:
+        '200': {description: Session, content: {application/json: {schema: {$ref: '#/components/schemas/AuthSession'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /api/auth/register:
+    post:
+      tags: [Authentication]
+      operationId: registerEnterprise
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RegisterEnterpriseInput'}}}}
+      responses:
+        '201': {description: Enterprise and authenticated session created, content: {application/json: {schema: {$ref: '#/components/schemas/AuthSession'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: localLogin
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginInput'}}}}
+      responses:
+        '200': {description: Authenticated session, content: {application/json: {schema: {$ref: '#/components/schemas/AuthSession'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/auth/invitations/accept:
+    post:
+      tags: [Authentication]
+      operationId: acceptInvitation
+      security: []
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AcceptInviteInput'}}}}
+      responses:
+        '201': {description: Invitation accepted and session created, content: {application/json: {schema: {$ref: '#/components/schemas/AuthSession'}}}}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        default: {$ref: '#/components/responses/Error'}
+  /auth/login:
+    get:
+      tags: [Authentication]
+      operationId: beginOIDCLogin
+      security: []
+      parameters:
+        - {name: next, in: query, schema: {type: string}, description: Safe local path used after login}
+      responses:
+        '302': {description: Redirect to the configured identity provider or application root}
+        default: {$ref: '#/components/responses/Error'}
+  /auth/callback:
+    get:
+      tags: [Authentication]
+      operationId: completeOIDCLogin
+      security: []
+      parameters:
+        - {name: code, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string}}
+        - {name: error, in: query, schema: {type: string}}
+      responses:
+        '302': {description: Redirect after completing or rejecting the OIDC flow}
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: logout
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: false
+        content:
+          application/x-www-form-urlencoded:
+            schema: {type: object, properties: {csrf_token: {type: string}}}
+          application/json:
+            schema: {type: object, additionalProperties: false}
+      responses:
+        '200': {description: Session cleared when OIDC end-session redirect is not used}
+        '302': {description: Redirect to the identity provider end-session endpoint}
+        default: {$ref: '#/components/responses/Error'}
+  /api/changes:
+    get:
+      tags: [Changes]
+      operationId: listChanges
+      responses:
+        '200': {description: Changes visible to the actor, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/ChangeRequest'}}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Changes]
+      operationId: createChange
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateChangeInput'}}}}
+      responses:
+        '201': {$ref: '#/components/responses/Change'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/changes/{change_id}:
+    parameters: [{$ref: '#/components/parameters/ChangeID'}]
+    get:
+      tags: [Changes]
+      operationId: getChange
+      responses:
+        '200': {$ref: '#/components/responses/Change'}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Changes]
+      operationId: updateChange
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateChangeInput'}}}}
+      responses:
+        '200': {$ref: '#/components/responses/Change'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/changes/{change_id}/submit:
+    post:
+      tags: [Changes]
+      operationId: submitChange
+      parameters: [{$ref: '#/components/parameters/ChangeID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {$ref: '#/components/requestBodies/EmptyJSON'}
+      responses: {'200': {$ref: '#/components/responses/Change'}, default: {$ref: '#/components/responses/Error'}}
+  /api/changes/{change_id}/experiment:
+    post:
+      tags: [Changes]
+      operationId: queueExperiment
+      parameters: [{$ref: '#/components/parameters/ChangeID'}, {$ref: '#/components/parameters/CSRFToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/EmptyJSON'}
+      responses:
+        '200': {$ref: '#/components/responses/IdempotentChange'}
+        '409': {$ref: '#/components/responses/IdempotencyConflict'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/changes/{change_id}/approve:
+    post:
+      tags: [Changes]
+      operationId: approveChange
+      parameters: [{$ref: '#/components/parameters/ChangeID'}, {$ref: '#/components/parameters/CSRFToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CommentInput'}}}}
+      responses:
+        '200': {$ref: '#/components/responses/IdempotentChange'}
+        '409': {$ref: '#/components/responses/IdempotencyConflict'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/changes/{change_id}/reject:
+    post:
+      tags: [Changes]
+      operationId: rejectChange
+      parameters: [{$ref: '#/components/parameters/ChangeID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CommentInput'}}}}
+      responses: {'200': {$ref: '#/components/responses/Change'}, default: {$ref: '#/components/responses/Error'}}
+  /api/changes/{change_id}/comments:
+    post:
+      tags: [Changes]
+      operationId: addChangeComment
+      parameters: [{$ref: '#/components/parameters/ChangeID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [Content], properties: {Content: {type: string}}}}}}
+      responses: {'200': {$ref: '#/components/responses/Change'}, default: {$ref: '#/components/responses/Error'}}
+  /api/changes/{change_id}/findings/{finding_id}/{action}:
+    post:
+      tags: [Changes]
+      operationId: actOnFinding
+      description: The implemented actions are assign, resolve, and verify; each has its corresponding JSON input.
+      parameters:
+        - {$ref: '#/components/parameters/ChangeID'}
+        - {name: finding_id, in: path, required: true, schema: {type: string}}
+        - {name: action, in: path, required: true, schema: {type: string, enum: [assign, resolve, verify]}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - {$ref: '#/components/schemas/AssignFindingInput'}
+                - {$ref: '#/components/schemas/ResolveFindingInput'}
+                - {$ref: '#/components/schemas/VerifyFindingInput'}
+      responses: {'200': {$ref: '#/components/responses/Change'}, default: {$ref: '#/components/responses/Error'}}
+  /api/changes/{change_id}/agent-ask:
+    post:
+      tags: [Changes]
+      operationId: askChangeAssistant
+      parameters: [{$ref: '#/components/parameters/ChangeID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false, required: [question], properties: {question: {type: string}}}}}}
+      responses: {'200': {description: Assistant message, content: {application/json: {schema: {$ref: '#/components/schemas/JSONObject'}}}}, default: {$ref: '#/components/responses/Error'}}
+  /api/changes/{change_id}/agent-conversations:
+    get:
+      tags: [Changes]
+      operationId: listChangeAgentConversations
+      parameters: [{$ref: '#/components/parameters/ChangeID'}]
+      responses: {'200': {description: Conversation summaries, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/JSONObject'}}}}}, default: {$ref: '#/components/responses/Error'}}
+  /api/changes/{change_id}/agent-conversations/{conversation_id}:
+    get:
+      tags: [Changes]
+      operationId: getChangeAgentConversation
+      parameters:
+        - {$ref: '#/components/parameters/ChangeID'}
+        - {name: conversation_id, in: path, required: true, schema: {type: string}}
+      responses: {'200': {description: Conversation, content: {application/json: {schema: {$ref: '#/components/schemas/JSONObject'}}}}, default: {$ref: '#/components/responses/Error'}}
+  /api/passports:
+    get:
+      tags: [Passports]
+      operationId: listPassports
+      responses:
+        '200': {description: Non-secret passport records visible to the actor, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Passport'}}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /api/changes/{change_id}/passports:
+    parameters: [{$ref: '#/components/parameters/ChangeID'}]
+    get:
+      tags: [Passports]
+      operationId: listChangePassports
+      responses: {'200': {description: Non-secret passport records, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Passport'}}}}}, default: {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Passports]
+      operationId: issuePassport
+      description: Returns the bearer token only in this response. Later list/get responses expose only the non-secret passport record.
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/IssuePassportInput'}}}}
+      responses:
+        '201': {description: Newly issued one-time credential display, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}, Idempotency-Status: {$ref: '#/components/headers/IdempotencyStatus'}}, content: {application/json: {schema: {$ref: '#/components/schemas/PassportCredential'}}}}
+        '200': {description: Idempotent replay result, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}, Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}}, content: {application/json: {schema: {$ref: '#/components/schemas/PassportIssueReplay'}}}}
+        '409': {$ref: '#/components/responses/IdempotencyConflict'}
+        default: {$ref: '#/components/responses/Error'}
+  /api/changes/{change_id}/passports/{passport_id}/revoke:
+    post:
+      tags: [Passports]
+      operationId: revokePassport
+      parameters:
+        - {$ref: '#/components/parameters/ChangeID'}
+        - {name: passport_id, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody: {$ref: '#/components/requestBodies/EmptyJSON'}
+      responses: {'200': {description: Revoked passport record, content: {application/json: {schema: {$ref: '#/components/schemas/Passport'}}}}, default: {$ref: '#/components/responses/Error'}}
+  /api/gate/verify:
+    post:
+      tags: [Gate]
+      operationId: verifyGate
+      security: [{bearerPassport: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GateRequest'}}}}
+      responses:
+        '200': {description: Gate allowed, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {$ref: '#/components/schemas/GateResult'}}}}
+        default: {$ref: '#/components/responses/GateDenied'}
+  /api/gate/consume:
+    post:
+      tags: [Gate]
+      operationId: consumeGate
+      description: Atomically verifies and consumes an active passport; replay is rejected.
+      security: [{bearerPassport: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GateRequest'}}}}
+      responses:
+        '200': {description: Gate allowed and passport consumed, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {$ref: '#/components/schemas/GateResult'}}}}
+        default: {$ref: '#/components/responses/GateDenied'}
+  /api/integrations/gitlab/webhook:
+    post:
+      tags: [Integrations]
+      operationId: receiveGitLabWebhook
+      security: []
+      parameters:
+        - {name: X-Gitlab-Token, in: header, required: false, schema: {type: string}, description: Compatibility authentication when signing-token mode is not configured}
+        - {name: X-ChangeGuard-Timestamp, in: header, required: false, schema: {type: string}}
+        - {name: X-ChangeGuard-Signature, in: header, required: false, schema: {type: string}}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/JSONObject'}}}}
+      responses: {'202': {$ref: '#/components/responses/WebhookAccepted'}, '200': {$ref: '#/components/responses/WebhookDuplicate'}, default: {$ref: '#/components/responses/Error'}}
+  /api/integrations/jenkins/events:
+    post:
+      tags: [Integrations]
+      operationId: receiveJenkinsEvent
+      security: [{integrationBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/JSONObject'}}}}
+      responses: {'202': {$ref: '#/components/responses/WebhookAccepted'}, '200': {$ref: '#/components/responses/WebhookDuplicate'}, default: {$ref: '#/components/responses/Error'}}
+  /api/integrations/operations/webhook:
+    post:
+      tags: [Integrations]
+      operationId: receiveOperationsWebhook
+      security: [{integrationBearer: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/JSONObject'}}}}
+      responses: {'202': {$ref: '#/components/responses/WebhookAccepted'}, '200': {$ref: '#/components/responses/WebhookDuplicate'}, default: {$ref: '#/components/responses/Error'}}
+  /api/events:
+    get:
+      tags: [Events]
+      operationId: streamEvents
+      responses:
+        '200':
+          description: Organization-scoped SSE stream. Emits `change` events and comment heartbeats every 20 seconds.
+          content:
+            text/event-stream:
+              schema: {type: string}
+        default: {$ref: '#/components/responses/Error'}
+  /api/changes/{change_id}/report:
+    get:
+      tags: [Exports]
+      operationId: exportChangeReport
+      parameters:
+        - {$ref: '#/components/parameters/ChangeID'}
+        - {name: format, in: query, required: false, schema: {type: string, enum: [xlsx]}, description: Omit for Markdown; use xlsx for Excel}
+      responses:
+        '200':
+          description: Markdown or XLSX evidence report
+          headers: {Content-Disposition: {schema: {type: string}}}
+          content:
+            text/markdown: {schema: {type: string}}
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: {schema: {type: string, contentEncoding: binary}}
+        default: {$ref: '#/components/responses/Error'}
+  /api/audits/export:
+    get:
+      tags: [Exports]
+      operationId: exportAudits
+      parameters:
+        - {name: month, in: query, required: false, schema: {type: string, pattern: '^\\d{4}-(0[1-9]|1[0-2])$'}}
+      responses:
+        '200': {description: Self-contained printable HTML audit report, headers: {Content-Disposition: {schema: {type: string}}}, content: {text/html: {schema: {type: string}}}}
+        default: {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    sessionCookie: {type: apiKey, in: cookie, name: dbguard_session}
+    bearerPassport: {type: http, scheme: bearer, bearerFormat: ChangeGuard passport token}
+    integrationBearer: {type: http, scheme: bearer}
+  parameters:
+    ChangeID: {name: change_id, in: path, required: true, schema: {type: string}}
+    CSRFToken: {name: X-CSRF-Token, in: header, required: false, schema: {type: string}, description: Required for cookie-authenticated mutating requests when authentication is enabled}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Optional. Same key and request digest replay the stored result; reuse with a different digest returns 409.
+      schema: {type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$'}
+  headers:
+    NoStore: {schema: {type: string, const: no-store}}
+    IdempotencyStatus: {schema: {type: string, enum: [not-requested]}}
+    IdempotencyReplayed: {schema: {type: string, const: 'true'}}
+  requestBodies:
+    EmptyJSON: {required: true, content: {application/json: {schema: {type: object, additionalProperties: false}}}}
+  responses:
+    Change: {description: Change state, content: {application/json: {schema: {$ref: '#/components/schemas/ChangeRequest'}}}}
+    IdempotentChange:
+      description: Change state
+      headers:
+        Idempotency-Status: {$ref: '#/components/headers/IdempotencyStatus'}
+        Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}
+      content: {application/json: {schema: {$ref: '#/components/schemas/ChangeRequest'}}}
+    Error: {description: Error response, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    GateDenied: {description: Gate rejection; status depends on the rejection code, content: {application/json: {schema: {$ref: '#/components/schemas/GateResult'}}}}
+    IdempotencyConflict: {description: Idempotency key conflict or in-progress request, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    RateLimited: {description: Rate limited, headers: {Retry-After: {schema: {type: integer, minimum: 1}}}, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    WebhookAccepted: {description: New event accepted, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookReceipt'}}}}
+    WebhookDuplicate: {description: Duplicate event acknowledged, content: {application/json: {schema: {$ref: '#/components/schemas/WebhookReceipt'}}}}
+  schemas:
+    JSONObject: {type: object, additionalProperties: true}
+    Error:
+      type: object
+      required: [error, code, message]
+      properties: {error: {type: string}, code: {type: string}, message: {type: string}}
+    User:
+      type: object
+      required: [id, organization_id, organization_name, name, role, enterprise_admin, active]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        organization_name: {type: string}
+        name: {type: string}
+        email: {type: string, format: email}
+        role: {type: string}
+        enterprise_admin: {type: boolean}
+        active: {type: boolean}
+        identity_provider: {type: string}
+        last_login_at: {type: string, format: date-time}
+    AuthSession:
+      type: object
+      required: [user, organization, csrf_token]
+      properties: {user: {$ref: '#/components/schemas/User'}, organization: {$ref: '#/components/schemas/JSONObject'}, csrf_token: {type: string}}
+    RegisterEnterpriseInput:
+      type: object
+      additionalProperties: false
+      required: [organization_name, organization_slug, name, email, password]
+      properties: {organization_name: {type: string}, organization_slug: {type: string}, name: {type: string}, email: {type: string, format: email}, password: {type: string, minLength: 8}}
+    LoginInput: {type: object, additionalProperties: false, required: [email, password], properties: {email: {type: string, format: email}, password: {type: string}}}
+    AcceptInviteInput: {type: object, additionalProperties: false, required: [token, name, email, password], properties: {token: {type: string}, name: {type: string}, email: {type: string, format: email}, password: {type: string, minLength: 8}}}
+    ReleasePlan:
+      type: object
+      additionalProperties: false
+      required: [strategy, observation_minutes, auto_rollback]
+      properties: {strategy: {type: string}, canary_percent: {type: integer}, observation_minutes: {type: integer}, auto_rollback: {type: boolean}, success_metrics: {type: array, items: {type: string}}}
+    Artifact:
+      type: object
+      additionalProperties: false
+      properties: {id: {type: string}, kind: {type: string, enum: [CODE, CONFIG, KUBERNETES, API, DATABASE]}, name: {type: string}, source: {type: string}, language: {type: string}, content: {type: string}, content_sha256: {type: string}}
+    CreateChangeInput:
+      type: object
+      additionalProperties: false
+      required: [title, application_id, environment, change_type, artifacts, sql, rollback_sql, rollback_plan, release_plan, description, planned_at]
+      properties:
+        title: {type: string}
+        application_id: {type: string}
+        environment: {type: string}
+        change_type: {type: string}
+        repository_url: {type: string}
+        branch: {type: string}
+        commit_sha: {type: string}
+        artifacts: {type: array, items: {$ref: '#/components/schemas/Artifact'}}
+        sql: {type: string}
+        rollback_sql: {type: string}
+        rollback_plan: {type: string}
+        release_plan: {$ref: '#/components/schemas/ReleasePlan'}
+        description: {type: string}
+        planned_at: {type: string, format: date-time}
+    ChangeRequest:
+      type: object
+      required: [id, organization_id, title, application_id, application_name, environment, change_type, artifact_sha256, status, risk, planned_at, created_at, updated_at, version]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        title: {type: string}
+        application_id: {type: string}
+        application_name: {type: string}
+        environment: {type: string}
+        change_type: {type: string}
+        repository_url: {type: string}
+        branch: {type: string}
+        commit_sha: {type: string}
+        artifact_sha256: {type: string}
+        artifacts: {type: array, items: {$ref: '#/components/schemas/Artifact'}}
+        sql: {type: string}
+        rollback_sql: {type: string}
+        rollback_plan: {type: string}
+        release_plan: {$ref: '#/components/schemas/ReleasePlan'}
+        description: {type: string}
+        submitter_id: {type: string}
+        submitter_name: {type: string}
+        reviewer_id: {type: string}
+        reviewer_name: {type: string}
+        review_comment: {type: string}
+        status: {type: string, enum: [DRAFT, CHECKING, CHECK_FAILED, READY_FOR_EXPERIMENT, EXPERIMENT_QUEUED, EXPERIMENT_RUNNING, WAITING_APPROVAL, APPROVED, REJECTED, COMPLETED]}
+        risk: {type: string, enum: [UNKNOWN, LOW, MEDIUM, HIGH]}
+        planned_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        version: {type: integer}
+        findings: {type: array, items: {$ref: '#/components/schemas/JSONObject'}}
+        check_run: {$ref: '#/components/schemas/JSONObject'}
+        experiment: {$ref: '#/components/schemas/JSONObject'}
+        analysis: {$ref: '#/components/schemas/JSONObject'}
+        timeline: {type: array, items: {$ref: '#/components/schemas/JSONObject'}}
+        comments: {type: array, items: {$ref: '#/components/schemas/JSONObject'}}
+    CommentInput: {type: object, additionalProperties: false, properties: {Comment: {type: string}}}
+    AssignFindingInput: {type: object, additionalProperties: false, required: [owner_id, due_at], properties: {owner_id: {type: string}, due_at: {type: string, format: date-time}}}
+    ResolveFindingInput: {type: object, additionalProperties: false, required: [resolution], properties: {resolution: {type: string}}}
+    VerifyFindingInput: {type: object, additionalProperties: false, required: [approved, comment], properties: {approved: {type: boolean}, comment: {type: string}}}
+    Passport:
+      type: object
+      required: [id, organization_id, change_id, artifact_sha256, environment, rule_set_version, approver_id, approver_name, status, issued_at, expires_at]
+      properties:
+        id: {type: string}
+        organization_id: {type: string}
+        change_id: {type: string}
+        artifact_sha256: {type: string}
+        environment: {type: string}
+        rule_set_version: {type: string}
+        approver_id: {type: string}
+        approver_name: {type: string}
+        status: {type: string, enum: [ACTIVE, CONSUMED, REVOKED, EXPIRED]}
+        issued_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        revoked_at: {type: string, format: date-time}
+        revoked_by_id: {type: string}
+        consumed_at: {type: string, format: date-time}
+        consumed_by: {type: string}
+    IssuePassportInput: {type: object, additionalProperties: false, properties: {ttl_seconds: {type: integer}}}
+    PassportCredential: {type: object, required: [passport, token], properties: {passport: {$ref: '#/components/schemas/Passport'}, token: {type: string, writeOnly: true}}}
+    PassportIssueReplay: {type: object, description: Stored idempotent result; credential token is present only when retained by the idempotency result, additionalProperties: true}
+    GateRequest: {type: object, additionalProperties: false, required: [artifact_sha256, environment], properties: {artifact_sha256: {type: string}, environment: {type: string}, consumer: {type: string}}}
+    GateResult: {type: object, required: [allowed, code, reason], properties: {allowed: {type: boolean}, code: {type: string}, reason: {type: string}, passport: {$ref: '#/components/schemas/Passport'}}}
+    WebhookReceipt: {type: object, required: [accepted, duplicate, event_id], properties: {accepted: {type: boolean}, duplicate: {type: boolean}, event_id: {type: string}, signal_id: {type: string}, change_id: {type: string}, kind: {type: string}}}
+security:
+  - sessionCookie: []
