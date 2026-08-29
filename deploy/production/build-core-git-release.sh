@@ -111,7 +111,7 @@ artifact="$release_directory/dbguard"
   CHANGEGUARD_BUILT_AT="$built_at" \
   CHANGEGUARD_SOURCE_SHA256="$source_sha256" \
   CHANGEGUARD_OUTPUT="$artifact" \
-  "$script_directory/build-core-release.sh" > "$release_directory/build.log"
+  bash "$script_directory/build-core-release.sh" > "$release_directory/build.log"
 
 git -C "$repository" bundle create "$release_directory/source.bundle" "$release_tag"
 git -C "$repository" bundle verify "$release_directory/source.bundle" > "$release_directory/bundle-verify.txt" 2>&1
