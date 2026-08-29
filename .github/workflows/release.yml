@@ -29,6 +29,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Fetch and verify annotated release tag
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          test "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" = tag
+          test "$(git rev-list -n 1 "refs/tags/${GITHUB_REF_NAME}")" = "$GITHUB_SHA"
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
