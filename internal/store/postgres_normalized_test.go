@@ -151,6 +151,7 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 	// Prepare an approved change/passport through the compatibility save, then
 	// consume through two independent Store instances.
 	first.mu.Lock()
+	first.restoreLocked()
 	changeIndex := 0
 	first.data.Changes[changeIndex].Status = model.StatusApproved
 	policies := first.data.Policies
