@@ -111,7 +111,7 @@ jobs:
           test -n "${DBGUARD_TEST_POSTGRES_DSN:-}" || { echo "::error::DBGUARD_TEST_POSTGRES_DSN is required"; exit 1; }
           test -n "${DBGUARD_REDIS_TEST_URL:-}" || { echo "::error::DBGUARD_REDIS_TEST_URL is required"; exit 1; }
           pg_isready -d "$DBGUARD_TEST_POSTGRES_DSN"
-          redis-cli -u "$DBGUARD_REDIS_TEST_URL" ping | grep -qx PONG
+          timeout 5 bash -c '</dev/tcp/127.0.0.1/6379'
 
       - name: Run PostgreSQL integration contract
         run: go test ./internal/store -run '^TestPostgresNormalizedMultiInstance$' -count=1 -v
@@ -182,7 +182,7 @@ jobs:
         run: docker build -t changeguard:supply-chain .
 
       - name: Generate CycloneDX SBOM
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: changeguard:supply-chain
           format: cyclonedx
@@ -197,7 +197,7 @@ jobs:
           retention-days: 30
 
       - name: Scan container vulnerabilities
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: changeguard:supply-chain
           format: table

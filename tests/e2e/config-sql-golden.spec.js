@@ -23,7 +23,7 @@ test("CONFIG and SQL change completes deterministic check and real shadow rehear
 
   await page.goto("/");
   await page.getByLabel("企业邮箱").fill("developer@example.com");
-  await page.getByLabel("密码").fill("Demo1234");
+  await page.locator("#authLoginForm input[name='password']").fill("Demo1234");
   await page.getByRole("button", { name: "登录工作空间" }).click();
   await expect(page.getByRole("button", { name: /新建变更/ }).first()).toBeVisible();
 
