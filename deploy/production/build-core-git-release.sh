@@ -49,7 +49,7 @@ case "$release_directory/" in
 esac
 
 [ -f "$verification_source" ] || { printf 'verification evidence file does not exist\n' >&2; exit 1; }
-source_sha256="$("$script_directory/source-tree-sha256.sh" "$repository")"
+source_sha256="$(bash "$script_directory/source-tree-sha256.sh" "$repository")"
 python3 - "$verification_source" "$version" "$release_tag" "$commit" "$source_sha256" <<'PY'
 import json
 import sys
