@@ -126,7 +126,7 @@ SET payload = jsonb_set(
           END
           ORDER BY ordinal
         )
-        FROM jsonb_array_elements(COALESCE(payload->'passports', '[]'::jsonb)) WITH ORDINALITY AS passports(item, ordinal)
+        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'passports')='array' THEN payload->'passports' ELSE '[]'::jsonb END) WITH ORDINALITY AS passports(item, ordinal)
       ), '[]'::jsonb),
       true
     ),
@@ -134,7 +134,7 @@ SET payload = jsonb_set(
     updated_at = now()
 WHERE id = 1 AND EXISTS (
   SELECT 1
-  FROM jsonb_array_elements(COALESCE(payload->'passports', '[]'::jsonb)) item
+  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'passports')='array' THEN payload->'passports' ELSE '[]'::jsonb END) item
   WHERE item->>'status' = 'ACTIVE' AND (item->>'expires_at')::timestamptz <= now()
 );
 `
