@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23.x"
+          go-version: "1.26.x"
           cache: true
 
       - uses: actions/setup-node@v4
@@ -101,7 +101,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23.x"
+          go-version: "1.26.x"
           cache: true
 
       - name: Require integration environment
@@ -169,7 +169,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23.x"
+          go-version: "1.26.x"
           cache: true
 
       - name: Install govulncheck

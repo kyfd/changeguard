@@ -67,8 +67,8 @@ test("CONFIG and SQL change completes deterministic check and real shadow rehear
     mode: "POSTGRES",
     status: "PASSED",
     rollback_verified: true,
-    checks_passed: 4,
-    checks_total: 4
+    checks_passed: 5,
+    checks_total: 5
   }));
   expect(rehearsed.status).toBe("WAITING_APPROVAL");
 });
