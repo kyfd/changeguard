@@ -243,6 +243,16 @@ func (s *Service) AuditMonthlyReport(actorID string, month time.Time) ([]byte, e
 	})
 }
 
+// GovernanceTrendsFor 按月聚合当前用户可见变更的治理趋势。
+// 可见范围与变更列表一致（组织隔离 + 应用授权过滤）。
+func (s *Service) GovernanceTrendsFor(actorID string, months int) ([]model.GovernanceTrendMonth, error) {
+	changes, err := s.ChangesFor(actorID)
+	if err != nil {
+		return nil, err
+	}
+	return governanceTrends(changes, months, time.Now().UTC()), nil
+}
+
 func (s *Service) ConflictRadarFor(actorID string, from, to time.Time) (model.ConflictRadar, error) {
 	changes, err := s.ChangesFor(actorID)
 	if err != nil {
