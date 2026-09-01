@@ -16,7 +16,8 @@ node_modules/
 test-results/
 playwright-report/
 
-# Images: keep the repository code-only
+# Images: keep runtime screenshots out of git. Product shots for the README
+# are force-tracked under docs/assets.
 screenshots/
 screenshot/
 *.png
@@ -25,6 +26,8 @@ screenshot/
 *.gif
 *.webp
 *.bmp
+!docs/assets/*.webp
+!docs/assets/*.png
 
 # Local agent plans and release source archives
 .zcode/

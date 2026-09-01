@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func TestIdempotencyFencesOldExecutorAfterAbortAndReclaim(t *testing.T) {

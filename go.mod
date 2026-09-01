@@ -1,4 +1,4 @@
-module github.com/liufengxi/dbguard
+module github.com/kyfd/changeguard
 
 go 1.25.0
 

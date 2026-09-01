@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/audit"
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/audit"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func linkedEvents(t *testing.T, events ...model.AuditEvent) []model.AuditEvent {

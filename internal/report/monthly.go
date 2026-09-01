@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 // MonthlyAudit 渲染指定自然月的审计月报 HTML。合规人员在浏览器中

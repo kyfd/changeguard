@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/agent"
-	"github.com/liufengxi/dbguard/internal/experiment"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/agent"
+	"github.com/kyfd/changeguard/internal/experiment"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 func newAssistantTestService(t *testing.T) *Service {

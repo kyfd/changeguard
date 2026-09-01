@@ -14,25 +14,28 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/agent"
-	"github.com/liufengxi/dbguard/internal/auth"
-	"github.com/liufengxi/dbguard/internal/buildinfo"
-	"github.com/liufengxi/dbguard/internal/experiment"
-	"github.com/liufengxi/dbguard/internal/httpapi"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/runtimeconfig"
-	"github.com/liufengxi/dbguard/internal/service"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/agent"
+	"github.com/kyfd/changeguard/internal/auth"
+	"github.com/kyfd/changeguard/internal/buildinfo"
+	"github.com/kyfd/changeguard/internal/experiment"
+	"github.com/kyfd/changeguard/internal/httpapi"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/runtimeconfig"
+	"github.com/kyfd/changeguard/internal/service"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 func main() {
-	logger := log.New(os.Stdout, "[DBGuard] ", log.LstdFlags|log.Lmicroseconds)
+	logger := log.New(os.Stdout, "[ChangeGuard] ", log.LstdFlags|log.Lmicroseconds)
 	logger.Printf("build %s", buildinfo.Current())
 	configuration, err := runtimeconfig.Load()
 	if err != nil {
 		logger.Fatalf("environment configuration rejected: %v", err)
 	}
 	logger.Printf("environment profile=%s canonical_file=%s assignments=%d", configuration.Profile, configuration.Path, configuration.Assignments)
+	if len(configuration.LegacyKeys) > 0 {
+		logger.Printf("deprecated %s; prefer CHANGEGUARD_* (DBGUARD_* will be removed in v4.0)", strings.Join(configuration.LegacyKeys, ", "))
+	}
 	checkOnly, err := startupMode(os.Args[1:])
 	if err != nil {
 		logger.Fatalf("invalid command line: %v", err)

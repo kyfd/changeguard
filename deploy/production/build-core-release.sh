@@ -24,7 +24,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ldflags="-s -w -X github.com/liufengxi/dbguard/internal/buildinfo.Version=$version -X github.com/liufengxi/dbguard/internal/buildinfo.Commit=$commit -X github.com/liufengxi/dbguard/internal/buildinfo.BuiltAt=$built_at -X github.com/liufengxi/dbguard/internal/buildinfo.SourceSHA256=$source_sha256"
+ldflags="-s -w -X github.com/kyfd/changeguard/internal/buildinfo.Version=$version -X github.com/kyfd/changeguard/internal/buildinfo.Commit=$commit -X github.com/kyfd/changeguard/internal/buildinfo.BuiltAt=$built_at -X github.com/kyfd/changeguard/internal/buildinfo.SourceSHA256=$source_sha256"
 (
   cd "$repository"
   env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$ldflags" -o "$temporary" ./cmd/dbguard

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/agent"
+	"github.com/kyfd/changeguard/internal/agent"
 )
 
 var protectedPath = regexp.MustCompile(`^/api/changes/([A-Za-z0-9_-]{1,128})/(agent-ask|submit-check)$`)

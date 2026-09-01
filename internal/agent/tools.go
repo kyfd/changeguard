@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 // DataSource 为 Agent 本地工具提供只读业务数据（由 store 适配注入）。

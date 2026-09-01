@@ -3,7 +3,7 @@ package store
 import (
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 // ensureDemoCoverage adds explicit DEMO_ONLY examples. They demonstrate the v1

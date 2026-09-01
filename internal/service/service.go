@@ -12,14 +12,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/agent"
-	"github.com/liufengxi/dbguard/internal/changegate"
-	"github.com/liufengxi/dbguard/internal/checker"
-	"github.com/liufengxi/dbguard/internal/conflict"
-	"github.com/liufengxi/dbguard/internal/experiment"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/report"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/agent"
+	"github.com/kyfd/changeguard/internal/changegate"
+	"github.com/kyfd/changeguard/internal/checker"
+	"github.com/kyfd/changeguard/internal/conflict"
+	"github.com/kyfd/changeguard/internal/experiment"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/report"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 var (

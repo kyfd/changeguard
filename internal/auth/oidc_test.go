@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 func encodeOIDCTestPart(t *testing.T, value any) string {

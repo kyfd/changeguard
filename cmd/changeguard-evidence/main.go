@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/liufengxi/dbguard/internal/evidence"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/evidence"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 func main() {

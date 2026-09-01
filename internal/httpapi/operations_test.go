@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/integration"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/observability"
-	"github.com/liufengxi/dbguard/internal/service"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/integration"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/observability"
+	"github.com/kyfd/changeguard/internal/service"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 func TestOperationsWebhookAuthenticatesLinksAndDeduplicates(t *testing.T) {

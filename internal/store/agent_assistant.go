@@ -4,7 +4,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 // AgentConversations returns all conversations for a change, newest first.

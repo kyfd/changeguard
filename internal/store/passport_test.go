@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/changegate"
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/changegate"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func passportFixture(now time.Time, ruleSetVersion string) (model.ChangeRequest, model.Passport) {
@@ -69,7 +69,7 @@ func TestUsePassportConcurrentConsumeCompletesChangeOnce(t *testing.T) {
 	if err := data.CreatePassport(passport, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_issue_atomic", ChangeID: change.ID, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	const workers = 16
+	const workers = 100
 	start := make(chan struct{})
 	var wait sync.WaitGroup
 	var success atomic.Int32

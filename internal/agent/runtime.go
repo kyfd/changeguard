@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 
 	"github.com/redis/go-redis/v9"
 )

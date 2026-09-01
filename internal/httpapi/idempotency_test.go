@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/liufengxi/dbguard/internal/agent"
-	"github.com/liufengxi/dbguard/internal/auth"
-	"github.com/liufengxi/dbguard/internal/experiment"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/service"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/agent"
+	"github.com/kyfd/changeguard/internal/auth"
+	"github.com/kyfd/changeguard/internal/experiment"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/service"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 type idempotencyRunner struct{}

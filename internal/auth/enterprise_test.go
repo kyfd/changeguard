@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 func newEnterpriseTestManager() (*Manager, *store.Store) {
