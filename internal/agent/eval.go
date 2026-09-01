@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 //go:embed testdata/eval_cases.json

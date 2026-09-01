@@ -49,7 +49,7 @@ case "$release_directory/" in
 esac
 
 [ -f "$verification_source" ] || { printf 'verification evidence file does not exist\n' >&2; exit 1; }
-source_sha256="$("$script_directory/source-tree-sha256.sh" "$repository")"
+source_sha256="$(bash "$script_directory/source-tree-sha256.sh" "$repository")"
 python3 - "$verification_source" "$version" "$release_tag" "$commit" "$source_sha256" <<'PY'
 import json
 import sys
@@ -111,7 +111,7 @@ artifact="$release_directory/dbguard"
   CHANGEGUARD_BUILT_AT="$built_at" \
   CHANGEGUARD_SOURCE_SHA256="$source_sha256" \
   CHANGEGUARD_OUTPUT="$artifact" \
-  "$script_directory/build-core-release.sh" > "$release_directory/build.log"
+  bash "$script_directory/build-core-release.sh" > "$release_directory/build.log"
 
 git -C "$repository" bundle create "$release_directory/source.bundle" "$release_tag"
 git -C "$repository" bundle verify "$release_directory/source.bundle" > "$release_directory/bundle-verify.txt" 2>&1

@@ -1,0 +1,25 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dbguard
+  namespace: dbguard
+  labels:
+    app: dbguard
+spec:
+  selector:
+    matchLabels:
+      app: dbguard
+      app.kubernetes.io/component: metrics
+  namespaceSelector:
+    matchNames:
+      - dbguard
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      authorization:
+        type: Bearer
+        credentials:
+          name: dbguard-secrets
+          key: DBGUARD_METRICS_TOKEN

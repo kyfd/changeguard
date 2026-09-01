@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/buildinfo"
+	"github.com/kyfd/changeguard/internal/buildinfo"
 )
 
 // 升级包上传与状态查询。

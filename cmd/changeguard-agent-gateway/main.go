@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/agentgateway"
+	"github.com/kyfd/changeguard/internal/agentgateway"
 )
 
 func main() {

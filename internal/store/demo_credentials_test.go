@@ -3,7 +3,7 @@ package store
 import (
 	"testing"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func TestMergeDemoCredentialsRefreshesPersistedPassword(t *testing.T) {

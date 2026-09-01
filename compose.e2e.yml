@@ -1,0 +1,71 @@
+services:
+  primary-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dbguard
+      POSTGRES_PASSWORD: e2e-primary-password
+      POSTGRES_DB: dbguard
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbguard -d dbguard"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  shadow-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shadow_admin
+      POSTGRES_PASSWORD: shadow_admin
+      POSTGRES_DB: shadow
+    volumes:
+      - ./deploy/shadow-init.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shadow_admin -d shadow"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  dbguard:
+    build: .
+    ports:
+      - "18080:8080"
+    environment:
+      PORT: "8080"
+      DBGUARD_ENV_PROFILE: development
+      DBGUARD_STORE_MODE: postgres
+      DBGUARD_PRIMARY_DSN: postgres://dbguard:e2e-primary-password@primary-postgres:5432/dbguard?sslmode=disable
+      DBGUARD_DB_MAX_CONNS: "8"
+      DBGUARD_DB_MIN_CONNS: "1"
+      DBGUARD_SESSION_MODE: redis
+      DBGUARD_REDIS_URL: redis://redis:6379/0
+      DBGUARD_REDIS_PREFIX: "changeguard:e2e:"
+      DBGUARD_AUTH_MODE: local
+      DBGUARD_AUTH_SECURE_COOKIE: "false"
+      DBGUARD_ENABLE_DEMO_ACCOUNTS: "true"
+      DBGUARD_ENABLE_DEMO_DATA: "true"
+      DBGUARD_EXPERIMENT_MODE: postgres
+      DBGUARD_SHADOW_DSN: postgres://dbguard_runner:dbguard_runner@shadow-postgres:5432/shadow?sslmode=disable
+      DBGUARD_PASSPORT_HMAC_SECRET: e2e-only-passport-secret-at-least-32-bytes
+      DBGUARD_WORKERS: "1"
+      DBGUARD_PUBLIC_URL: http://localhost:18080
+    depends_on:
+      primary-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      shadow-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

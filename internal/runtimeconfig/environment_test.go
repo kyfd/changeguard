@@ -191,6 +191,58 @@ func writeEnvironment(t *testing.T, content string) string {
 	return path
 }
 
+func TestLoadPrefersChangeGuardPrefix(t *testing.T) {
+	clearEnvironment(t)
+	t.Setenv("CHANGEGUARD_AUTH_MODE", "local")
+	t.Setenv("CHANGEGUARD_WORKERS", "3")
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", "changeguard-local-demo-secret-32-bytes-minimum")
+
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("DBGUARD_AUTH_MODE"); got != "local" {
+		t.Fatalf("DBGUARD_AUTH_MODE = %q", got)
+	}
+	if got := os.Getenv("DBGUARD_WORKERS"); got != "3" {
+		t.Fatalf("DBGUARD_WORKERS = %q", got)
+	}
+}
+
+func TestLoadRejectsConflictingBrandAndLegacyValues(t *testing.T) {
+	clearEnvironment(t)
+	t.Setenv("CHANGEGUARD_AUTH_MODE", "local")
+	t.Setenv("DBGUARD_AUTH_MODE", "oidc")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "conflicting CHANGEGUARD_AUTH_MODE and DBGUARD_AUTH_MODE") {
+		t.Fatalf("expected brand conflict, got %v", err)
+	}
+}
+
+func TestProductionProfileRejectsShadowOnPrimaryHost(t *testing.T) {
+	clearEnvironment(t)
+	content := strings.Replace(validProductionEnvironment(), "DBGUARD_STORE_MODE=file", "DBGUARD_STORE_MODE=postgres\nDBGUARD_PRIMARY_DSN=postgres://app:secret-password-16@127.0.0.1:5432/changeguard", 1)
+	path := writeEnvironment(t, content)
+	t.Setenv("DBGUARD_ENV_FILE", path)
+	t.Setenv("DBGUARD_ENV_PROFILE", ProfileProduction)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CHANGEGUARD_SHADOW_DSN must not use the same host:port") {
+		t.Fatalf("expected shadow/primary host rejection, got %v", err)
+	}
+}
+
+func TestLoadAcceptsChangeGuardNamedProductionFile(t *testing.T) {
+	clearEnvironment(t)
+	content := strings.ReplaceAll(validProductionEnvironment(), "DBGUARD_", "CHANGEGUARD_")
+	path := writeEnvironment(t, content)
+	t.Setenv("CHANGEGUARD_ENV_FILE", path)
+	t.Setenv("CHANGEGUARD_ENV_PROFILE", ProfileProduction)
+	summary, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Profile != ProfileProduction || os.Getenv("DBGUARD_AUTH_MODE") != "local" {
+		t.Fatalf("CHANGEGUARD_ production file was not mapped: %+v auth=%q", summary, os.Getenv("DBGUARD_AUTH_MODE"))
+	}
+}
+
 func clearEnvironment(t *testing.T) {
 	t.Helper()
 	keys := []string{
@@ -202,6 +254,14 @@ func clearEnvironment(t *testing.T) {
 		"DBGUARD_OPERATIONS_ORGANIZATION_ID", "DBGUARD_STORE_MODE", "DBGUARD_DATA_FILE",
 		"DBGUARD_MIGRATION_WITNESS_FILE", "DBGUARD_PRIMARY_DSN", "DBGUARD_WORKERS",
 	}
+	branded := make([]string, 0, len(keys)*2)
+	for _, key := range keys {
+		branded = append(branded, key)
+		if strings.HasPrefix(key, "DBGUARD_") {
+			branded = append(branded, "CHANGEGUARD_"+strings.TrimPrefix(key, "DBGUARD_"))
+		}
+	}
+	keys = branded
 	for _, key := range keys {
 		value, exists := os.LookupEnv(key)
 		if err := os.Unsetenv(key); err != nil {

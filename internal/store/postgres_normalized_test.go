@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/liufengxi/dbguard/internal/changegate"
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/changegate"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func TestPostgresNormalizedSQLContracts(t *testing.T) {
@@ -151,6 +151,7 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 	// Prepare an approved change/passport through the compatibility save, then
 	// consume through two independent Store instances.
 	first.mu.Lock()
+	first.restoreLocked()
 	changeIndex := 0
 	first.data.Changes[changeIndex].Status = model.StatusApproved
 	policies := first.data.Policies

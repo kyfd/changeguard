@@ -785,6 +785,17 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .policy-checks strong { color: #344054; font-size: 13px; }
 .policy-checks small { color: #667085; font-size: 12px; line-height: 1.45; }
 
+/* ══════════════════════════════════ ACCESSIBILITY BASELINE ══ */
+.skip-link { position: fixed; z-index: 5000; top: 10px; left: 10px; padding: 10px 14px; border-radius: 8px; color: #fff; background: #173ea5; transform: translateY(-160%); }
+.skip-link:focus { transform: translateY(0); }
+.main-content:focus { outline: none; }
+[data-open-change][tabindex="0"]:focus-visible, [data-route][tabindex="0"]:focus-visible { outline: 3px solid #2458e6; outline-offset: -3px; }
+.passport-actions { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
+
 /* ══════════════════════════════════ MODALS ══ */
 .modal-layer { position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center; padding: 25px; pointer-events: none; }
 .modal-layer.open { display: flex; pointer-events: auto; }

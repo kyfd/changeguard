@@ -7,7 +7,7 @@ test:
 	go test ./...
 
 build:
-	go build -trimpath -o bin/dbguard ./cmd/dbguard
+	go build -trimpath -o bin/changeguard ./cmd/dbguard
 
 docker-up:
 	docker compose up -d --build

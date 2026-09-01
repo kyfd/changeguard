@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 // 注入样例：Agent 不得被诱导为 LOW。

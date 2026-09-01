@@ -1,7 +1,11 @@
 package observability
 
 import (
+	"io"
+	"log"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +34,27 @@ func TestResponseRecorderUnwrapsForResponseController(t *testing.T) {
 	recorder := &responseRecorder{ResponseWriter: underlying}
 	if recorder.Unwrap() != underlying {
 		t.Fatal("response recorder must expose the underlying writer")
+	}
+}
+
+func TestMetricsExposeHistogramAndReadiness(t *testing.T) {
+	metrics := New()
+	metrics.SetReadiness(true)
+	handler := metrics.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}), log.New(io.Discard, "", 0))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/apps", nil))
+
+	response := httptest.NewRecorder()
+	metrics.Handler(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	for _, expected := range []string{
+		`dbguard_http_request_duration_seconds_bucket{method="GET",route="/api/apps",status="201",le="+Inf"} 1`,
+		"dbguard_http_request_duration_seconds_count{method=\"GET\",route=\"/api/apps\",status=\"201\"} 1",
+		"dbguard_readiness 1",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("metrics output missing %q:\n%s", expected, body)
+		}
 	}
 }

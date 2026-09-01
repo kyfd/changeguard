@@ -400,24 +400,32 @@ async function renderPage() {
   renderNav();
   const main = document.querySelector("#mainContent");
   window.scrollTo({top:0,behavior:"instant"});
-  if (route === "panorama") return renderPanorama(main);
-  if (route === "dashboard") return renderDashboard(main);
-  if (route === "assets" && id) return renderAssetDetail(main, id);
-  if (route === "assets") return renderAssets(main);
-  if (route === "risks") return renderRiskCenter(main);
-  if (route === "changes" && id) return renderChangeDetail(main, id);
-  if (route === "changes") return renderChanges(main);
-  if (route === "calendar") return renderCalendar(main);
-  if (route === "experiments") return renderExperiments(main);
-  if (route === "approvals") return renderApprovals(main);
-  if (route === "observability") return renderObservability(main);
-  if (route === "incidents") return renderIncidentBacktrace(main);
-  if (route === "policies") return renderPolicies(main);
-  if (route === "enterprise") return renderEnterprise(main);
-  if (route === "apps") return renderApps(main);
-  if (route === "audits") return renderAudits(main);
-  if (route === "settings") return renderSettings(main);
-  location.hash = "#/dashboard";
+  let rendered;
+  if (route === "panorama") rendered = renderPanorama(main);
+  else if (route === "dashboard") rendered = renderDashboard(main);
+  else if (route === "assets" && id) rendered = renderAssetDetail(main, id);
+  else if (route === "assets") rendered = renderAssets(main);
+  else if (route === "risks") rendered = renderRiskCenter(main);
+  else if (route === "changes" && id) rendered = renderChangeDetail(main, id);
+  else if (route === "changes") rendered = renderChanges(main);
+  else if (route === "calendar") rendered = renderCalendar(main);
+  else if (route === "experiments") rendered = renderExperiments(main);
+  else if (route === "approvals") rendered = renderApprovals(main);
+  else if (route === "observability") rendered = renderObservability(main);
+  else if (route === "incidents") rendered = renderIncidentBacktrace(main);
+  else if (route === "policies") rendered = renderPolicies(main);
+  else if (route === "enterprise") rendered = renderEnterprise(main);
+  else if (route === "apps") rendered = renderApps(main);
+  else if (route === "audits") rendered = renderAudits(main);
+  else if (route === "settings") rendered = renderSettings(main);
+  else {
+    location.hash = "#/dashboard";
+    return;
+  }
+  await rendered;
+  if (!document.querySelector(".modal-layer.open") && !document.body.classList.contains("auth-required")) {
+    main.focus({ preventScroll: true });
+  }
 }
 
 function panoramaPanel(title, className, content) {
@@ -1117,8 +1125,10 @@ function renderDashboard(main) {
   const recent = d.recent_changes || [];
   const allChanges = state.changes || [];
   const totalChanges = allChanges.length;
-  const ruleCoverage = totalChanges ? Math.round(allChanges.filter(item => (item.findings || []).length > 0).length / totalChanges * 100) : 0;
-  const rollbackCoverage = totalChanges ? Math.round(allChanges.filter(item => item.rollback_plan || item.rollback_sql).length / totalChanges * 100) : 0;
+  const coverage = state.governanceOutcomes?.control_coverage || {};
+  const governanceTotalChanges = Number(state.governanceOutcomes?.total_changes || 0);
+  const ruleCoverage = governanceTotalChanges ? Number(coverage.check_run_percent || 0) : 0;
+  const rollbackCoverage = governanceTotalChanges ? Number(coverage.rollback_plan_percent || 0) : 0;
   const approvalScope = allChanges.filter(item => ["WAITING_APPROVAL","APPROVED","REJECTED","COMPLETED"].includes(item.status));
   const approvalClosed = approvalScope.filter(item => ["APPROVED","REJECTED","COMPLETED"].includes(item.status)).length;
   const approvalClosure = approvalScope.length ? Math.round(approvalClosed / approvalScope.length * 100) : 0;
@@ -1166,7 +1176,7 @@ function renderDashboard(main) {
             </div>
           </div>
           <div class="metric-bars">
-            ${[["规则检查覆盖",ruleCoverage,"#2458e6"],["回滚方案完整",rollbackCoverage,"#16845b"],["审批闭环率",approvalClosure,"#7357c9"]].map(x => `<div><div class="metric-bar-head"><span>${x[0]}</span><b>${x[1]}%</b></div><div class="metric-bar-track"><div class="metric-bar-fill" style="width:${x[1]}%;--bar:${x[2]}"></div></div></div>`).join("")}
+            ${[["规则检查覆盖",ruleCoverage,"#2458e6"],["回滚方案完整",rollbackCoverage,"#16845b"],["审批闭环率",approvalClosure,"#7357c9"]].map(x => `<div><div class="metric-bar-head"><span>${x[0]}</span><b>${Number(x[1]).toFixed(1)}%</b></div><div class="metric-bar-track"><div class="metric-bar-fill" style="width:${Math.max(0, Math.min(100, Number(x[1])))}%;--bar:${x[2]}"></div></div></div>`).join("")}
           </div>
         </div>
       </article>
@@ -1184,7 +1194,7 @@ function renderDashboard(main) {
 function changeTable(items, compact = false) {
   if (!items.length) return emptyState("暂无变更记录", "新建变更单后，系统会在这里展示完整治理进度。");
   return `<table class="data-table"><thead><tr><th>变更内容</th><th>服务</th><th>风险</th><th>当前状态</th><th>提交人</th><th>更新时间</th><th></th></tr></thead>
-    <tbody>${items.map(item => `<tr data-open-change="${item.id}">
+    <tbody>${items.map(item => `<tr data-open-change="${item.id}" tabindex="0" role="link" aria-label="查看变更：${escapeHTML(item.title)}">
       <td><div class="change-title"><span class="type-icon">${svg(item.change_type === "DML" ? "code" : "database")}</span><div><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(item.id)}</span></div></div></td>
       <td>${escapeHTML(item.application_name)}</td><td>${riskBadge(item.risk)}</td><td>${statusBadge(item.status)}</td>
       <td><div class="person-cell"><span class="avatar">${escapeHTML(initials(item.submitter_name))}</span><span>${escapeHTML(item.submitter_name)}</span></div></td>
@@ -1285,7 +1295,7 @@ function assetRecord(app) {
 
 function assetTable(records) {
   if (!records.length) return `<div class="registry-empty">${svg("server")}<strong>没有符合条件的服务</strong><span>调整搜索条件，或前往服务配置纳管业务服务。</span><button class="button button-secondary" data-route="apps">前往服务配置</button></div>`;
-  return `<table class="data-table asset-registry-table"><thead><tr><th>服务名称</th><th>类型 / 运行时</th><th>环境</th><th>负责人</th><th>变更记录</th><th>未闭环风险</th><th>最近变更</th><th></th></tr></thead><tbody>${records.map(record => `<tr data-route="assets/${record.app.id}">
+  return `<table class="data-table asset-registry-table"><thead><tr><th>服务名称</th><th>类型 / 运行时</th><th>环境</th><th>负责人</th><th>变更记录</th><th>未闭环风险</th><th>最近变更</th><th></th></tr></thead><tbody>${records.map(record => `<tr data-route="assets/${record.app.id}" tabindex="0" role="link" aria-label="查看服务：${escapeHTML(record.app.name)}">
     <td><div class="change-title"><span class="type-icon">${svg("server")}</span><div><strong>${escapeHTML(record.app.name)}</strong><span>${escapeHTML(record.app.tier || "T2")} · ${escapeHTML(record.app.lifecycle || "生产运行")}</span></div></div></td>
     <td><div class="asset-database"><strong>${escapeHTML(record.app.kind || "后端服务")}</strong><span>${escapeHTML(record.app.runtime || [record.app.database,record.app.schema].filter(Boolean).join(" / ") || "待补充技术栈")}</span></div></td>
     <td><span class="asset-environment">${escapeHTML(record.app.environment || "未配置")}</span></td>
@@ -1377,7 +1387,7 @@ function riskRegisterTable(items) {
     const meta = findingStatusInfo(item.status);
     const due = item.due_at ? new Date(item.due_at).getTime() : 0;
     const overdue = due && due < now && item.status !== "VERIFIED";
-    return `<tr data-open-change="${item.change_id}"><td><div class="risk-register-title"><span class="finding-level ${String(item.severity || "LOW").toLowerCase()}">${item.severity === "HIGH" ? "高" : item.severity === "MEDIUM" ? "中" : "低"}</span><div><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(item.code)} · ${escapeHTML(item.id)}</span></div></div></td><td>${riskBadge(item.severity)}</td><td><span class="finding-state finding-state-${meta[1]}">${meta[0]}</span></td><td><div class="asset-database"><strong>${escapeHTML(item.application_name)}</strong><span>${escapeHTML(item.application_id)}</span></div></td><td><div class="asset-latest"><strong>${escapeHTML(item.change_title)}</strong><span>${escapeHTML(item.change_id)}</span></div></td><td><div class="risk-owner"><strong>${escapeHTML(item.owner_name || "待分配")}</strong><span class="${overdue ? "overdue" : ""}">${overdue ? "已逾期 · " : ""}${item.due_at ? formatDate(item.due_at) : "未设置期限"}</span></div></td><td>${formatDate(item.updated_at)}</td><td><button class="icon-button" aria-label="查看关联变更">${svg("arrow")}</button></td></tr>`;
+    return `<tr data-open-change="${item.change_id}" tabindex="0" role="link" aria-label="查看风险关联变更：${escapeHTML(item.change_title)}"><td><div class="risk-register-title"><span class="finding-level ${String(item.severity || "LOW").toLowerCase()}">${item.severity === "HIGH" ? "高" : item.severity === "MEDIUM" ? "中" : "低"}</span><div><strong>${escapeHTML(item.title)}</strong><span>${escapeHTML(item.code)} · ${escapeHTML(item.id)}</span></div></div></td><td>${riskBadge(item.severity)}</td><td><span class="finding-state finding-state-${meta[1]}">${meta[0]}</span></td><td><div class="asset-database"><strong>${escapeHTML(item.application_name)}</strong><span>${escapeHTML(item.application_id)}</span></div></td><td><div class="asset-latest"><strong>${escapeHTML(item.change_title)}</strong><span>${escapeHTML(item.change_id)}</span></div></td><td><div class="risk-owner"><strong>${escapeHTML(item.owner_name || "待分配")}</strong><span class="${overdue ? "overdue" : ""}">${overdue ? "已逾期 · " : ""}${item.due_at ? formatDate(item.due_at) : "未设置期限"}</span></div></td><td>${formatDate(item.updated_at)}</td><td><button class="icon-button" aria-label="查看关联变更">${svg("arrow")}</button></td></tr>`;
   }).join("")}</tbody></table>`;
 }
 
@@ -1456,8 +1466,8 @@ function actionButtons(change) {
     const n = (change.findings || []).length;
     buttons.push(`<button type="button" class="button button-secondary" disabled>有 ${n} 项检查问题待处理</button>`);
   }
-  if (change.status === "APPROVED" && (own || user.role === "技术负责人")) {
-    buttons.push(`<button type="button" class="button button-primary" data-action="complete" data-id="${change.id}">${svg("check")}标记执行完成</button>`);
+  if (change.status === "APPROVED" && user.id === change.reviewer_id && !change.passport) {
+    buttons.push(`<button type="button" class="button button-primary" data-issue-passport="${change.id}">${svg("shield")}签发通行证</button>`);
   }
   if (buttons.length === 2) {
     buttons.push(`<button type="button" class="button button-secondary" disabled>当前身份暂无可执行操作</button>`);
@@ -1504,43 +1514,35 @@ function renderPassportPanel(change) {
   const pp = change.passport;
   if (!pp && !["APPROVED", "COMPLETED"].includes(change.status)) {
     return `<article class="panel passport-panel">
-      <header class="panel-header"><div class="section-title"><span class="section-number">05</span><div><h3>变更通行证 CP</h3><p>审批通过后自动签发，供 CD 门禁验签后才允许部署。</p></div></div>
+      <header class="panel-header"><div class="section-title"><span class="section-number">05</span><div><h3>变更通行证</h3><p>审批通过后由实际审批人显式签发，供部署门禁校验。</p></div></div>
       <span class="status status-draft"><i></i>待签发</span></header>
-      <div class="panel-body"><p class="muted" style="margin:0;font-size:13px;line-height:1.6">完成规则检查、预发布验证与人工审批后，系统用 Ed25519 签发短时通行证，绑定 commit 与制品摘要。平台不直接发生产。</p></div>
+      <div class="panel-body"><p class="muted" style="margin:0;font-size:13px;line-height:1.6">完成规则检查、预发布验证与独立审批后，实际审批人可签发绑定制品摘要、环境与规则版本的短时通行证。平台不直接执行生产发布。</p></div>
     </article>`;
   }
   if (!pp) {
+    const canIssue = change.status === "APPROVED" && actor()?.id === change.reviewer_id;
     return `<article class="panel passport-panel">
-      <header class="panel-header"><div class="section-title"><span class="section-number">05</span><div><h3>变更通行证 CP</h3><p>当前变更无通行证记录（历史单可能早于该功能）。</p></div></div>
-      <span class="status status-draft"><i></i>无</span></header>
-      <div class="panel-body"><p class="muted" style="margin:0;font-size:13px">可对后续新审批的变更单使用 CP。</p></div>
+      <header class="panel-header"><div class="section-title"><span class="section-number">05</span><div><h3>变更通行证</h3><p>审批后由实际审批人显式签发，供部署门禁校验。</p></div></div>
+      <span class="status status-draft"><i></i>未签发</span></header>
+      <div class="panel-body"><p class="muted" style="margin:0;font-size:13px">通行证 bearer token 仅在签发成功后展示一次，关闭或刷新页面后不可再次读取。</p>${canIssue ? `<div class="passport-actions"><button type="button" class="button button-primary button-small" data-issue-passport="${escapeHTML(change.id)}">${svg("shield")}签发通行证</button></div>` : ""}</div>
     </article>`;
   }
   const [label, cls] = passportStatusMeta(pp);
-  const claims = pp.claims || {};
   return `<article class="panel passport-panel">
     <header class="panel-header">
-      <div class="section-title"><span class="section-number">05</span><div><h3>变更通行证 CP</h3><p>短时、可验签。CD 校验通过后才应部署对应 commit。</p></div></div>
+      <div class="section-title"><span class="section-number">05</span><div><h3>变更通行证</h3><p>短时、一次性消费，并绑定制品摘要、环境和规则版本。</p></div></div>
       <span class="status status-${cls}"><i></i>${label}</span>
     </header>
     <div class="panel-body">
       <div class="description-list">
-        <div class="description-item"><span>通行证 ID</span><strong><code>${escapeHTML(pp.passport_id || "")}</code></strong></div>
-        <div class="description-item"><span>算法 / Key</span><strong>${escapeHTML(pp.alg || "Ed25519")} · ${escapeHTML(pp.key_id || "")}</strong></div>
-        <div class="description-item"><span>绑定 Commit</span><strong><code>${escapeHTML(claims.commit_sha || change.commit_sha || "—")}</code></strong></div>
-        <div class="description-item"><span>制品摘要</span><strong><code class="wrap-code">${escapeHTML((claims.artifact_digest || "").slice(0, 24))}…</code></strong></div>
+        <div class="description-item"><span>通行证 ID</span><strong><code>${escapeHTML(pp.id || "")}</code></strong></div>
+        <div class="description-item"><span>制品摘要</span><strong><code class="wrap-code">${escapeHTML((pp.artifact_sha256 || "").slice(0, 24))}${pp.artifact_sha256 ? "…" : "—"}</code></strong></div>
+        <div class="description-item"><span>目标环境</span><strong>${escapeHTML(pp.environment || change.environment || "—")}</strong></div>
+        <div class="description-item"><span>签发人</span><strong>${escapeHTML(pp.approver_name || "—")}</strong></div>
         <div class="description-item"><span>签发时间</span><strong>${formatDate(pp.issued_at)}</strong></div>
         <div class="description-item"><span>有效期至</span><strong>${formatDate(pp.expires_at)}</strong></div>
       </div>
-      ${pp.revoked_reason ? `<div class="approval-notice" style="margin-top:12px">${escapeHTML(pp.revoked_reason)}</div>` : ""}
-      <div class="passport-actions" style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
-        <button type="button" class="button button-primary button-small" data-copy-passport="${escapeHTML(change.id)}">复制 Compact</button>
-        <button type="button" class="button button-secondary button-small" data-download-passport="${escapeHTML(change.id)}">下载 JSON</button>
-        <button type="button" class="button button-secondary button-small" data-verify-passport="${escapeHTML(change.id)}">在线验签</button>
-        <button type="button" class="button button-text button-small" data-route="settings">查看公钥</button>
-      </div>
-      <pre class="passport-compact" id="passportCompactText" style="margin-top:12px;max-height:96px;overflow:auto;font-size:11px;word-break:break-all">${escapeHTML(pp.compact || "")}</pre>
-      <p class="field-hint" style="margin-top:8px">流水线示例：<code>curl -sS -X POST $HOST/api/passport/verify -d '{"compact":"...","expected_commit":"$CI_COMMIT_SHA"}'</code></p>
+      <p class="field-hint" style="margin-top:12px">出于安全原因，历史记录不会返回 bearer token。流水线应在签发时立即安全接收并使用该 token。</p>
     </div>
   </article>`;
 }
@@ -3202,7 +3204,7 @@ async function renderSettings(main) {
       <div class="form-actions-inline" style="margin-top:12px">
         <button type="button" class="button button-secondary button-small" data-copy-text="${escapeHTML(config.passport_public_key || "")}" ${config.passport_public_key ? "" : "disabled"}>复制公钥</button>
       </div>
-      <p class="field-hint" style="margin-top:10px">验签接口 <code>POST /api/passport/verify</code>（免登录，便于 CD）。生产请设置 <code>DBGUARD_PASSPORT_SEED</code>。</p>
+      <p class="field-hint" style="margin-top:10px">部署门禁接口为 <code>POST /api/gate/verify</code> 与 <code>POST /api/gate/consume</code>，通行证通过 <code>Authorization: Bearer</code> 提交。生产请配置通行证签名密钥。</p>
     </article>
   </div>
   <article class="panel" style="margin-top:16px">
@@ -3443,10 +3445,7 @@ function defaultPlannedAtForApp(applicationId) {
 }
 
 function setModalOpen(modal, open) {
-  if (!modal) return;
-  modal.classList.toggle("open", !!open);
-  modal.setAttribute("aria-hidden", open ? "false" : "true");
-  document.body.classList.toggle("modal-open", !!document.querySelector(".modal-layer.open"));
+  window.ChangeGuardUI?.setModalOpen(modal, open);
 }
 
 function openCreate(change = null) {
@@ -3695,6 +3694,42 @@ function pollChange(id) {
   }, 1000);
 }
 
+async function issuePassport(id) {
+  const button = document.querySelector(`[data-issue-passport="${CSS.escape(id)}"]`);
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+  }
+  try {
+    const credential = await api(`/api/changes/${encodeURIComponent(id)}/passports`, {
+      method: "POST",
+      headers: { "Idempotency-Key": `passport-${id}-${crypto.randomUUID()}` },
+      body: JSON.stringify({ ttl_seconds: 600 })
+    });
+    if (!credential?.token || !credential?.passport) throw new Error("签发响应未包含一次性 token");
+    if (state.currentChange?.id === id) state.currentChange.passport = credential.passport;
+    const existing = state.changes.find(item => item.id === id);
+    if (existing) existing.passport = credential.passport;
+    const value = document.querySelector("#passportTokenValue");
+    if (value) value.value = credential.token;
+    setModalOpen(document.querySelector("#passportTokenModal"), true);
+    toast("通行证已签发", "success", "请立即安全保存一次性 token");
+  } catch (error) {
+    toast("通行证签发失败", "error", error.message || "请稍后重试");
+    if (button) {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
+}
+
+function closePassportTokenModal(refresh = true) {
+  const value = document.querySelector("#passportTokenValue");
+  if (value) value.value = "";
+  setModalOpen(document.querySelector("#passportTokenModal"), false);
+  if (refresh && currentRoute()[1]) void renderPage();
+}
+
 async function performAction(action, id) {
   if (!action || !id) {
     toast("操作无效", "error", "缺少变更单或动作");
@@ -3703,7 +3738,6 @@ async function performAction(action, id) {
   const labels = {
     submit: "提交规则检查",
     experiment: "开始预发布验证",
-    complete: "标记执行完成",
   };
   const label = labels[action] || action;
   document.querySelectorAll(`[data-action="${action}"][data-id="${id}"]`).forEach(btn => {
@@ -3975,11 +4009,13 @@ function closeAllOverlays() {
   closeMemberModal();
   closeAppModal();
   closeCITrustModal();
+  if (document.querySelector("#passportTokenModal")?.classList.contains("open")) closePassportTokenModal(false);
   closeNotifyPanel();
   document.body.classList.remove("sidebar-open");
 }
 
 function bindEvents() {
+  window.ChangeGuardUI?.enableKeyboardActivation(document);
   document.addEventListener("click", event => {
     // 通知面板：开关 / 关闭 / 点外部收起
     if (event.target.closest("#notificationButton")) {
@@ -4049,6 +4085,27 @@ function bindEvents() {
     if (findingButton) { openFindingAction(findingButton); return; }
     const exportButton = event.target.closest("[data-export]");
     if (exportButton) { exportReport(exportButton.dataset.id, exportButton.dataset.format || "xlsx"); return; }
+    const issue = event.target.closest("[data-issue-passport]");
+    if (issue && !issue.disabled) {
+      event.preventDefault();
+      void issuePassport(issue.dataset.issuePassport);
+      return;
+    }
+    if (event.target.closest("[data-close-passport-token]")) {
+      closePassportTokenModal();
+      return;
+    }
+    if (event.target.closest("[data-copy-passport-token]")) {
+      const value = document.querySelector("#passportTokenValue")?.value || "";
+      if (!value) { toast("token 已清除", "error"); return; }
+      navigator.clipboard?.writeText(value).then(() => toast("一次性 token 已复制")).catch(() => {
+        const field = document.querySelector("#passportTokenValue");
+        field?.select();
+        document.execCommand("copy");
+        toast("一次性 token 已复制");
+      });
+      return;
+    }
     const action = event.target.closest("[data-action]");
     if (action && !action.disabled && !action.hasAttribute("disabled")) {
       event.preventDefault();
@@ -4116,54 +4173,6 @@ function bindEvents() {
       return;
     }
     if (event.target.closest("[data-reconnect]")) location.reload();
-
-    const copyPP = event.target.closest("[data-copy-passport]");
-    if (copyPP) {
-      event.preventDefault();
-      const compact = state.currentChange?.passport?.compact || document.querySelector("#passportCompactText")?.textContent || "";
-      if (!compact) { toast("无通行证内容", "error"); return; }
-      navigator.clipboard?.writeText(compact).then(() => toast("CP Compact 已复制")).catch(() => {
-        const ta = document.createElement("textarea");
-        ta.value = compact; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
-        toast("CP Compact 已复制");
-      });
-      return;
-    }
-    const dlPP = event.target.closest("[data-download-passport]");
-    if (dlPP) {
-      event.preventDefault();
-      const pp = state.currentChange?.passport;
-      if (!pp) { toast("无通行证", "error"); return; }
-      const blob = new Blob([JSON.stringify(pp, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = (pp.passport_id || "change-passport") + ".json";
-      a.click();
-      URL.revokeObjectURL(url);
-      toast("通行证 JSON 已下载");
-      return;
-    }
-    const verifyPP = event.target.closest("[data-verify-passport]");
-    if (verifyPP) {
-      event.preventDefault();
-      const id = verifyPP.getAttribute("data-verify-passport") || state.currentChange?.id;
-      (async () => {
-        try {
-          const body = {
-            change_id: id,
-            compact: state.currentChange?.passport?.compact || "",
-            expected_commit: state.currentChange?.commit_sha || "",
-            check_revocation: true,
-          };
-          const result = await api("/api/passport/verify", { method: "POST", body: JSON.stringify(body) });
-          toast(result.ok ? "CP 验签通过" : "CP 验签失败", result.ok ? "success" : "error", result.message || "");
-        } catch (error) {
-          toast("验签请求失败", "error", error.message);
-        }
-      })();
-      return;
-    }
   });
   document.addEventListener("submit", async event => {
     if (["authLoginForm","enterpriseRegisterForm","acceptInviteForm"].includes(event.target.id)) { event.preventDefault(); await handleIdentityForm(event.target); return; }

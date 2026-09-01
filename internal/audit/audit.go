@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 // CanonicalPayload is the stable representation covered by AuditEvent.Hash.

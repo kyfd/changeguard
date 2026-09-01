@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/changegate"
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/changegate"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func TestHTTPListPassportsIsOneShotAndOmitsSecrets(t *testing.T) {

@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dbguard
+  namespace: dbguard
+spec:
+  replicas: 3
+  template:
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: dbguard
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]

@@ -140,7 +140,7 @@ func TestFrontendUsesSelfContainedEnterpriseShellAndAgentRuntimeView(t *testing.
 		t.Fatal(err)
 	}
 	index := string(indexBytes)
-	for _, marker := range []string{`content="light"`, `href="/styles.css?v=20260812-clawbot"`, `id="authGate"`, `src="/app.js?v=20260812-clawbot"`} {
+	for _, marker := range []string{`content="light"`, `href="/styles.css?v=20260812-clawbot"`, `id="authGate"`, `src="/ui-utils.mjs?v=20260829-accessibility"`} {
 		if !strings.Contains(index, marker) {
 			t.Fatalf("enterprise shell is incomplete: missing %q", marker)
 		}
@@ -209,7 +209,7 @@ func TestFrontendUsesResponsiveFullscreenPanorama(t *testing.T) {
 	script := string(scriptBytes)
 	for _, marker := range []string{
 		`document.body.classList.toggle("panorama-mode", route === "panorama")`,
-		`if (route === "panorama") return renderPanorama(main);`,
+		`if (route === "panorama") rendered = renderPanorama(main);`,
 		`<section class="panorama-screen panorama-screen-v2 panorama-screen-v3">`,
 	} {
 		if !strings.Contains(script, marker) {
@@ -290,8 +290,11 @@ func TestFrontendLocksFindingActionsAfterApproval(t *testing.T) {
 	if strings.Contains(script, "data-change-action=\"complete\"") {
 		t.Fatal("manual completion action must not be rendered")
 	}
-	if !strings.Contains(script, `api("/api/passport/verify"`) || !strings.Contains(script, `check_revocation: true`) {
-		t.Fatal("CI passport verification must include revocation checking")
+	if strings.Contains(script, `api("/api/passport/verify"`) || strings.Contains(script, `check_revocation: true`) {
+		t.Fatal("frontend must not call the removed passport verification contract")
+	}
+	if !strings.Contains(script, `POST /api/gate/verify`) || !strings.Contains(script, `POST /api/gate/consume`) {
+		t.Fatal("frontend must describe the implemented deployment gate endpoints")
 	}
 	if !strings.Contains(script, "${escapeHTML(initials(item.submitter_name))}") {
 		t.Fatal("avatar text inserted into HTML must be escaped")

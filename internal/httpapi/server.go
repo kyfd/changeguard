@@ -19,14 +19,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/auth"
-	"github.com/liufengxi/dbguard/internal/buildinfo"
-	"github.com/liufengxi/dbguard/internal/integration"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/observability"
-	"github.com/liufengxi/dbguard/internal/report"
-	"github.com/liufengxi/dbguard/internal/service"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/auth"
+	"github.com/kyfd/changeguard/internal/buildinfo"
+	"github.com/kyfd/changeguard/internal/integration"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/observability"
+	"github.com/kyfd/changeguard/internal/report"
+	"github.com/kyfd/changeguard/internal/service"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 //go:embed web/*
@@ -246,6 +246,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "dbguard_outbox_events{status=%q} %d\n", "pending", summary.PendingEvents)
 	_, _ = fmt.Fprintf(w, "dbguard_outbox_events{status=%q} %d\n", "processing", summary.ProcessingEvents)
 	_, _ = fmt.Fprintf(w, "dbguard_outbox_events{status=%q} %d\n", "dead", summary.DeadEvents)
+	oldestPendingSeconds := 0.0
+	if summary.OldestPendingAt != nil {
+		oldestPendingSeconds = time.Since(*summary.OldestPendingAt).Seconds()
+		if oldestPendingSeconds < 0 {
+			oldestPendingSeconds = 0
+		}
+	}
+	_, _ = fmt.Fprintln(w, "# HELP dbguard_outbox_oldest_pending_age_seconds Age of the oldest pending Outbox event.")
+	_, _ = fmt.Fprintln(w, "# TYPE dbguard_outbox_oldest_pending_age_seconds gauge")
+	_, _ = fmt.Fprintf(w, "dbguard_outbox_oldest_pending_age_seconds %.0f\n", oldestPendingSeconds)
 	for _, collector := range s.collectors {
 		if collector != nil {
 			collector.WritePrometheus(w)
@@ -785,6 +795,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if !ready {
 		status = http.StatusServiceUnavailable
 	}
+	s.metrics.SetReadiness(ready)
 	writeJSON(w, status, map[string]any{"status": map[bool]string{true: "ok", false: "degraded"}[ready], "checks": checks, "build": buildinfo.Current(), "time": time.Now()})
 }
 
@@ -1039,6 +1050,52 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 		changes, err := s.service.ChangesFor(actorID(r))
 		if err != nil {
 			writeServiceError(w, err)
+			return
+		}
+		if r.URL.Query().Has("page") || r.URL.Query().Has("page_size") || r.URL.Query().Has("cursor") {
+			pageSize := 50
+			if raw := strings.TrimSpace(r.URL.Query().Get("page_size")); raw != "" {
+				parsed, parseErr := strconv.Atoi(raw)
+				if parseErr != nil || parsed < 1 || parsed > 200 {
+					writeError(w, http.StatusBadRequest, "page_size 必须是 1 到 200 的整数")
+					return
+				}
+				pageSize = parsed
+			}
+			start := 0
+			if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
+				found := false
+				for index, item := range changes {
+					if item.ID == raw {
+						start = index + 1
+						found = true
+						break
+					}
+				}
+				if !found {
+					writeError(w, http.StatusBadRequest, "cursor 无效或已过期")
+					return
+				}
+			} else if raw := strings.TrimSpace(r.URL.Query().Get("page")); raw != "" {
+				page, parseErr := strconv.Atoi(raw)
+				if parseErr != nil || page < 1 {
+					writeError(w, http.StatusBadRequest, "page 必须是正整数")
+					return
+				}
+				start = (page - 1) * pageSize
+			}
+			if start > len(changes) {
+				start = len(changes)
+			}
+			end := start + pageSize
+			if end > len(changes) {
+				end = len(changes)
+			}
+			nextCursor := ""
+			if end < len(changes) && end > start {
+				nextCursor = changes[end-1].ID
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": changes[start:end], "next_cursor": nextCursor, "has_more": end < len(changes), "total": len(changes)})
 			return
 		}
 		writeJSON(w, http.StatusOK, changes)

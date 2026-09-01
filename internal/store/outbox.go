@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func (s *Store) UpdateChangeWithOutbox(id string, update func(*model.ChangeRequest) error, event model.OutboxEvent, audits ...model.AuditEvent) (model.ChangeRequest, error) {

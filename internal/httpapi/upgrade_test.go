@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/liufengxi/dbguard/internal/auth"
-	"github.com/liufengxi/dbguard/internal/service"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/auth"
+	"github.com/kyfd/changeguard/internal/service"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 // 用临时升级目录隔离测试。

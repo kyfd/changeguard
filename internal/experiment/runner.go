@@ -3,6 +3,8 @@ package experiment
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -11,10 +13,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/liufengxi/dbguard/internal/changegate"
-	"github.com/liufengxi/dbguard/internal/checker"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/changegate"
+	"github.com/kyfd/changeguard/internal/checker"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 type Runner interface {
@@ -28,9 +30,52 @@ type HybridRunner struct {
 
 func NewFromEnvironment() Runner {
 	return &HybridRunner{
-		mode: strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_EXPERIMENT_MODE"))),
-		dsn:  strings.TrimSpace(os.Getenv("DBGUARD_SHADOW_DSN")),
+		mode: strings.ToLower(getenvBrand("EXPERIMENT_MODE")),
+		dsn:  getenvBrand("SHADOW_DSN"),
 	}
+}
+
+func getenvBrand(suffix string) string {
+	if value := strings.TrimSpace(os.Getenv("CHANGEGUARD_" + suffix)); value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv("DBGUARD_" + suffix))
+}
+
+func rejectShadowOnPrimaryDSN(shadow string, primaryCandidates ...string) error {
+	shadowHost, err := postgresHostPort(shadow)
+	if err != nil {
+		return fmt.Errorf("CHANGEGUARD_SHADOW_DSN 无效: %w", err)
+	}
+	for _, primary := range primaryCandidates {
+		if strings.TrimSpace(primary) == "" {
+			continue
+		}
+		primaryHost, err := postgresHostPort(primary)
+		if err != nil {
+			return fmt.Errorf("CHANGEGUARD_PRIMARY_DSN 无效: %w", err)
+		}
+		if strings.EqualFold(shadowHost, primaryHost) {
+			return fmt.Errorf("影子库 DSN 与主库指向同一 host:port（%s），已拒绝连接", shadowHost)
+		}
+	}
+	return nil
+}
+
+func postgresHostPort(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("must be a postgres URL")
+	}
+	host := parsed.Hostname()
+	port := parsed.Port()
+	if port == "" {
+		port = "5432"
+	}
+	if host == "" {
+		return "", fmt.Errorf("missing host")
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 func (r *HybridRunner) Run(ctx context.Context, change model.ChangeRequest) model.ExperimentReport {
@@ -42,7 +87,10 @@ func (r *HybridRunner) Run(ctx context.Context, change model.ChangeRequest) mode
 	defer cancel()
 	if r.mode == "postgres" {
 		if r.dsn == "" {
-			return failedReport("POSTGRES", started, fmt.Errorf("已配置 PostgreSQL 影子验证，但 DBGUARD_SHADOW_DSN 为空"))
+			return failedReport("POSTGRES", started, fmt.Errorf("已配置 PostgreSQL 影子验证，但 CHANGEGUARD_SHADOW_DSN 为空"))
+		}
+		if err := rejectShadowOnPrimaryDSN(r.dsn, getenvBrand("PRIMARY_DSN")); err != nil {
+			return failedReport("POSTGRES", started, err)
 		}
 		return runPostgres(runCtx, r.dsn, change)
 	}

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/liufengxi/dbguard/internal/audit"
-	"github.com/liufengxi/dbguard/internal/changegate"
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/audit"
+	"github.com/kyfd/changeguard/internal/changegate"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 const (
@@ -29,9 +29,21 @@ CREATE TABLE IF NOT EXISTS changeguard_changes (
   id text PRIMARY KEY,
   organization_id text NOT NULL,
   version bigint NOT NULL,
+  status text NOT NULL DEFAULT '',
+  application_id text NOT NULL DEFAULT '',
+  artifact_sha256 text NOT NULL DEFAULT '',
+  created_at timestamptz,
+  updated_at timestamptz,
   payload jsonb NOT NULL
 );
+ALTER TABLE changeguard_changes ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT '';
+ALTER TABLE changeguard_changes ADD COLUMN IF NOT EXISTS application_id text NOT NULL DEFAULT '';
+ALTER TABLE changeguard_changes ADD COLUMN IF NOT EXISTS artifact_sha256 text NOT NULL DEFAULT '';
+ALTER TABLE changeguard_changes ADD COLUMN IF NOT EXISTS created_at timestamptz;
+ALTER TABLE changeguard_changes ADD COLUMN IF NOT EXISTS updated_at timestamptz;
 CREATE INDEX IF NOT EXISTS changeguard_changes_org_idx ON changeguard_changes (organization_id);
+CREATE INDEX IF NOT EXISTS changeguard_changes_org_created_idx ON changeguard_changes (organization_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS changeguard_changes_org_application_status_idx ON changeguard_changes (organization_id, application_id, status);
 CREATE TABLE IF NOT EXISTS changeguard_outbox (
   id text PRIMARY KEY,
   organization_id text NOT NULL,
@@ -61,13 +73,28 @@ CREATE INDEX IF NOT EXISTS changeguard_passports_change_idx ON changeguard_passp
 CREATE TABLE IF NOT EXISTS changeguard_audit_events (
   organization_id text NOT NULL,
   id text NOT NULL,
+  sequence bigint,
   created_at timestamptz NOT NULL,
   hash text NOT NULL,
   prev_hash text NOT NULL DEFAULT '',
   payload jsonb NOT NULL,
   PRIMARY KEY (organization_id, id)
 );
-CREATE INDEX IF NOT EXISTS changeguard_audit_chain_idx ON changeguard_audit_events (organization_id, created_at, id);
+ALTER TABLE changeguard_audit_events ADD COLUMN IF NOT EXISTS sequence bigint;
+CREATE UNIQUE INDEX IF NOT EXISTS changeguard_audit_sequence_idx ON changeguard_audit_events (organization_id, sequence) WHERE sequence IS NOT NULL;
+CREATE INDEX IF NOT EXISTS changeguard_audit_chain_idx ON changeguard_audit_events (organization_id, sequence, created_at, id);
+CREATE TABLE IF NOT EXISTS changeguard_core_authority (
+  name text PRIMARY KEY,
+  phase text NOT NULL,
+  source_version bigint NOT NULL DEFAULT 0,
+  changes_count bigint NOT NULL DEFAULT 0,
+  passports_count bigint NOT NULL DEFAULT 0,
+  audits_count bigint NOT NULL DEFAULT 0,
+  verified_at timestamptz,
+  activated_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (phase IN ('BACKFILLED','VERIFIED','AUTHORITATIVE'))
+);
 CREATE TABLE IF NOT EXISTS changeguard_idempotency_records (
   organization_id text NOT NULL,
   actor_id text NOT NULL,
@@ -99,7 +126,7 @@ SET payload = jsonb_set(
           END
           ORDER BY ordinal
         )
-        FROM jsonb_array_elements(COALESCE(payload->'passports', '[]'::jsonb)) WITH ORDINALITY AS passports(item, ordinal)
+        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'passports')='array' THEN payload->'passports' ELSE '[]'::jsonb END) WITH ORDINALITY AS passports(item, ordinal)
       ), '[]'::jsonb),
       true
     ),
@@ -107,7 +134,7 @@ SET payload = jsonb_set(
     updated_at = now()
 WHERE id = 1 AND EXISTS (
   SELECT 1
-  FROM jsonb_array_elements(COALESCE(payload->'passports', '[]'::jsonb)) item
+  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload->'passports')='array' THEN payload->'passports' ELSE '[]'::jsonb END) item
   WHERE item->>'status' = 'ACTIVE' AND (item->>'expires_at')::timestamptz <= now()
 );
 `
@@ -120,13 +147,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS changeguard_passports_one_active_idx
 const postgresNormalizedBackfill = `
 INSERT INTO changeguard_changes(id, organization_id, version, payload)
 SELECT item->>'id', item->>'organization_id', COALESCE(NULLIF(item->>'version','')::bigint, 0), item
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'changes','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'changes')='array' THEN s.payload->'changes' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO changeguard_outbox(id, organization_id, aggregate_id, event_type, status, next_attempt_at, locked_until, lease_generation, updated_at, payload)
 SELECT item->>'id', item->>'organization_id', item->>'aggregate_id', item->>'event_type', item->>'status',
        COALESCE(NULLIF(item->>'next_attempt_at','')::timestamptz, now()), NULLIF(item->>'locked_until','')::timestamptz,
        COALESCE(NULLIF(item->>'lease_generation','')::bigint,0), COALESCE(NULLIF(item->>'updated_at','')::timestamptz,now()), item
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'outbox','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'outbox')='array' THEN s.payload->'outbox' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO changeguard_passports(id, organization_id, change_id, token_sha256, status, expires_at, issued_at, payload)
 SELECT item->>'id', item->>'organization_id', item->>'change_id', item->>'token_sha256',
@@ -134,16 +161,16 @@ SELECT item->>'id', item->>'organization_id', item->>'change_id', item->>'token_
        (item->>'expires_at')::timestamptz, (item->>'issued_at')::timestamptz,
        CASE WHEN item->>'status' = 'ACTIVE' AND (item->>'expires_at')::timestamptz <= now()
             THEN jsonb_set(item, '{status}', '"EXPIRED"'::jsonb, true) ELSE item END
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'passports','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'passports')='array' THEN s.payload->'passports' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO changeguard_audit_events(organization_id,id,created_at,hash,prev_hash,payload)
 SELECT item->>'organization_id', item->>'id', (item->>'created_at')::timestamptz, COALESCE(item->>'hash',''), COALESCE(item->>'prev_hash',''), item
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'audits','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'audits')='array' THEN s.payload->'audits' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (organization_id,id) DO NOTHING;
 INSERT INTO changeguard_idempotency_records(organization_id,actor_id,operation,resource,idempotency_key,request_digest,status,updated_at,payload)
 SELECT item->>'organization_id', item->>'actor_id', item->>'operation', item->>'resource', item->>'key', item->>'request_digest', item->>'status',
        COALESCE(NULLIF(item->>'updated_at','')::timestamptz,now()), item
-FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.payload->'idempotency_records','[]'::jsonb)) item WHERE s.id=1
+FROM dbguard_state s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.payload->'idempotency_records')='array' THEN s.payload->'idempotency_records' ELSE '[]'::jsonb END) item WHERE s.id=1
 ON CONFLICT (organization_id,actor_id,operation,resource,idempotency_key) DO NOTHING;
 INSERT INTO changeguard_normalization_migrations(name) VALUES ('core-v1') ON CONFLICT (name) DO NOTHING;
 `
@@ -173,68 +200,67 @@ func (b *postgresBackend) migrateNormalized(ctx context.Context) error {
 }
 
 func syncNormalizedState(ctx context.Context, tx pgx.Tx, data state) error {
-	// Keep the partial unique index aligned with natural expiry before replacing
-	// either the normalized projection or its legacy witness payload.
 	materializeExpiredPassports(&data, time.Now().UTC())
-	// The legacy row and normalized projection are replaced in the same transaction.
-	// A failed projection therefore rolls back the legacy CAS update as well.
-	if _, err := tx.Exec(ctx, "DELETE FROM changeguard_changes"); err != nil {
-		return err
-	}
 	for _, item := range data.Changes {
 		payload, err := json.Marshal(item)
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, "INSERT INTO changeguard_changes(id,organization_id,version,payload) VALUES($1,$2,$3,$4)", item.ID, item.OrganizationID, item.Version, payload); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO changeguard_changes(id,organization_id,version,status,application_id,artifact_sha256,created_at,updated_at,payload)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT (id) DO UPDATE SET organization_id=EXCLUDED.organization_id,version=EXCLUDED.version,status=EXCLUDED.status,
+			application_id=EXCLUDED.application_id,artifact_sha256=EXCLUDED.artifact_sha256,created_at=EXCLUDED.created_at,
+			updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload
+			WHERE changeguard_changes.version <= EXCLUDED.version`, item.ID, item.OrganizationID, item.Version, item.Status, item.ApplicationID, item.ArtifactSHA256, item.CreatedAt, item.UpdatedAt, payload); err != nil {
 			return err
 		}
-	}
-	if _, err := tx.Exec(ctx, "DELETE FROM changeguard_outbox"); err != nil {
-		return err
 	}
 	for _, item := range data.Outbox {
 		payload, err := json.Marshal(item)
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, "INSERT INTO changeguard_outbox(id,organization_id,aggregate_id,event_type,status,next_attempt_at,locked_until,lease_generation,updated_at,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", item.ID, item.OrganizationID, item.AggregateID, item.EventType, item.Status, item.NextAttemptAt, item.LockedUntil, item.LeaseGeneration, item.UpdatedAt, payload); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO changeguard_outbox(id,organization_id,aggregate_id,event_type,status,next_attempt_at,locked_until,lease_generation,updated_at,payload)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			ON CONFLICT (id) DO UPDATE SET organization_id=EXCLUDED.organization_id,aggregate_id=EXCLUDED.aggregate_id,event_type=EXCLUDED.event_type,
+			status=EXCLUDED.status,next_attempt_at=EXCLUDED.next_attempt_at,locked_until=EXCLUDED.locked_until,
+			lease_generation=EXCLUDED.lease_generation,updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload
+			WHERE changeguard_outbox.lease_generation <= EXCLUDED.lease_generation AND changeguard_outbox.updated_at <= EXCLUDED.updated_at`, item.ID, item.OrganizationID, item.AggregateID, item.EventType, item.Status, item.NextAttemptAt, item.LockedUntil, item.LeaseGeneration, item.UpdatedAt, payload); err != nil {
 			return err
 		}
-	}
-	if _, err := tx.Exec(ctx, "DELETE FROM changeguard_passports"); err != nil {
-		return err
 	}
 	for _, item := range data.Passports {
 		payload, err := json.Marshal(item)
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, "INSERT INTO changeguard_passports(id,organization_id,change_id,token_sha256,status,expires_at,issued_at,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", item.ID, item.OrganizationID, item.ChangeID, item.TokenSHA256Stored, item.Status, item.ExpiresAt, item.IssuedAt, payload); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO changeguard_passports(id,organization_id,change_id,token_sha256,status,expires_at,issued_at,payload)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+			ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,payload=EXCLUDED.payload
+			WHERE changeguard_passports.status='ACTIVE' OR changeguard_passports.status=EXCLUDED.status`, item.ID, item.OrganizationID, item.ChangeID, item.TokenSHA256Stored, item.Status, item.ExpiresAt, item.IssuedAt, payload); err != nil {
 			return err
 		}
-	}
-	if _, err := tx.Exec(ctx, "DELETE FROM changeguard_audit_events"); err != nil {
-		return err
 	}
 	for _, item := range data.Audits {
 		payload, err := json.Marshal(item)
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, "INSERT INTO changeguard_audit_events(organization_id,id,created_at,hash,prev_hash,payload) VALUES($1,$2,$3,$4,$5,$6)", item.OrganizationID, item.ID, item.CreatedAt, item.Hash, item.PrevHash, payload); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO changeguard_audit_events(organization_id,id,sequence,created_at,hash,prev_hash,payload)
+			VALUES($1,$2,(SELECT COALESCE(MAX(sequence),0)+1 FROM changeguard_audit_events WHERE organization_id=$1),$3,$4,$5,$6)
+			ON CONFLICT (organization_id,id) DO NOTHING`, item.OrganizationID, item.ID, item.CreatedAt, item.Hash, item.PrevHash, payload); err != nil {
 			return err
 		}
-	}
-	if _, err := tx.Exec(ctx, "DELETE FROM changeguard_idempotency_records"); err != nil {
-		return err
 	}
 	for _, item := range data.IdempotencyRecords {
 		payload, err := json.Marshal(item)
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(ctx, "INSERT INTO changeguard_idempotency_records(organization_id,actor_id,operation,resource,idempotency_key,request_digest,status,updated_at,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", item.OrganizationID, item.ActorID, item.Operation, item.Resource, item.Key, item.RequestDigest, item.Status, item.UpdatedAt, payload); err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO changeguard_idempotency_records(organization_id,actor_id,operation,resource,idempotency_key,request_digest,status,updated_at,payload)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT (organization_id,actor_id,operation,resource,idempotency_key) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at,payload=EXCLUDED.payload
+			WHERE changeguard_idempotency_records.updated_at <= EXCLUDED.updated_at`, item.OrganizationID, item.ActorID, item.Operation, item.Resource, item.Key, item.RequestDigest, item.Status, item.UpdatedAt, payload); err != nil {
 			return err
 		}
 	}
@@ -401,6 +427,8 @@ func (b *postgresBackend) completeIdempotency(ctx context.Context, claim model.I
 		item.ResponseRef = responseRef
 		item.UpdatedAt = now
 		item.CompletedAt = &now
+		expiresAt := now.Add(72 * time.Hour)
+		item.ExpiresAt = &expiresAt
 		encoded, err := json.Marshal(*item)
 		if err != nil {
 			return model.IdempotencyRecord{}, nil, 0, err
@@ -552,11 +580,7 @@ func (b *postgresBackend) appendAudit(ctx context.Context, event model.AuditEven
 		return model.AuditEvent{}, nil, 0, err
 	}
 	data.Audits = append(data.Audits, linked)
-	encoded, err := json.Marshal(linked)
-	if err != nil {
-		return model.AuditEvent{}, nil, 0, err
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO changeguard_audit_events(organization_id,id,created_at,hash,prev_hash,payload) VALUES($1,$2,$3,$4,$5,$6)`, linked.OrganizationID, linked.ID, linked.CreatedAt, linked.Hash, linked.PrevHash, encoded); err != nil {
+	if err = insertAuditRow(ctx, tx, linked); err != nil {
 		return model.AuditEvent{}, nil, 0, err
 	}
 	payload, newVersion, err := persistLegacyWitness(ctx, tx, data, version)
@@ -716,7 +740,8 @@ func insertAuditRow(ctx context.Context, tx pgx.Tx, event model.AuditEvent) erro
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO changeguard_audit_events(organization_id,id,created_at,hash,prev_hash,payload) VALUES($1,$2,$3,$4,$5,$6)`, event.OrganizationID, event.ID, event.CreatedAt, event.Hash, event.PrevHash, encoded)
+	_, err = tx.Exec(ctx, `INSERT INTO changeguard_audit_events(organization_id,id,sequence,created_at,hash,prev_hash,payload)
+		VALUES($1,$2,(SELECT COALESCE(MAX(sequence),0)+1 FROM changeguard_audit_events WHERE organization_id=$1),$3,$4,$5,$6)`, event.OrganizationID, event.ID, event.CreatedAt, event.Hash, event.PrevHash, encoded)
 	return err
 }
 

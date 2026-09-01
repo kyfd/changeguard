@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/agent"
+	"github.com/kyfd/changeguard/internal/agent"
 )
 
 func main() {

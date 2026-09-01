@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func trendsAt(day int, hour int) time.Time {

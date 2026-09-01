@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["main", "master", "v3.0"]
   pull_request:
 
 permissions:
@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23.x"
+          go-version: "1.26.x"
           cache: true
 
       - uses: actions/setup-node@v4
@@ -46,8 +46,7 @@ jobs:
 
       - name: Check frontend JavaScript syntax
         run: |
-          node --check internal/httpapi/web/api-adapter.js
-          node --check internal/httpapi/web/app.js
+          for file in internal/httpapi/web/*.js; do node --check "$file"; done
 
       - name: Lock and verify the complete Go module graph
         run: |
@@ -66,3 +65,142 @@ jobs:
 
       - name: Build container image
         run: docker build -t changeguard:ci .
+
+  integration:
+    name: PostgreSQL and Redis integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dbguard
+          POSTGRES_PASSWORD: dbguard-ci-password
+          POSTGRES_DB: dbguard_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dbguard -d dbguard_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DBGUARD_TEST_POSTGRES_DSN: postgres://dbguard:dbguard-ci-password@127.0.0.1:5432/dbguard_test?sslmode=disable
+      DBGUARD_REDIS_TEST_URL: redis://127.0.0.1:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Require integration environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${DBGUARD_TEST_POSTGRES_DSN:-}" || { echo "::error::DBGUARD_TEST_POSTGRES_DSN is required"; exit 1; }
+          test -n "${DBGUARD_REDIS_TEST_URL:-}" || { echo "::error::DBGUARD_REDIS_TEST_URL is required"; exit 1; }
+          pg_isready -d "$DBGUARD_TEST_POSTGRES_DSN"
+          timeout 5 bash -c '</dev/tcp/127.0.0.1/6379'
+
+      - name: Run PostgreSQL integration contract
+        run: go test ./internal/store -run '^TestPostgresNormalizedMultiInstance$' -count=1 -v
+
+      - name: Run Redis integration contract
+        run: go test ./internal/auth -run '^TestRedisSessionRepositoryIntegration$' -count=1 -v
+
+  e2e:
+    name: Chromium CONFIG and SQL golden path
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Playwright test dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Start isolated E2E stack
+        env:
+          COMPOSE_PROJECT_NAME: changeguard-e2e
+        run: docker compose -f compose.e2e.yml up --build --wait --wait-timeout 180
+
+      - name: Run golden browser flow
+        run: npm run test:e2e
+
+      - name: Capture E2E service logs
+        if: failure()
+        env:
+          COMPOSE_PROJECT_NAME: changeguard-e2e
+        run: docker compose -f compose.e2e.yml logs --no-color
+
+      - name: Stop isolated E2E stack
+        if: always()
+        env:
+          COMPOSE_PROJECT_NAME: changeguard-e2e
+        run: docker compose -f compose.e2e.yml down --volumes --remove-orphans
+
+  supply-chain:
+    name: Vulnerabilities and SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+
+      - name: Scan reachable Go vulnerabilities
+        run: govulncheck ./...
+
+      - name: Build scan target
+        run: docker build -t changeguard:supply-chain .
+
+      - name: Generate CycloneDX SBOM
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: changeguard:supply-chain
+          format: cyclonedx
+          output: changeguard.cdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: changeguard-cyclonedx-sbom
+          path: changeguard.cdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Scan container vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: changeguard:supply-chain
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"

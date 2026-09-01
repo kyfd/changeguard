@@ -3,7 +3,7 @@ package service
 import (
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 // trendZone 趋势月口径与审计月报一致：UTC+8 自然月。

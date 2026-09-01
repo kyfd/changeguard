@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func TestPrepareArtifactHashesOriginalBytesBeforeRedaction(t *testing.T) {

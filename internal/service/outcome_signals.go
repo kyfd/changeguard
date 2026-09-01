@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/changegate"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/changegate"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 func (s *Service) OutcomeSignalsFor(actorID string, limit int) ([]model.OutcomeSignal, error) {

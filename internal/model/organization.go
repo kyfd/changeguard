@@ -16,16 +16,27 @@ const (
 )
 
 type Organization struct {
-	ID                          string    `json:"id"`
-	Name                        string    `json:"name"`
-	Slug                        string    `json:"slug"`
-	EmailDomains                []string  `json:"email_domains,omitempty"`
-	AllowDomainJoin             bool      `json:"allow_domain_join"`
-	SSOEnforced                 bool      `json:"sso_enforced"`
-	ApplicationAccessControlled bool      `json:"application_access_controlled"`
-	CreatedBy                   string    `json:"created_by"`
-	CreatedAt                   time.Time `json:"created_at"`
-	UpdatedAt                   time.Time `json:"updated_at"`
+	ID                          string          `json:"id"`
+	Name                        string          `json:"name"`
+	Slug                        string          `json:"slug"`
+	EmailDomains                []string        `json:"email_domains,omitempty"`
+	AllowDomainJoin             bool            `json:"allow_domain_join"`
+	SSOEnforced                 bool            `json:"sso_enforced"`
+	ApplicationAccessControlled bool            `json:"application_access_controlled"`
+	Retention                   RetentionPolicy `json:"retention"`
+	CreatedBy                   string          `json:"created_by"`
+	CreatedAt                   time.Time       `json:"created_at"`
+	UpdatedAt                   time.Time       `json:"updated_at"`
+}
+
+type RetentionPolicy struct {
+	AuditDays             int  `json:"audit_days"`
+	IntegrationEventDays  int  `json:"integration_event_days"`
+	OutcomeSignalDays     int  `json:"outcome_signal_days"`
+	IdempotencyHours      int  `json:"idempotency_hours"`
+	AgentConversationDays int  `json:"agent_conversation_days"`
+	ArtifactBodyDays      int  `json:"artifact_body_days"`
+	LegalHold             bool `json:"legal_hold"`
 }
 
 type OrganizationInvite struct {

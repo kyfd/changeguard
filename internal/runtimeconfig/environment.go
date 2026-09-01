@@ -27,6 +27,7 @@ type Summary struct {
 	Explicit    bool
 	Profile     string
 	Assignments int
+	LegacyKeys  []string
 }
 
 type assignment struct {
@@ -39,11 +40,7 @@ type assignment struct {
 // malformed assignments, missing files and conflicting inherited overrides all
 // fail closed. The default local .env remains optional for developer workflows.
 func Load() (Summary, error) {
-	path := strings.TrimSpace(os.Getenv("DBGUARD_ENV_FILE"))
-	explicit := path != ""
-	if path == "" {
-		path = ".env"
-	}
+	path, explicit := envFilePath()
 
 	assignments, err := readEnvironmentFile(path)
 	if err != nil {
@@ -65,17 +62,19 @@ func Load() (Summary, error) {
 		}
 	}
 
-	profile := strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_ENV_PROFILE")))
-	if profile == "" {
-		profile = ProfileDevelopment
+	legacyKeys, err := applyBrandAliases()
+	if err != nil {
+		return Summary{}, err
 	}
+
+	profile := profileName()
 	if profile == ProfileProduction && !explicit {
-		return Summary{}, errors.New("production profile requires an explicit DBGUARD_ENV_FILE")
+		return Summary{}, errors.New("production profile requires an explicit CHANGEGUARD_ENV_FILE (legacy DBGUARD_ENV_FILE is still accepted)")
 	}
 	if err := ValidateProfile(profile); err != nil {
 		return Summary{}, err
 	}
-	return Summary{Path: path, Explicit: explicit, Profile: profile, Assignments: len(assignments)}, nil
+	return Summary{Path: path, Explicit: explicit, Profile: profile, Assignments: len(assignments), LegacyKeys: legacyKeys}, nil
 }
 
 func readEnvironmentFile(path string) (map[string]assignment, error) {
@@ -154,7 +153,7 @@ func ValidateProfile(profile string) error {
 	case ProfileProduction:
 		return validateProductionEnvironment()
 	default:
-		return fmt.Errorf("unsupported DBGUARD_ENV_PROFILE %q", profile)
+		return fmt.Errorf("unsupported CHANGEGUARD_ENV_PROFILE %q", profile)
 	}
 }
 
@@ -214,6 +213,9 @@ func validateProductionEnvironment() error {
 		return err
 	}
 	if err := requireURL("DBGUARD_SHADOW_DSN", "postgres", "postgresql"); err != nil {
+		return err
+	}
+	if err := rejectShadowOnPrimary(); err != nil {
 		return err
 	}
 	if err := requireSecret("DBGUARD_PASSPORT_HMAC_SECRET", 32); err != nil {

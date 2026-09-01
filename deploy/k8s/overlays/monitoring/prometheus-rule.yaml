@@ -1,0 +1,89 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: dbguard-core
+  namespace: dbguard
+  labels:
+    app: dbguard
+spec:
+  groups:
+    - name: dbguard-sre
+      interval: 30s
+      rules:
+        - alert: ChangeGuardReadinessFailed
+          expr: min_over_time(dbguard_readiness[5m]) == 0
+          for: 5m
+          labels:
+            severity: critical
+            service: changeguard-core
+          annotations:
+            summary: ChangeGuard readiness is failing
+            description: The latest readiness checks report an unavailable store or session backend.
+        - alert: ChangeGuardHTTP5xxRateHigh
+          expr: |
+            sum(rate(dbguard_http_requests_total{status=~"5.."}[5m]))
+              /
+            clamp_min(sum(rate(dbguard_http_requests_total[5m])), 0.001) > 0.05
+          for: 10m
+          labels:
+            severity: critical
+            service: changeguard-core
+          annotations:
+            summary: ChangeGuard HTTP 5xx rate exceeds 5 percent
+            description: More than 5 percent of requests returned server errors for ten minutes.
+        - alert: ChangeGuardHTTPP95LatencyHigh
+          expr: |
+            histogram_quantile(0.95,
+              sum by (le) (rate(dbguard_http_request_duration_seconds_bucket{route!~"/metrics|/health/.*"}[5m]))) > 1
+          for: 15m
+          labels:
+            severity: warning
+            service: changeguard-core
+          annotations:
+            summary: ChangeGuard P95 latency exceeds one second
+            description: The application request P95 has remained above one second for fifteen minutes.
+        - alert: ChangeGuardOutboxOldestPendingHigh
+          expr: dbguard_outbox_oldest_pending_age_seconds > 900
+          for: 10m
+          labels:
+            severity: critical
+            service: changeguard-core
+          annotations:
+            summary: ChangeGuard Outbox processing is delayed
+            description: The oldest pending Outbox event is more than fifteen minutes old.
+        - alert: ChangeGuardOutboxDeadEvents
+          expr: dbguard_outbox_events{status="dead"} > 0
+          for: 5m
+          labels:
+            severity: critical
+            service: changeguard-core
+          annotations:
+            summary: ChangeGuard has dead Outbox events
+            description: One or more Outbox events exhausted retry handling and need operator action.
+        - alert: ChangeGuardDBPoolSaturation
+          expr: dbguard_db_pool_acquired_connections / clamp_min(dbguard_db_pool_max_connections, 1) > 0.85
+          for: 10m
+          labels:
+            severity: warning
+            service: changeguard-core
+          annotations:
+            summary: ChangeGuard database pool is saturated
+            description: More than 85 percent of PostgreSQL pool connections are acquired.
+        - alert: ChangeGuardDBPoolAcquireWaitHigh
+          expr: rate(dbguard_db_pool_empty_acquire_total[5m]) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+            service: changeguard-core
+          annotations:
+            summary: ChangeGuard database pool acquisition is waiting
+            description: Requests are repeatedly waiting for an available PostgreSQL connection.
+        - alert: ChangeGuardMetricsAbsent
+          expr: absent(dbguard_build_info)
+          for: 10m
+          labels:
+            severity: critical
+            service: changeguard-core
+          annotations:
+            summary: ChangeGuard metrics are absent
+            description: Prometheus has not received ChangeGuard application metrics for ten minutes.

@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 // 启发式检测变更内容中的 prompt 注入尝试。

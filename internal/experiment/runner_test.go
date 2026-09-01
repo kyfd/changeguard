@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/liufengxi/dbguard/internal/model"
+	"github.com/kyfd/changeguard/internal/model"
 )
 
 func TestValidateExperimentSQLRejectsTransactionEscape(t *testing.T) {
@@ -66,8 +66,17 @@ func TestNormalizeShadowSQLKeepsProductionConcurrentIntentOutsideTransaction(t *
 func TestPostgresModeWithoutDSNFailsClosed(t *testing.T) {
 	runner := &HybridRunner{mode: "postgres"}
 	report := runner.Run(context.Background(), model.ChangeRequest{SQL: "SELECT 1;", RollbackSQL: "SELECT 1;"})
-	if report.Status != "FAILED" || !strings.Contains(report.ExecutionError, "DBGUARD_SHADOW_DSN") {
+	if report.Status != "FAILED" || !strings.Contains(report.ExecutionError, "CHANGEGUARD_SHADOW_DSN") {
 		t.Fatalf("postgres mode must fail when DSN is missing: %+v", report)
+	}
+}
+
+func TestPostgresModeRejectsShadowOnPrimaryHost(t *testing.T) {
+	t.Setenv("CHANGEGUARD_PRIMARY_DSN", "postgres://app:secret@127.0.0.1:5432/prod")
+	runner := &HybridRunner{mode: "postgres", dsn: "postgres://shadow:secret@127.0.0.1:5432/shadow"}
+	report := runner.Run(context.Background(), model.ChangeRequest{SQL: "SELECT 1;", RollbackSQL: "SELECT 1;"})
+	if report.Status != "FAILED" || !strings.Contains(report.ExecutionError, "同一 host:port") {
+		t.Fatalf("shadow DSN on the primary host must fail closed: %+v", report)
 	}
 }
 

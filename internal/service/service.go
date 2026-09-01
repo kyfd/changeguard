@@ -12,14 +12,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/liufengxi/dbguard/internal/agent"
-	"github.com/liufengxi/dbguard/internal/changegate"
-	"github.com/liufengxi/dbguard/internal/checker"
-	"github.com/liufengxi/dbguard/internal/conflict"
-	"github.com/liufengxi/dbguard/internal/experiment"
-	"github.com/liufengxi/dbguard/internal/model"
-	"github.com/liufengxi/dbguard/internal/report"
-	"github.com/liufengxi/dbguard/internal/store"
+	"github.com/kyfd/changeguard/internal/agent"
+	"github.com/kyfd/changeguard/internal/changegate"
+	"github.com/kyfd/changeguard/internal/checker"
+	"github.com/kyfd/changeguard/internal/conflict"
+	"github.com/kyfd/changeguard/internal/experiment"
+	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/report"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 var (
@@ -1902,7 +1902,8 @@ func governanceOutcomesForEvidence(changes []model.ChangeRequest, integrationEve
 	now = now.UTC()
 	windowStart := now.Add(-time.Duration(windowDays) * 24 * time.Hour)
 	result := model.GovernanceOutcomeSummary{
-		WindowDays: windowDays, WindowStartedAt: windowStart, GeneratedAt: now, Scope: scope,
+		WindowDays: windowDays, WindowStartedAt: windowStart, GeneratedAt: now,
+		DefinitionVersion: "governance-outcomes-v3", SourceWatermark: now, Scope: scope,
 	}
 	eligibleChanges := make(map[string]bool)
 	var checkRuns, artifactEvidence, rollbackPlans, successMetrics int

@@ -26,4 +26,5 @@ type IdempotencyRecord struct {
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
 	CompletedAt      *time.Time      `json:"completed_at,omitempty"`
+	ExpiresAt        *time.Time      `json:"expires_at,omitempty"`
 }
