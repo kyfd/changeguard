@@ -513,6 +513,20 @@ type GovernanceOutcomeDataQuality struct {
 	MissingSignals            []string `json:"missing_signals"`
 }
 
+// GovernanceTrendMonth 治理趋势的按月聚合，月口径为 UTC+8 自然月（与审计月报一致）。
+// 比率字段在无样本时为 -1，前端据此显示为"—"。
+type GovernanceTrendMonth struct {
+	Month         string  `json:"month"`          // 2026-08
+	Submitted     int     `json:"submitted"`      // 当月创建的变更单
+	Completed     int     `json:"completed"`      // 已闭环
+	Rejected      int     `json:"rejected"`       // 审批拒绝（被拦下）
+	InFlight      int     `json:"in_flight"`      // 仍在推进中
+	HighRisk      int     `json:"high_risk"`      // 其中高危
+	RejectionRate float64 `json:"rejection_rate"` // 已定局（完成+拒绝）中的拒绝占比
+	HighRiskRate  float64 `json:"high_risk_rate"` // 提交量中的高危占比
+	ApprovalHours float64 `json:"approval_hours"` // 提交→审批定论的平均小时数
+}
+
 type GovernanceOutcomeSummary struct {
 	WindowDays           int                          `json:"window_days"`
 	WindowStartedAt      time.Time                    `json:"window_started_at"`

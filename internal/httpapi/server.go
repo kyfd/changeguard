@@ -99,6 +99,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/config/status", s.handleConfigStatus)
 	mux.HandleFunc("/api/dashboard", s.handleDashboard)
 	mux.HandleFunc("/api/governance/outcomes", s.handleGovernanceOutcomes)
+	mux.HandleFunc("/api/governance/trends", s.handleGovernanceTrends)
 	mux.HandleFunc("/api/apps", s.handleApps)
 	mux.HandleFunc("/api/apps/", s.handleApp)
 	mux.HandleFunc("/api/users", s.handleUsers)
@@ -836,6 +837,29 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, value)
+}
+
+// handleGovernanceTrends 最近 N 个自然月（UTC+8）的治理趋势聚合。
+func (s *Server) handleGovernanceTrends(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	months := 6
+	if raw := strings.TrimSpace(r.URL.Query().Get("months")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 24 {
+			writeError(w, http.StatusBadRequest, "months 必须是 1 到 24 的整数")
+			return
+		}
+		months = parsed
+	}
+	trends, err := s.service.GovernanceTrendsFor(actorID(r), months)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, trends)
 }
 
 func (s *Server) handleGovernanceOutcomes(w http.ResponseWriter, r *http.Request) {
