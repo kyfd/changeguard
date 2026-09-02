@@ -60,7 +60,7 @@ Developer / Git Repository
 
 ## 本地运行
 
-需要 Go 1.25+。默认用文件存储和内存会话，不用装 PostgreSQL / Redis。
+最低 Go **1.25**。CI 在 1.25 和 1.26 上跑测试。默认用文件存储和内存会话，不用装 PostgreSQL / Redis。
 
 ```powershell
 $env:CHANGEGUARD_AUTH_MODE = "local"
@@ -145,6 +145,7 @@ changeguard-gate consume -manifest .changeguard.json -consumer <pipeline-id>
 ```powershell
 go test ./...
 go vet ./...
+npm test
 node --check internal/httpapi/web/api-adapter.js
 node --check internal/httpapi/web/app.js
 ```
@@ -167,6 +168,7 @@ tests/                      Playwright 黄金路径
 
 ## 文档
 
+- [Changelog](CHANGELOG.md)
 - [威胁模型](docs/threat-model.md)
 - [演示剧本](docs/demo-playbook.md)
 - [产品说明](docs/product.md)
