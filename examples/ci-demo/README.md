@@ -1,54 +1,55 @@
-# ChangeGuard 真实流水线演示
+# CI Gate 示例
 
-这个目录模拟一个订单服务的生产变更：同一次发布同时包含 SQL 索引、Kubernetes Deployment 和回滚方案。它用于演示“审批对象”和“流水线实际文件”之间的摘要绑定，不需要连接真实生产环境。
+本目录包含一次订单服务变更所需的 SQL、回滚 SQL、Kubernetes Deployment、`.changeguard.json`、GitLab CI 配置和 Jenkinsfile。它用于验证变更单与 CI 工作区文件的摘要绑定，不会连接或修改生产环境。
 
-## 1. 本地启动
+## 启动 ChangeGuard
 
-在仓库根目录执行：
+在仓库根目录执行 Compose 演示：
 
 ```powershell
 Copy-Item .env.example .env
-# 将 .env 中的 DBGUARD_PASSPORT_HMAC_SECRET 替换为至少 32 字节随机值
+# 将 CHANGEGUARD_PASSPORT_HMAC_SECRET 替换为至少 32 字节随机值，并修改 CHANGEGUARD_POSTGRES_PASSWORD
 docker compose --env-file .env up --build
 ```
 
-使用 `developer@example.com` / `Demo1234` 登录。审核和签发通行证使用 `reviewer@example.com` / `Demo1234`。
+登录账号：
 
-## 2. 计算实际制品摘要
+- 开发者：`developer@example.com` / `Demo1234`
+- 审核人：`reviewer@example.com` / `Demo1234`
 
-从仓库根目录构建 Gate CLI，并在本目录执行：
+这些账号只用于本地演示。
+
+## 构建 CLI 并计算摘要
+
+在仓库根目录执行：
 
 ```powershell
 go build -o changeguard-gate.exe .\cmd\changeguard-gate
 .\changeguard-gate.exe digest -manifest .\examples\ci-demo\.changeguard.json
 ```
 
-输出的 `artifact_sha256` 来自 SQL、回滚 SQL、Kubernetes 文件和清单元数据的原始字节。仅修改一个空格，摘要也会变化。
+输出的 `artifact_sha256` 包含迁移 SQL、回滚 SQL、Kubernetes 文件、回滚方案和清单元数据。文件字节、顺序或元数据变化都会改变摘要。
 
-## 3. 完成一次 Gate
+## 验证和消费通行证
 
-在 ChangeGuard 页面创建或选择对应变更，完成检查、整改、独立复核和审批后复制一次性通行证：
+在页面中创建与 `.changeguard.json` 内容一致的变更，完成静态检查、SQL 影子验证和独立审批，然后由审批人签发一次性通行证。
 
 ```powershell
 $env:CHANGEGUARD_URL = "http://localhost:8080"
 $env:CHANGEGUARD_TOKEN = "cg1..."
 $env:CI_JOB_ID = "demo-pipeline-20260804"
-.\changeguard-gate.exe verify -manifest .\examples\ci-demo\.changeguard.json
-.\changeguard-gate.exe consume -manifest .\examples\ci-demo\.changeguard.json
+.\changeguard-gate.exe verify -manifest .\examples\ci-demo\.changeguard.json -consumer $env:CI_JOB_ID
+.\changeguard-gate.exe consume -manifest .\examples\ci-demo\.changeguard.json -consumer $env:CI_JOB_ID
 ```
 
-`consume` 成功后，通行证立即失效；重复执行会被拒绝。修改 `deploy/orders.yaml` 的镜像标签后再执行 `verify`，会因为摘要不一致而阻断。
+`consume` 成功后 Token 立即失效，再次消费会被拒绝。若修改 `examples/ci-demo/deploy/orders.yaml` 后运行 `verify`，Gate 应返回摘要不一致且不消费 Token。
 
-## 4. 接入真实 CI
+`COMPLETED` 只表示通行证已消费；本示例没有执行生产部署，也不证明服务健康。
 
-- GitLab：将 `.gitlab-ci.changeguard.yml` 合并到项目流水线，配置 `CHANGEGUARD_URL`、`CHANGEGUARD_TOKEN` 和 `CHANGEGUARD_CHANGE_ID` 为 protected/masked 变量。
-- Jenkins：将 `Jenkinsfile` 复制到流水线项目，安装 HTTP Request Plugin，并在 Credentials 中创建 `changeguard-url` 与 `changeguard-webhook-token`。
-- 真实流水线状态会进入“流水线”页面和审计链；流水线成功不会绕过人工审批。
+## 接入 CI
 
-## 5. 面试演示顺序
+- GitLab：参考 `.gitlab-ci.changeguard.yml`，把 `CHANGEGUARD_URL`、`CHANGEGUARD_TOKEN` 和 `CHANGEGUARD_CHANGE_ID` 配置为 protected/masked 变量。
+- Jenkins：参考 `Jenkinsfile`，在 Credentials 中保存 URL、通行证和 webhook token，并限制到对应 Folder 或 Job。
+- Gate CLI 非零退出时必须停止流水线。`consume` 应紧邻实际部署步骤。
 
-1. 展示同一变更单里的 SQL、Kubernetes 文件和回滚方案。
-2. 修改镜像标签，说明 Gate 从真实文件重算摘要并阻断制品替换。
-3. 恢复文件并完成审批，执行 `verify` 后 `consume`。
-4. 重复消费一次，展示一次性凭证和审计事件。
-5. 打开冲突雷达，说明相同资源、上下游依赖和发布窗口重叠如何形成可解释冲突。
+完整参数、安全要求和 webhook 说明见 [CI/CD 接入指南](../../docs/ci-integration.md)。

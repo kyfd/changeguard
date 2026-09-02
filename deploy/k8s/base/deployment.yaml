@@ -58,9 +58,9 @@ spec:
               containerPort: 8080
           envFrom:
             - configMapRef:
-                name: dbguard-config
+                name: changeguard-config
             - secretRef:
-                name: dbguard-secrets
+                name: changeguard-secrets
           readinessProbe:
             httpGet:
               path: /health/ready

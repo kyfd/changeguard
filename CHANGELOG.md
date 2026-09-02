@@ -35,7 +35,7 @@ CI 拉起 Postgres 16 和 Redis 7.4，分别跑：
 
 缺 DSN 或服务不健康时失败，不再 `SKIP`。
 
-### E2E 黄金链路
+### 端到端测试
 
 `compose.e2e.yml` + Playwright：开发账号登录、提交 CONFIG+SQL 变更、静态检查、PostgreSQL 影子验证通过、进入待审批。见 `tests/e2e/config-sql-golden.spec.js`。
 
@@ -54,7 +54,7 @@ CI 拉起 Postgres 16 和 Redis 7.4，分别跑：
 
 ### 未验证
 
-- consume 成功但实际部署失败的闭环
+- consume 成功后的实际部署结果尚未进入 Gate 状态
 - 影子库误连同集群非主库
 - 审计日志被 DBA 删表
 - 前端完整权限矩阵和可达性

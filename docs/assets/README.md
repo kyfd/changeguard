@@ -1,6 +1,6 @@
 # README 截图
 
-这些 WebP 从仓库里已有的 UI 核对照片压缩得到，供 README 第一屏使用。原图仍在 `docs/ui-redesign-2026-08-01/` 和 `docs/ui-layout-verification-2026-07-31/`。
+这些 WebP 是 README 使用的当前界面截图。只在界面发生对应变化时更新，并尽量保持文件尺寸较小。
 
 | 文件 | 画面 |
 | --- | --- |
