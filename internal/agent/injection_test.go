@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -39,7 +40,7 @@ func TestDetectTextInjectionForAgentQuestion(t *testing.T) {
 }
 
 func TestScanSQLDetectsDropTable(t *testing.T) {
-	out, err := toolScanSQL(nil, model.ChangeRequest{SQL: "DROP TABLE users;"}, nil, nil)
+	out, err := toolScanSQL(context.TODO(), model.ChangeRequest{SQL: "DROP TABLE users;"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
