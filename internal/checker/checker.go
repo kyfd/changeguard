@@ -113,7 +113,6 @@ var (
 	lockTimeoutPattern      = regexp.MustCompile(`(?is)\b(SET(\s+LOCAL)?\s+lock_timeout\b|lock_timeout\s*=)`)
 	statementTimeoutPattern = regexp.MustCompile(`(?is)\b(SET(\s+LOCAL)?\s+statement_timeout\b|statement_timeout\s*=)`)
 	ddlVerbPattern          = regexp.MustCompile(`(?is)^\s*(CREATE|ALTER|DROP|REINDEX|CLUSTER|VACUUM|TRUNCATE)\b`)
-	dmlVerbPattern          = regexp.MustCompile(`(?is)^\s*(UPDATE|DELETE|INSERT|MERGE)\b`)
 	whereClausePattern      = regexp.MustCompile(`(?is)\bWHERE\b`)
 )
 
@@ -214,9 +213,6 @@ func CheckWithPolicies(sql, rollbackSQL string, context Context, policies []mode
 			if strings.Contains(upper, "ALTER TABLE") || strings.Contains(upper, "DROP INDEX") || strings.Contains(upper, "CREATE INDEX") {
 				needsLockTimeout = true
 			}
-		}
-		if dmlVerbPattern.MatchString(statement) && (isUpdate || isDelete) {
-			// already counted bulk DML above when applicable
 		}
 
 		for _, item := range compiled {
