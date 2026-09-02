@@ -1,6 +1,6 @@
 # PostgreSQL backup and isolated restore
 
-The production overlay installs a daily PostgreSQL custom-format dump job. Before applying it, create `dbguard-backup-secrets` outside Git (External Secrets, Sealed Secrets, or your secret manager) with `DBGUARD_BACKUP_DSN`. Use a dedicated database role with `CONNECT` and read-only access to the ChangeGuard database. The example secret is a schema-only placeholder and is not included by Kustomize.
+The production overlay installs a daily PostgreSQL custom-format dump job. Before applying it, create `changeguard-backup-secrets` outside Git (External Secrets, Sealed Secrets, or your secret manager) with `CHANGEGUARD_BACKUP_DSN`. Use a dedicated database role with `CONNECT` and read-only access to the ChangeGuard database. The example secret is a schema-only placeholder and is not included by Kustomize.
 
 The default PVC is cluster-local operational protection, not the only durable copy. Configure the storage class or an external replication/export process so encrypted backup objects are retained in a separate failure domain. Restrict backup-volume access, monitor CronJob failures, and periodically verify checksums and restoration.
 
@@ -18,7 +18,7 @@ Never restore over the production database as a test.
    pg_restore --dbname="$ISOLATED_RESTORE_DSN" --no-owner --no-acl --exit-on-error /backup/dbguard-YYYYMMDDTHHMMSSZ.dump
    ```
 
-5. Run integrity checks: connect with a read-only account, confirm expected schema/table counts, inspect `dbguard_state`, and start a temporary ChangeGuard instance with workers disabled (`DBGUARD_WORKERS=0`) against only the isolated database. Exercise `/health/ready` and a representative read-only API flow.
+5. Run integrity checks: connect with a read-only account, confirm expected schema/table counts, inspect `dbguard_state`, and start a temporary ChangeGuard instance with workers disabled (`CHANGEGUARD_WORKERS=0`) against only the isolated database. Exercise `/health/ready` and a representative read-only API flow.
 6. Record dump timestamp, checksum, PostgreSQL versions, restore duration, validation results, RPO/RTO, and operator. Treat restored data as production-sensitive.
 7. Delete the temporary application, credentials, database, namespace, and any copied dump after the drill's approved retention window. Confirm deletion through the infrastructure and secret-manager audit logs.
 

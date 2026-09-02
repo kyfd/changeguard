@@ -1,7 +1,7 @@
 name: Release
 
-# 触发：推送 v* 标签（如 v2026.08.10.1）
-# 产出：changeguard-<version>.tar.gz 升级包，发布到 GitHub Releases
+# 触发：推送标准语义版本标签（如 v3.0.1）
+# 产出：changeguard-<version>.tar.gz 升级包和 CycloneDX SBOM，发布到 GitHub Releases
 #
 # 升级包结构（与 deploy/production/changeguard-core-install.sh 兼容）：
 #   changeguard-<version>.tar.gz
@@ -48,13 +48,49 @@ jobs:
 
       - name: Derive version from tag
         id: version
+        shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          VERSION="$(printf '%s' "$TAG" | tr '.' '-')"
-          RELEASE_ID="changeguard-${VERSION}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          SEMVER="${GITHUB_REF_NAME#v}"
+          [[ "$GITHUB_REF_NAME" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || {
+            echo "::error::Release tag must use vX.Y.Z format"
+            exit 1
+          }
+          ASSET_VERSION="$(printf '%s' "$SEMVER" | tr '.' '-')"
+          RELEASE_ID="changeguard-${ASSET_VERSION}"
+          echo "semver=$SEMVER" >> "$GITHUB_OUTPUT"
+          echo "asset_version=$ASSET_VERSION" >> "$GITHUB_OUTPUT"
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare release notes from changelog
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 - "$RELEASE_TAG" "$RUNNER_TEMP/release-notes.md" <<'PY'
+          import re
+          import sys
+
+          tag, output = sys.argv[1], sys.argv[2]
+          version = tag.removeprefix("v")
+          with open("CHANGELOG.md", encoding="utf-8") as handle:
+              changelog = handle.read()
+          match = re.search(
+              rf"^## {re.escape(version)}(?:\s+-[^\n]*)?\n(?P<body>.*?)(?=^## |\Z)",
+              changelog,
+              flags=re.MULTILINE | re.DOTALL,
+          )
+          if not match:
+              raise SystemExit(f"CHANGELOG.md has no section for {version}")
+          body = match.group("body").strip()
+          for heading in ("### 升级", "### 已知限制"):
+              if heading not in body:
+                  raise SystemExit(f"CHANGELOG.md section {version} is missing {heading}")
+          notes = f"## {tag}\n\n{body}\n"
+          with open(output, "w", encoding="utf-8", newline="\n") as handle:
+              handle.write(notes)
+          PY
 
       - name: Verify formatting and frontend JavaScript syntax
         run: |
@@ -79,7 +115,7 @@ jobs:
         env:
           VERIFICATION_PATH: ${{ runner.temp }}/verification.json
         run: |
-          python3 - "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.tag }}" "$VERIFICATION_PATH" <<'PY'
+          python3 - "${{ steps.version.outputs.asset_version }}" "${{ steps.version.outputs.tag }}" "$VERIFICATION_PATH" <<'PY'
           import json, subprocess, sys
           version, tag, output = sys.argv[1], sys.argv[2], sys.argv[3]
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -113,7 +149,7 @@ jobs:
           go mod download all
           go list -m all >/dev/null
           sudo apt-get update -qq && sudo apt-get install -y -qq git 2>/dev/null || true
-          CHANGEGUARD_VERSION="${{ steps.version.outputs.version }}" \
+          CHANGEGUARD_VERSION="${{ steps.version.outputs.asset_version }}" \
           CHANGEGUARD_RELEASE_TAG="${{ steps.version.outputs.tag }}" \
           CHANGEGUARD_RELEASE_DIRECTORY="${{ runner.temp }}/release" \
           CHANGEGUARD_VERIFICATION_EVIDENCE="${{ runner.temp }}/verification.json" \
@@ -128,25 +164,42 @@ jobs:
           PKG_DIR="${{ runner.temp }}/package/${RELEASE_ID}"
           mkdir -p "$PKG_DIR"
           cp "$RELEASE_DIR"/{dbguard,SHA256SUMS,release-manifest.json,verification.json,source.bundle,source.tar.gz,modules.txt,module-verify.txt,binary-buildinfo.txt,bundle-verify.txt,build.log} "$PKG_DIR/"
-          tar -czf "${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz" -C "${{ runner.temp }}/package" "$RELEASE_ID"
-          sha256sum "${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz" > "${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz.sha256"
-          echo "archive_sha256=$(awk '{print $1}' "${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz.sha256")" >> "$GITHUB_OUTPUT"
+          tar -czf "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz" -C "${{ runner.temp }}/package" "$RELEASE_ID"
+          sha256sum "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz" > "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz.sha256"
+          echo "archive_sha256=$(awk '{print $1}' "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz.sha256")" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release CycloneDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: cyclonedx
+          output: ${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.cdx.json
+
+      - name: Verify release assets
+        run: |
+          set -euo pipefail
+          test -s "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz"
+          test -s "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz.sha256"
+          test -s "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.cdx.json"
+          python3 - "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.cdx.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              sbom = json.load(handle)
+          if sbom.get("bomFormat") != "CycloneDX":
+              raise SystemExit("release SBOM is not CycloneDX")
+          PY
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: ChangeGuard ${{ steps.version.outputs.version }}
-          body: |
-            ## ChangeGuard ${{ steps.version.outputs.version }}
-
-            服务器升级：
-            ```bash
-            sudo bash deploy/upgrade/changeguard-upgrade.sh \
-              --version ${{ steps.version.outputs.version }} \
-              --archive-url https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/changeguard-${{ steps.version.outputs.version }}.tar.gz \
-              --expected-sha256 ${{ steps.archive.outputs.archive_sha256 }}
-            ```
+          name: ${{ steps.version.outputs.tag }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          fail_on_unmatched_files: true
           files: |
-            ${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz
-            ${{ runner.temp }}/changeguard-${{ steps.version.outputs.version }}.tar.gz.sha256
+            ${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz
+            ${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz.sha256
+            ${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.cdx.json

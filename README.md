@@ -1,42 +1,48 @@
 # ChangeGuard
 
-生产变更门禁。把 SQL、配置和 Kubernetes 清单放进同一张变更单，跑规则检查和审批，再给 CI 发一次性通行证。通行证绑的是文件 SHA-256，审批后再改文件就会被拦住。
+ChangeGuard 是生产变更门禁。它把 SQL、应用配置和 Kubernetes 清单纳入同一套检查、审批和 CI 校验流程，并用绑定制品 SHA-256 的一次性通行证防止审批后替换文件。
 
-它不接生产库执行 SQL，也不接管 Git、Jenkins 或 Kubernetes。现有流水线前面加一层即可。
+ChangeGuard 不执行生产 SQL，也不接管 Git、CI/CD 或 Kubernetes。它只负责在现有部署步骤之前核对制品、审批和通行证。
 
 ```text
-Developer / Git Repository
+Developer / Git repository
           |
           v
-    Change Submission
+    Change submission
           |
           v
-  Normalize + Redact + Hash
+  Normalize + redact + hash
           |
      +----+----+
      |         |
- Static Rules  PostgreSQL Shadow Validation
-     |         |
+ Static rules  PostgreSQL shadow validation
+     |         |  (SQL only)
      +----+----+
           |
        Review
           |
        Approval
           |
- One-time Passport
+  One-time passport
           |
-    CI Verify / Consume
+    CI verify / consume
           |
        Deployment
 ```
 
-继续往下看之前，先看这三个问题：
+三个关键约束：
 
-1. **如何防止审批后文件被修改？** 通行证绑定制品 SHA-256、环境和规则版本。CI 对着真实文件重算摘要，对不上就拒绝部署。
-2. **如何防止通行证重放或重复使用？** Token 只出现一次，只存 SHA-256。消费是一次条件更新：100 个并发消费者里只能有一个成功。
-3. **如何证明 SQL 和回滚实际被验证过？** 只有隔离的 PostgreSQL 影子库真正跑过，才能把证据写成已验证。演示模式明确标成 `NOT_RUN` / `DEMO_ONLY`，不能签发生产通行证。
+1. 通行证绑定制品 SHA-256、目标环境和规则版本。CI 对工作区中的真实文件重新计算摘要，不一致就拒绝。
+2. 通行证明文只返回一次，服务端只保存摘要。消费使用原子状态更新，并发请求只能有一个成功。
+3. SQL 只有在隔离的 PostgreSQL 影子库中完成迁移和回滚验证后，才具备运行验证证据。并发索引语句会去掉 `CONCURRENTLY`，以影子等价形式在事务中执行；生产 SQL 保持原样。`NOT_RUN` 和 `DEMO_ONLY` 不能用于生产签发。
 
-完整论证见 [威胁模型](docs/threat-model.md)。五分钟走查见 [演示剧本](docs/demo-playbook.md)。
+详细边界见[威胁模型](docs/threat-model.md)。
+
+## 适用场景
+
+ChangeGuard 适合已经使用 Git 和 CI/CD、需要把人工审批绑定到最终部署制品，并愿意自托管 PostgreSQL、Redis 与隔离影子库的团队。它可以把 SQL、配置和 Kubernetes 变更放进同一套准入流程。
+
+如果你需要工具直接执行生产 SQL、操作 Kubernetes、替代完整 ITSM/发布编排平台，或只想要一个无状态命令行扫描器，ChangeGuard 并不合适。
 
 ## 界面
 
@@ -48,21 +54,23 @@ Developer / Git Repository
 
 ![风险全景](docs/assets/04-risk-panorama.webp)
 
-## 做什么
+## 支持的制品
 
-| 类型 | 输入 | 会拦什么 | 什么情况下能签发通行证 |
+| 类型 | 输入 | 典型阻断项 | 签发条件 |
 | --- | --- | --- | --- |
-| SQL | 执行 SQL、回滚 SQL、回滚方案 | 无条件 UPDATE/DELETE、危险 DDL、缺回滚、非并发索引 | 规则通过，并且在隔离的 PostgreSQL 影子库里真正跑过 SQL 和回滚 |
-| 配置 | YAML / JSON / ENV | 明文凭据、生产 debug、关掉鉴权或 TLS 校验 | 当前规则没有未处理的阻断项 |
-| Kubernetes | Deployment / StatefulSet / Pod 等 | `latest`、privileged、提权、root、hostPath、缺资源或探针 | 当前规则没有未处理的阻断项 |
+| SQL | 迁移 SQL、回滚 SQL、回滚方案 | 无条件 UPDATE/DELETE、危险 DDL、缺少回滚、非并发索引 | 静态规则通过，并在隔离 PostgreSQL 中完成迁移与回滚验证；并发索引使用去掉 `CONCURRENTLY` 的影子等价形式 |
+| 配置 | YAML、JSON、ENV | 明文凭据、生产 debug、关闭鉴权或 TLS 校验 | 当前规则没有未处理的阻断项 |
+| Kubernetes | Deployment、StatefulSet、Pod 等 | `latest`、privileged、提权、root、hostPath、缺少资源限制或探针 | 当前规则没有未处理的阻断项 |
 
-没跑过的验证会标成 `NOT_RUN` / `DEMO_ONLY`，不能当生产证据。`COMPLETED` 只表示这张通行证已经用掉，不代表上线后一定正常。
+`COMPLETED` 只表示通行证已经消费，不表示部署成功或线上服务健康。
 
-## 本地运行
+## 最小本地演示
 
-最低 Go **1.25**。CI 在 1.25 和 1.26 上跑测试。默认用文件存储和内存会话，不用装 PostgreSQL / Redis。
+要求 Git 和 Go **1.25**。这个方式使用文件存储和内存会话，不需要 PostgreSQL 或 Redis；未配置影子库时，SQL 只能做静态检查。
 
 ```powershell
+git clone https://github.com/kyfd/changeguard.git
+Set-Location changeguard
 $env:CHANGEGUARD_AUTH_MODE = "local"
 $env:CHANGEGUARD_ENABLE_DEMO_ACCOUNTS = "true"
 $env:CHANGEGUARD_ENABLE_DEMO_DATA = "true"
@@ -70,75 +78,55 @@ $env:CHANGEGUARD_PASSPORT_HMAC_SECRET = "changeguard-local-demo-secret-32-bytes-
 go run ./cmd/dbguard
 ```
 
-打开 <http://localhost:8080>。HMAC secret 只给本地演示用，生产请换成随机值。旧的 `DBGUARD_*` 变量仍然有效，启动时会打印弃用警告，计划在 v4.0 删除。
+打开 <http://localhost:8080>，或请求 `http://localhost:8080/health/ready` 检查服务状态。按 `Ctrl+C` 停止。上面的 HMAC secret 仅用于本机演示。
 
-没配影子库时，配置和 Kubernetes 仍可走完检查、审批和通行证；SQL 只能做静态检查。要开影子验证：
-
-```powershell
-$env:CHANGEGUARD_EXPERIMENT_MODE = "postgres"
-$env:CHANGEGUARD_SHADOW_DSN = "postgres://runner:password@127.0.0.1:5432/changeguard_shadow?sslmode=disable"
-```
-
-影子库必须和生产隔离。如果影子 DSN 和主库 DSN 指向同一个 host:port，进程会直接拒绝连接。
-
-### 演示账号
-
-`CHANGEGUARD_ENABLE_DEMO_ACCOUNTS=true` 时才会创建，密码都是 `Demo1234`：
+演示账号只在 `CHANGEGUARD_ENABLE_DEMO_ACCOUNTS=true` 时创建，密码均为 `Demo1234`：
 
 | 邮箱 | 角色 |
 | --- | --- |
 | `developer@example.com` | 创建、提交、整改 |
 | `reviewer@example.com` | 复核、审批、签发通行证 |
-| `owner@example.com` | 管应用、成员、规则，以及高风险审批 |
+| `owner@example.com` | 管理应用、成员和规则，高风险审批 |
 
-生产环境关掉 `CHANGEGUARD_ENABLE_DEMO_ACCOUNTS` 和 `CHANGEGUARD_ENABLE_DEMO_DATA`。
+生产环境必须关闭演示账号和演示数据。关闭开关不会删除已经写入持久化存储的演示凭据；复用过演示数据的环境还需要显式删除这些账号，生产环境更适合使用全新的存储。
 
-### Docker Compose
+## Compose 演示
+
+Compose 会启动 PostgreSQL、Redis 和 PostgreSQL 影子库，适合验证外部存储与 SQL 影子执行。`docker-compose.yml` 仅用于本地演示，不是生产部署清单。
 
 ```powershell
 Copy-Item .env.example .env
-# 改掉 .env 里的 HMAC secret 和数据库密码
+# 修改 .env 中的 HMAC secret 和数据库密码
 docker compose up --build
 ```
 
-Compose 默认会起 PostgreSQL 影子库。带演示数据的端到端栈：
+服务就绪后访问 <http://localhost:8080>。停止并清理本地容器时运行 `docker compose down`。
+
+带预置演示数据的端到端环境：
 
 ```powershell
 docker compose -f compose.e2e.yml up --build
 ```
 
+影子库必须与生产隔离。影子 DSN 与主库 DSN 使用相同 host:port 时，服务会拒绝启动或执行验证。
+
 ## CI 接入
+
+构建 Gate CLI 并检查清单摘要：
 
 ```powershell
 go build -o changeguard-gate.exe ./cmd/changeguard-gate
-.\changeguard-gate.exe digest -manifest .changeguard.json
+.\changeguard-gate.exe digest -manifest .\examples\ci-demo\.changeguard.json
 ```
 
-流水线把 `CHANGEGUARD_URL` 和 `CHANGEGUARD_TOKEN` 放进 masked secret，然后：
+把 `CHANGEGUARD_URL` 和签发时得到的 `CHANGEGUARD_TOKEN` 配置为 CI masked/protected secret，然后在部署前执行：
 
 ```text
 changeguard-gate verify  -manifest .changeguard.json -consumer <pipeline-id>
 changeguard-gate consume -manifest .changeguard.json -consumer <pipeline-id>
 ```
 
-不要把 Token 写进仓库、请求体或构建日志。示例见 [CI/CD 接入](docs/ci-integration.md)，仓库里还有 [examples/ci-demo](examples/ci-demo)。
-
-## 实测
-
-数字来自 `go test` / `go test -bench`，方法就在仓库里。换机器请重跑，不要抄走当 SLA。
-
-| 场景 | 数据规模 | 本机结果 | 怎么测 |
-| --- | --- | --- | --- |
-| 并发消费同一张通行证 | 100 goroutine | 1 成功 / 99 拒绝，变更单原子标为 COMPLETED | `go test ./internal/store -run TestUsePassportConcurrentConsumeCompletesChangeOnce -count=1` |
-| Kubernetes 规则扫描 | 100 / 1,000 / 10,000 个 Deployment | 2.6 ms / 28.3 ms / 269 ms | `go test ./internal/checker -bench BenchmarkKubernetesRuleScan -benchmem` |
-
-测量环境、分配次数和未测项见 [docs/benchmarks.md](docs/benchmarks.md)。
-
-## 命名
-
-仓库、UI 和文档叫 ChangeGuard。Go module 是 `github.com/kyfd/changeguard`。服务入口暂时仍是 `./cmd/dbguard`，发布产物仍叫 `dbguard`，避免打断已有安装脚本。
-
-环境变量优先读 `CHANGEGUARD_*`。未设置时回退 `DBGUARD_*` 并告警。`DBGUARD_*` will be removed in v4.0.
+`consume` 必须紧邻生产部署步骤，任何非零退出码都应停止流水线。不要把 Token 写入仓库、请求体或构建日志。参见 [CI/CD 接入指南](docs/ci-integration.md)和 [CI 示例](examples/ci-demo/README.md)。
 
 ## 测试
 
@@ -150,34 +138,36 @@ node --check internal/httpapi/web/api-adapter.js
 node --check internal/httpapi/web/app.js
 ```
 
-CI 还会跑 race detector、PostgreSQL / Redis 集成契约、镜像构建，以及 Playwright 黄金路径（见 `compose.e2e.yml`）。
+CI 还运行 race detector、PostgreSQL/Redis 集成测试、镜像构建和 Playwright 浏览器测试。
+
+仓库包含可重复运行的并发消费测试和规则扫描 benchmark。测量方法、环境与未测项见 [benchmarks.md](docs/benchmarks.md)；这些结果不是生产 SLA。
 
 ## 目录
 
 ```text
-cmd/dbguard/                服务入口
-cmd/changeguard-gate/       CI 摘要、验签、消费
-cmd/changeguard-evidence/   证据包导出和离线校验
-cmd/changeguard-agent-eval/ 解释层离线评测
-internal/                   规则、审批、存储、HTTP 和内置页面
-deploy/                     Docker / Nginx / Kubernetes / 生产安装
-docs/                       产品、架构、威胁模型、API、部署
-examples/                   示例 SQL 和 CI 演示
-tests/                      Playwright 黄金路径
+cmd/dbguard/                 核心 HTTP 服务入口
+cmd/changeguard-gate/        CI 摘要、验签和消费客户端
+cmd/changeguard-evidence/    证据包导出和离线校验
+internal/                    规则、服务、存储、认证、HTTP 和内置页面
+deploy/                      Compose、Kubernetes 和生产运维资产
+docs/                        产品、架构、安全、接入与运维文档
+examples/                    示例制品和 CI 配置
 ```
+
+Go module 是 `github.com/kyfd/changeguard`。为兼容已有脚本，服务入口和发布产物仍使用 `dbguard` 名称。环境变量优先使用 `CHANGEGUARD_*`；旧的 `DBGUARD_*` 仍可用，但会产生弃用提示，计划在 v4.0 删除。
 
 ## 文档
 
-- [Changelog](CHANGELOG.md)
-- [威胁模型](docs/threat-model.md)
-- [演示剧本](docs/demo-playbook.md)
-- [产品说明](docs/product.md)
+从[文档索引](docs/README.md)开始，或直接查看：
+
+- [产品范围](docs/product.md)
 - [业务流程](docs/business-flow.md)
 - [系统架构](docs/architecture.md)
+- [威胁模型](docs/threat-model.md)
 - [HTTP API](docs/api.md)
 - [CI/CD 接入](docs/ci-integration.md)
 - [部署与运维](docs/enterprise-operations.md)
-- [v3.0 发布验收](docs/v3-release-acceptance.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 

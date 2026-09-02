@@ -41,16 +41,16 @@ spec:
                   umask 077
                   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
                   target="/backup/dbguard-${stamp}.dump"
-                  pg_dump --dbname="$DBGUARD_BACKUP_DSN" --format=custom --no-owner --no-acl --file="$target"
+                  pg_dump --dbname="$CHANGEGUARD_BACKUP_DSN" --format=custom --no-owner --no-acl --file="$target"
                   pg_restore --list "$target" >/dev/null
                   sha256sum "$target" >"${target}.sha256"
                   find /backup -type f -name 'dbguard-*' -mtime +14 -delete
               env:
-                - name: DBGUARD_BACKUP_DSN
+                - name: CHANGEGUARD_BACKUP_DSN
                   valueFrom:
                     secretKeyRef:
-                      name: dbguard-backup-secrets
-                      key: DBGUARD_BACKUP_DSN
+                      name: changeguard-backup-secrets
+                      key: CHANGEGUARD_BACKUP_DSN
               volumeMounts:
                 - name: backup
                   mountPath: /backup
