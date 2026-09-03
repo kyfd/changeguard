@@ -162,12 +162,14 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 		return model.GateResult{}, ErrPassportInvalid
 	}
 	switch passport.Status {
-	case model.PassportConsumed:
-		return model.GateResult{}, ErrPassportReplay
 	case model.PassportRevoked:
 		return model.GateResult{}, ErrPassportRevoked
 	case model.PassportExpired:
 		return model.GateResult{}, ErrPassportExpired
+	case model.PassportConsumed:
+		if !consume {
+			return model.GateResult{}, ErrPassportReplay
+		}
 	}
 	if passport.OrganizationID != claims.OrganizationID || passport.ChangeID != claims.ChangeID || passport.ArtifactSHA256 != claims.ArtifactSHA256 || passport.Environment != claims.Environment || passport.RuleSetVersion != claims.RuleSetVersion || passport.ApproverID != claims.ApproverID {
 		return model.GateResult{}, ErrPassportInvalid
@@ -177,7 +179,18 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 		return model.GateResult{}, ErrPassportInvalid
 	}
 	change, err := s.store.Change(passport.ChangeID)
-	if err != nil || change.OrganizationID != passport.OrganizationID || change.Status != model.StatusApproved || change.ArtifactSHA256 != passport.ArtifactSHA256 || change.Environment != passport.Environment || change.RuleSetVersion != passport.RuleSetVersion {
+	if err != nil {
+		return model.GateResult{}, ErrPassportInvalid
+	}
+	if change.OrganizationID != passport.OrganizationID || change.ArtifactSHA256 != passport.ArtifactSHA256 || change.Environment != passport.Environment || change.RuleSetVersion != passport.RuleSetVersion {
+		return model.GateResult{}, ErrPassportInvalid
+	}
+	replayCandidate := consume && passport.Status == model.PassportConsumed
+	if replayCandidate {
+		if change.Status != model.StatusCompleted {
+			return model.GateResult{}, ErrPassportInvalid
+		}
+	} else if change.Status != model.StatusApproved {
 		return model.GateResult{}, ErrPassportInvalid
 	}
 	if changegate.RuleSetVersion(s.store.PoliciesByOrganization(change.OrganizationID)) != passport.RuleSetVersion {
@@ -203,6 +216,8 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 		switch {
 		case errors.Is(err, store.ErrPassportExpired):
 			return model.GateResult{}, ErrPassportExpired
+		case errors.Is(err, store.ErrPassportReplay):
+			return model.GateResult{}, ErrPassportReplay
 		case errors.Is(err, store.ErrPassportInactive):
 			if consume {
 				return model.GateResult{}, ErrPassportReplay
@@ -214,14 +229,17 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 			return model.GateResult{}, err
 		}
 	}
+	replayed := consume && passport.Status == model.PassportConsumed
 	if !consume {
 		verifyAudit := auditPassport(audit(gateActor, passport.ChangeID, action, fmt.Sprintf("CI 验签通过：%s", passport.ID)), passport.ID)
 		verifyAudit.RequestDigest = input.ArtifactSHA256
 		_ = s.store.RecordAudit(verifyAudit)
-	} else if completed, changeErr := s.store.Change(passport.ChangeID); changeErr == nil {
-		s.publish(completed, "CI 通行证已消费，生产变更自动完成")
+	} else if !replayed {
+		if completed, changeErr := s.store.Change(passport.ChangeID); changeErr == nil {
+			s.publish(completed, "CI 通行证已消费，生产变更自动完成")
+		}
 	}
-	return model.GateResult{Allowed: true, Code: "GATE_ALLOWED", Reason: "制品摘要、环境、规则版本、审批人和有效期均匹配", Passport: &validated}, nil
+	return model.GateResult{Allowed: true, Code: "GATE_ALLOWED", Reason: "制品摘要、环境、规则版本、审批人和有效期均匹配", Passport: &validated, Replayed: replayed}, nil
 }
 
 func (s *Service) RevokePassport(changeID, passportID, actorID string) (model.Passport, error) {

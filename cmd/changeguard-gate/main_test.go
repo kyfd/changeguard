@@ -169,8 +169,11 @@ func TestGoldenConfigFlowBindsApprovalToActualCIFiles(t *testing.T) {
 	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: ciDigest.ArtifactSHA256, Environment: ciDigest.Environment, Consumer: "ci-consume"}, true); err != nil {
 		t.Fatalf("exact reviewed files must consume once: %v", err)
 	}
+	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: ciDigest.ArtifactSHA256, Environment: ciDigest.Environment, Consumer: "ci-consume"}, true); err != nil {
+		t.Fatalf("lost-response retry with the same consumer must succeed: %v", err)
+	}
 	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: ciDigest.ArtifactSHA256, Environment: ciDigest.Environment, Consumer: "ci-replay"}, true); !errors.Is(err, service.ErrPassportReplay) {
-		t.Fatalf("second consume must be rejected as replay, got %v", err)
+		t.Fatalf("second consume from a different consumer must be rejected as replay, got %v", err)
 	}
 	completed, err := svc.Change(change.ID)
 	if err != nil || completed.Status != model.StatusCompleted {

@@ -174,24 +174,39 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 		wg.Add(1)
 		go func(s *Store) {
 			defer wg.Done()
-			_, err := s.UsePassport(passport.ID, "token-hash", "ci", time.Now().UTC(), true, model.AuditEvent{OrganizationID: change.OrganizationID, ActorID: "ci", Action: "CONSUME"})
+			_, err := s.UsePassport(passport.ID, "token-hash", "ci", time.Now().UTC(), true, model.AuditEvent{OrganizationID: change.OrganizationID, ChangeID: change.ID, ActorID: "ci", Action: "CONSUME"})
 			consumes <- err
 		}(s)
 	}
 	wg.Wait()
 	close(consumes)
-	consumed, inactive := 0, 0
+	consumed, unexpected := 0, 0
 	for err := range consumes {
 		if err == nil {
 			consumed++
-		} else if errors.Is(err, ErrPassportInactive) {
-			inactive++
 		} else {
-			t.Fatalf("consume: %v", err)
+			unexpected++
+			t.Errorf("same-consumer consume: %v", err)
 		}
 	}
-	if consumed != 1 || inactive != 1 {
-		t.Fatalf("passport consumed=%d inactive=%d", consumed, inactive)
+	if consumed != 2 || unexpected != 0 {
+		t.Fatalf("two stores must replay one logical consume: consumed=%d unexpected=%d", consumed, unexpected)
+	}
+	replayed, err := first.Passport(passport.ID)
+	if err != nil || replayed.Status != model.PassportConsumed || replayed.ConsumedBy != "ci" {
+		t.Fatalf("postgres consume snapshot: %+v err=%v", replayed, err)
+	}
+	if _, err := first.UsePassport(passport.ID, "token-hash", "other-ci", time.Now().UTC(), true, model.AuditEvent{OrganizationID: change.OrganizationID, ChangeID: change.ID, ActorID: "other-ci", Action: "CONSUME"}); !errors.Is(err, ErrPassportReplay) {
+		t.Fatalf("different consumer must conflict across stores, got %v", err)
+	}
+	consumeAudits := 0
+	for _, event := range first.AuditsByChange(change.OrganizationID, change.ID) {
+		if event.Action == "PASSPORT_CONSUMED_AND_CHANGE_COMPLETED" {
+			consumeAudits++
+		}
+	}
+	if consumeAudits != 1 {
+		t.Fatalf("postgres replay must not write a second consume audit, got %d", consumeAudits)
 	}
 
 	// Concurrent append is serialized per organization and remains verifiable.

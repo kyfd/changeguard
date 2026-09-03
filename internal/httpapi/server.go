@@ -1380,6 +1380,9 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request, consume bool
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if consume && result.Replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

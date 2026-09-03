@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/kyfd/changeguard/internal/changegate"
@@ -16,6 +17,7 @@ var (
 	ErrPassportInactive      = errors.New("passport inactive")
 	ErrPassportTokenMismatch = errors.New("passport token mismatch")
 	ErrPassportChangeInvalid = errors.New("passport change is not approved")
+	ErrPassportReplay        = errors.New("passport already consumed by another consumer")
 )
 
 func (s *Store) CreatePassport(passport model.Passport, audit model.AuditEvent) error {
@@ -103,8 +105,8 @@ func (s *Store) PassportsByOrganization(organizationID string) []model.Passport 
 }
 
 // UsePassport validates state and token binding while holding the store lock.
-// consume=true performs the one-time state transition atomically, preventing
-// concurrent CI jobs from replaying the same authorization.
+// consume=true performs one logical consume. A later call with the same token
+// hash and consumer returns the first public snapshot without writing again.
 func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, consume bool, audit model.AuditEvent) (model.Passport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -129,6 +131,12 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 		}
 		if item.Status == model.PassportExpired {
 			return model.Passport{}, ErrPassportExpired
+		}
+		if consume && item.Status == model.PassportConsumed {
+			if sameConsumerReplay(*item, tokenSHA256, consumer) {
+				return publicPassport(*item, false), nil
+			}
+			return model.Passport{}, ErrPassportReplay
 		}
 		if item.Status != model.PassportActive {
 			return model.Passport{}, ErrPassportInactive
@@ -201,6 +209,19 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 		return publicPassport(*item, false), nil
 	}
 	return model.Passport{}, ErrNotFound
+}
+
+func sameConsumerReplay(item model.StoredPassport, tokenSHA256, consumer string) bool {
+	if item.Status != model.PassportConsumed {
+		return false
+	}
+	if strings.TrimSpace(item.ConsumedBy) == "" || strings.TrimSpace(consumer) == "" {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(item.TokenSHA256Stored), []byte(tokenSHA256)) != 1 {
+		return false
+	}
+	return item.ConsumedBy == consumer
 }
 
 func (s *Store) RevokePassport(organizationID, id, actorID string, at time.Time, audit model.AuditEvent) (model.Passport, error) {

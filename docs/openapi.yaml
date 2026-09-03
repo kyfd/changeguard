@@ -268,11 +268,11 @@ paths:
     post:
       tags: [Gate]
       operationId: consumeGate
-      description: Atomically verifies and consumes an active passport; replay is rejected.
+      description: Atomically verifies and consumes an active passport. The original consumer may retry a lost 200 and receive the first public snapshot with Idempotency-Replayed.
       security: [{bearerPassport: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GateRequest'}}}}
       responses:
-        '200': {description: Gate allowed and passport consumed, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}}, content: {application/json: {schema: {$ref: '#/components/schemas/GateResult'}}}}
+        '200': {description: Gate allowed and passport consumed, or same-consumer replay of the first consume, headers: {Cache-Control: {$ref: '#/components/headers/NoStore'}, Idempotency-Replayed: {$ref: '#/components/headers/IdempotencyReplayed'}}, content: {application/json: {schema: {$ref: '#/components/schemas/GateResult'}}}}
         default: {$ref: '#/components/responses/GateDenied'}
   /api/integrations/gitlab/webhook:
     post:
