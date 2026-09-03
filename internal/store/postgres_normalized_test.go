@@ -174,7 +174,7 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 		wg.Add(1)
 		go func(s *Store) {
 			defer wg.Done()
-			_, err := s.UsePassport(passport.ID, "token-hash", "ci", time.Now().UTC(), true, model.AuditEvent{OrganizationID: change.OrganizationID, ActorID: "ci", Action: "CONSUME"})
+			_, err := s.UsePassport(passport.ID, "token-hash", "ci", time.Now().UTC(), true, model.AuditEvent{OrganizationID: change.OrganizationID, ChangeID: change.ID, ActorID: "ci", Action: "CONSUME"})
 			consumes <- err
 		}(s)
 	}
@@ -196,7 +196,7 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 	if err != nil || replayed.Status != model.PassportConsumed || replayed.ConsumedBy != "ci" {
 		t.Fatalf("postgres consume snapshot: %+v err=%v", replayed, err)
 	}
-	if _, err := first.UsePassport(passport.ID, "token-hash", "other-ci", time.Now().UTC(), true, model.AuditEvent{OrganizationID: change.OrganizationID, ActorID: "other-ci", Action: "CONSUME"}); !errors.Is(err, ErrPassportReplay) {
+	if _, err := first.UsePassport(passport.ID, "token-hash", "other-ci", time.Now().UTC(), true, model.AuditEvent{OrganizationID: change.OrganizationID, ChangeID: change.ID, ActorID: "other-ci", Action: "CONSUME"}); !errors.Is(err, ErrPassportReplay) {
 		t.Fatalf("different consumer must conflict across stores, got %v", err)
 	}
 	consumeAudits := 0
