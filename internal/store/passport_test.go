@@ -89,8 +89,8 @@ func TestUsePassportConcurrentConsumeCompletesChangeOnce(t *testing.T) {
 	}
 	close(start)
 	wait.Wait()
-	if success.Load() != 1 || unexpected.Load() != 0 {
-		t.Fatalf("one consume must succeed: success=%d unexpected=%d", success.Load(), unexpected.Load())
+	if success.Load() != workers || unexpected.Load() != 0 {
+		t.Fatalf("same-consumer consume must replay as one logical success: success=%d unexpected=%d", success.Load(), unexpected.Load())
 	}
 	gotPassport, err := data.Passport(passport.ID)
 	if err != nil || gotPassport.Status != model.PassportConsumed {
@@ -102,6 +102,15 @@ func TestUsePassportConcurrentConsumeCompletesChangeOnce(t *testing.T) {
 	}
 	if len(gotChange.Timeline) == 0 || gotChange.Timeline[len(gotChange.Timeline)-1].Status != model.StatusCompleted {
 		t.Fatalf("completion timeline missing: %+v", gotChange.Timeline)
+	}
+	consumeAudits := 0
+	for _, event := range data.AuditsByChange(change.OrganizationID, change.ID) {
+		if event.Action == "PASSPORT_CONSUMED_AND_CHANGE_COMPLETED" {
+			consumeAudits++
+		}
+	}
+	if consumeAudits != 1 {
+		t.Fatalf("concurrent same-consumer consume must write one audit, got %d", consumeAudits)
 	}
 }
 
@@ -192,6 +201,49 @@ func TestUsePassportPersistsExpiryAndAudit(t *testing.T) {
 	}
 	if !foundAudit {
 		t.Fatal("passport expiry audit was not persisted")
+	}
+}
+
+func TestUsePassportSameConsumerReplayKeepsFirstSnapshot(t *testing.T) {
+	data := NewMemory()
+	now := time.Now().UTC()
+	change, passport := passportFixture(now, changegate.RuleSetVersion(data.PoliciesByOrganization("org_demo")))
+	if err := data.CreateChange(change, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_create_replay", ChangeID: change.ID, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := data.CreatePassport(passport, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_issue_replay", ChangeID: change.ID, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	firstAt := now.Add(time.Second)
+	first, err := data.UsePassport(passport.ID, passport.TokenSHA256, "ci-job", firstAt, true, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_first_consume", ChangeID: change.ID, CreatedAt: firstAt})
+	if err != nil || first.Status != model.PassportConsumed || first.ConsumedBy != "ci-job" || first.ConsumedAt == nil || !first.ConsumedAt.Equal(firstAt) {
+		t.Fatalf("first consume: %+v err=%v", first, err)
+	}
+	replay, err := data.UsePassport(passport.ID, passport.TokenSHA256, "ci-job", now.Add(2*time.Second), true, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_replay_consume", ChangeID: change.ID, CreatedAt: now.Add(2 * time.Second)})
+	if err != nil {
+		t.Fatalf("same consumer must replay first consume: %v", err)
+	}
+	if replay.Status != model.PassportConsumed || replay.ConsumedBy != "ci-job" || replay.ConsumedAt == nil || !replay.ConsumedAt.Equal(firstAt) {
+		t.Fatalf("replay mutated consume snapshot: first=%+v replay=%+v", first, replay)
+	}
+	if _, err := data.UsePassport(passport.ID, passport.TokenSHA256, "other-ci", now.Add(3*time.Second), true, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_other_consume", ChangeID: change.ID, CreatedAt: now.Add(3 * time.Second)}); !errors.Is(err, ErrPassportReplay) {
+		t.Fatalf("different consumer must conflict, got %v", err)
+	}
+	if _, err := data.UsePassport(passport.ID, passport.TokenSHA256, "   ", now.Add(4*time.Second), true, model.AuditEvent{OrganizationID: change.OrganizationID, ID: "audit_blank_consume", ChangeID: change.ID, CreatedAt: now.Add(4 * time.Second)}); !errors.Is(err, ErrPassportReplay) {
+		t.Fatalf("blank consumer must conflict, got %v", err)
+	}
+	consumeAudits := 0
+	for _, event := range data.AuditsByChange(change.OrganizationID, change.ID) {
+		if event.Action == "PASSPORT_CONSUMED_AND_CHANGE_COMPLETED" {
+			consumeAudits++
+		}
+	}
+	if consumeAudits != 1 {
+		t.Fatalf("replay must not write a second consume audit, got %d", consumeAudits)
+	}
+	gotChange, err := data.Change(change.ID)
+	if err != nil || gotChange.Status != model.StatusCompleted || gotChange.Version != 2 {
+		t.Fatalf("replay must not change completed snapshot: %+v err=%v", gotChange, err)
 	}
 }
 

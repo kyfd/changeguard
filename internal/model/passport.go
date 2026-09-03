@@ -71,4 +71,5 @@ type GateResult struct {
 	Code     string    `json:"code"`
 	Reason   string    `json:"reason"`
 	Passport *Passport `json:"passport,omitempty"`
+	Replayed bool      `json:"-"`
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+Gate `consume` 对原 consumer 幂等。丢失 HTTP 200 后，同一 Token、制品摘要、环境和 `consumer` 重试返回首次公开快照，状态码仍是 200，并带 `Idempotency-Replayed: true`。不同 consumer 继续返回 `409 PASSPORT_REPLAY`。不写第二次消费审计，也不改 `consumed_at`。详见 [ADR 0001](docs/adr/0001-idempotent-passport-consume.md)。
+
+`COMPLETED` 仍然只表示通行证已消费。
+
 ## 3.0.1 - 2026-09-02
 
 `main` 成为唯一开发主线。`v3.0.1` 从 `main` 的 annotated tag 构建。

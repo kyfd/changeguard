@@ -18,7 +18,7 @@ changeguard-gate consume
 - `verify` 对服务端状态执行只读检查，可在部署流水线较早阶段运行；
 - `consume` 原子校验绑定、将通行证置为 `CONSUMED`，并将变更置为 `COMPLETED`。
 
-`consume` 必须紧邻生产部署命令。`COMPLETED` 只表示 Gate 已使用，不表示后续部署成功。消费后部署失败时不能重放旧 Token，应记录失败并重新提交审批。
+`consume` 必须紧邻生产部署命令。`COMPLETED` 只表示 Gate 已使用，不表示后续部署成功。同一流水线在丢失 HTTP 200 后，可以用相同 Token、摘要、环境和 `consumer` 重试 `consume`；服务端返回首次消费快照，不会第二次消费。消费后部署失败时不能把 Token 交给另一条流水线，应记录失败并重新提交审批。
 
 ## CI 变量
 
@@ -275,11 +275,11 @@ POST /api/integrations/operations/webhook
 | `ENVIRONMENT_MISMATCH` | 停止；不能把其他环境的授权用于生产 |
 | `PASSPORT_INACTIVE` | 停止；检查规则变化或吊销状态，重新审批 |
 | `PASSPORT_EXPIRED` | 停止；由原审批人重新签发 |
-| `PASSPORT_REPLAY` | 停止并调查重复流水线或重试配置 |
+| `PASSPORT_REPLAY` | 停止并调查其他流水线是否已消费该通行证 |
 | `PASSPORT_UNAVAILABLE` | 停止；修复服务端签名配置 |
 | 5xx、超时、网络错误 | 失败关闭，不绕过 Gate |
 
-不要对 409 或 410 自动重试部署。网络错误可以重试只读 `verify`；`consume` 结果不明确时先查询通行证状态，不要盲目重复生产命令。
+不要对 409 或 410 自动重试部署。网络超时后，同一 `consumer` 可以重试 `consume` 以确认首次结果；HTTP 200 表示该通行证已由当前 consumer 消费，不表示可以再部署一次。不同 `consumer` 收到 `PASSPORT_REPLAY` 时必须停止。
 
 ## 构建 CLI
 

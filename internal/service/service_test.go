@@ -227,8 +227,24 @@ func TestWorkflowRequiresDifferentApprover(t *testing.T) {
 	if err != nil || !gate.Allowed {
 		t.Fatalf("CI should consume the passport: gate=%+v err=%v", gate, err)
 	}
+	replay, err := svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: change.ArtifactSHA256, Environment: change.Environment, Consumer: "test-ci"}, true)
+	if err != nil || !replay.Allowed || !replay.Replayed || replay.Passport == nil || replay.Passport.ConsumedBy != "test-ci" {
+		t.Fatalf("same consumer must replay first consume: gate=%+v err=%v", replay, err)
+	}
+	if gate.Passport == nil || replay.Passport.ConsumedAt == nil || gate.Passport.ConsumedAt == nil || !replay.Passport.ConsumedAt.Equal(*gate.Passport.ConsumedAt) {
+		t.Fatalf("replay mutated consume timestamps: first=%+v replay=%+v", gate.Passport, replay.Passport)
+	}
 	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: change.ArtifactSHA256, Environment: change.Environment, Consumer: "test-ci-replay"}, true); !errors.Is(err, ErrPassportReplay) {
-		t.Fatalf("consumed passport must reject replay, got %v", err)
+		t.Fatalf("consumed passport must reject a different consumer, got %v", err)
+	}
+	consumeAudits := 0
+	for _, event := range data.AuditsByChange(change.OrganizationID, change.ID) {
+		if event.Action == "PASSPORT_CONSUMED_AND_CHANGE_COMPLETED" {
+			consumeAudits++
+		}
+	}
+	if consumeAudits != 1 {
+		t.Fatalf("service replay must not write a second consume audit, got %d", consumeAudits)
 	}
 	change, err = svc.Change(change.ID)
 	if err != nil {

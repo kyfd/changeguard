@@ -215,7 +215,7 @@ Content-Type: application/json
 }
 ```
 
-一次消费成功后，同一 Token 再次使用返回 `409 PASSPORT_REPLAY`。
+一次消费成功后，同一 Token、制品摘要、环境和 `consumer` 的重试返回首次公开快照，HTTP 仍为 `200 GATE_ALLOWED`，并设置 `Idempotency-Replayed: true`。不同 `consumer`、空 `consumed_by`，或其他流水线抢先消费，返回 `409 PASSPORT_REPLAY`。`verify` 仍是只读检查，不会重放消费。
 
 ### 6.3 Gate 错误码
 
@@ -226,7 +226,7 @@ Content-Type: application/json
 | 403 | `ARTIFACT_MISMATCH` | 实际文件摘要与审批摘要不同 |
 | 403 | `ENVIRONMENT_MISMATCH` | 目标环境不同 |
 | 403 | `PASSPORT_INVALID` | 签名、声明、状态绑定或变更绑定不合法 |
-| 409 | `PASSPORT_REPLAY` | 已消费，拒绝重放 |
+| 409 | `PASSPORT_REPLAY` | 已被其他 consumer 消费，或 consumed_by 为空 |
 | 409 | `PASSPORT_INACTIVE` | 已撤销或规则版本变化 |
 | 410 | `PASSPORT_EXPIRED` | 已过期 |
 | 503 | `PASSPORT_UNAVAILABLE` | 未配置签名密钥 |

@@ -612,12 +612,6 @@ func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, cons
 	if subtle.ConstantTimeCompare([]byte(rowToken), []byte(tokenSHA256)) != 1 {
 		return model.Passport{}, nil, 0, ErrPassportTokenMismatch
 	}
-	if rowStatus == string(model.PassportExpired) {
-		return model.Passport{}, nil, 0, ErrPassportExpired
-	}
-	if rowStatus != string(model.PassportActive) {
-		return model.Passport{}, nil, 0, ErrPassportInactive
-	}
 	passportIndex := -1
 	for i := range data.Passports {
 		if data.Passports[i].ID == id {
@@ -629,6 +623,18 @@ func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, cons
 		return model.Passport{}, nil, 0, ErrNotFound
 	}
 	item := &data.Passports[passportIndex]
+	if rowStatus == string(model.PassportExpired) {
+		return model.Passport{}, nil, 0, ErrPassportExpired
+	}
+	if consume && rowStatus == string(model.PassportConsumed) {
+		if sameConsumerReplay(*item, rowToken, consumer) {
+			return publicPassport(*item, false), nil, version, nil
+		}
+		return model.Passport{}, nil, 0, ErrPassportReplay
+	}
+	if rowStatus != string(model.PassportActive) {
+		return model.Passport{}, nil, 0, ErrPassportInactive
+	}
 	if !at.Before(item.ExpiresAt) {
 		item.Status = model.PassportExpired
 		auditEvent.Action = "PASSPORT_EXPIRED"
