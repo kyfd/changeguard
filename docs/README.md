@@ -13,7 +13,7 @@ ChangeGuard 的文档按使用场景组织。README 提供最小启动说明；�
 - [系统架构](architecture.md)：核心组件、存储、SQL Outbox、状态机和证据语义。
 - [ADR 0001](adr/0001-idempotent-passport-consume.md)：同一 consumer 的 Passport consume 重放。
 - [威胁模型](threat-model.md)：TOCTOU、重放、凭据、影子库和审计等威胁与剩余风险。
-- [信任边界与验证步骤](trust-boundaries-demo.md)：Gate、模型分析和升级边界的手工核对步骤。
+- [信任边界与验证步骤](trust-boundaries.md)：Gate、模型分析和升级边界的手工核对步骤。
 - [Provenance baseline](provenance-baseline.md)：构建来源与发布制品校验。
 - [Transaction optimization](transaction-optimization.md)：事务与存储路径的实现说明。
 
@@ -28,7 +28,6 @@ ChangeGuard 的文档按使用场景组织。README 提供最小启动说明；�
 
 - [部署与运维](enterprise-operations.md)：production profile、systemd、PostgreSQL、Redis、备份、恢复和升级。
 - [Benchmark](benchmarks.md)：可重复运行的性能测量及限制。
-- [演示步骤](demo-playbook.md)：本地页面和 API 操作顺序。
-- [14 天试运行验收](pilot-14-day-acceptance.md)：受控试运行的检查项。
+- [本地走查步骤](demo-playbook.md)：本地页面和 API 的操作顺序。
 
 版本变化见仓库根目录的 [CHANGELOG](../CHANGELOG.md)。
