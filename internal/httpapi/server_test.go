@@ -102,10 +102,10 @@ func TestFrontendProvidesReadableGovernancePanorama(t *testing.T) {
 	}
 	script := string(scriptBytes)
 	for _, marker := range []string{
-		`{ route: "panorama", label: "治理全景", icon: "activity" }`,
+		`{ route: "panorama", label: "总览", icon: "activity" }`,
 		"function panoramaSnapshot()",
 		"function renderPanorama(main)",
-		`setHeader("治理全景")`,
+		`setHeader("总览")`,
 		`document.body.classList.toggle("panorama-mode", route === "panorama")`,
 	} {
 		if !strings.Contains(script, marker) {

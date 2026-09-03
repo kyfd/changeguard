@@ -126,7 +126,7 @@ func TestGoldenConfigFlowBindsApprovalToActualCIFiles(t *testing.T) {
 	data := store.NewMemory()
 	svc := service.New(data, gateFlowRunner{}, gateFlowAnalyzer{})
 	change, err := svc.Create(model.CreateChangeInput{
-		Title: "配置门禁黄金链路", ApplicationID: "app_order", ChangeType: "配置变更", Environment: "生产环境",
+		Title: "订单服务配置变更", ApplicationID: "app_order", ChangeType: "配置变更", Environment: "生产环境",
 		Artifacts:    []model.ChangeArtifact{{Kind: model.ArtifactConfig, Name: "application.yaml", Source: "config/application.yaml", Language: "YAML", Content: content}},
 		RollbackPlan: "恢复上一稳定版本配置并重新加载服务。",
 		ReleasePlan:  model.ReleasePlan{Strategy: "金丝雀发布", CanaryPercent: 10, ObservationMinutes: 15, SuccessMetrics: []string{"错误率"}},

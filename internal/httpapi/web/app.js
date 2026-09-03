@@ -35,7 +35,7 @@ const icons = {
 const navItems = [
   { group: "工作台", items: [
     { route: "dashboard", label: "概览", icon: "overview" },
-    { route: "panorama", label: "治理全景", icon: "activity" },
+    { route: "panorama", label: "总览", icon: "activity" },
     { route: "assets", label: "服务", icon: "apps" },
     { route: "risks", label: "风险项", icon: "alert", count: () => state.changes.flatMap(item => item.findings || []).filter(item => item.status !== "VERIFIED").length },
     { route: "changes", label: "变更单", icon: "code" },
@@ -508,7 +508,7 @@ function panoramaSnapshot() {
 }
 
 function renderPanorama(main) {
-  setHeader("治理全景");
+  setHeader("总览");
   const snapshot = panoramaSnapshot();
   const totalChanges = snapshot.changes.length;
   const riskTotal = Object.values(snapshot.risks).reduce((sum, value) => sum + value, 0);
@@ -533,7 +533,7 @@ function renderPanorama(main) {
     </button>`;
   }).join("") : `<div class="panorama-empty"><strong>暂无规则命中</strong><span>提交变更后会出现在这里</span></div>`;
 
-  // 星尘 + 远景光点
+  // 背景星点
   const stars = Array.from({length: 56}, (_, i) => {
     const left = ((i * 37) % 97) + 1.5;
     const top = ((i * 53) % 91) + 2;
@@ -582,9 +582,9 @@ function renderPanorama(main) {
       <div class="panorama-title">
         <span></span>
         <div class="panorama-title-stack">
-          <small>CHANGEGUARD · GOVERNANCE COMMAND DECK</small>
-          <h1>治理全景</h1>
-          <em class="panorama-title-sub">风险链路 · 审批中枢 · 闭环遥测</em>
+          <small>CHANGEGUARD</small>
+          <h1>总览</h1>
+          <em class="panorama-title-sub">风险分布 · 待审队列 · 闭环情况</em>
         </div>
         <span></span>
       </div>
@@ -730,7 +730,7 @@ function renderPanorama(main) {
     <footer class="panorama-footer">
       <span class="panorama-footer-brand">ChangeGuard</span>
       <i></i>
-      <span>企业研发变更风险治理 · COMMAND DECK</span>
+      <span>变更风险总览</span>
       <i></i>
       <span>闭环率 ${closureRate}% · 威胁 ${threatLabel} · 节点 ${8}</span>
     </footer>
@@ -1055,7 +1055,7 @@ function renderRoleContext() {
   }
   const pending = (state.changes || []).filter(change => change.status === "WAITING_APPROVAL");
   const highRisk = (state.changes || []).filter(change => change.risk === "HIGH" && !["COMPLETED", "REJECTED"].includes(change.status));
-  return `<article class="role-context"><header><div><span class="role-context-kicker">${escapeHTML(profile.label)}</span><h3>用真实证据维持跨服务治理闭环</h3><p>${escapeHTML(profile.description)}</p></div><span class="role-context-badge">${escapeHTML(roleLabel(actor()?.role || "技术负责人"))}</span></header><div class="role-context-metrics"><div><span>待审批</span><strong>${pending.length}</strong></div><div><span>处理中高风险</span><strong>${highRisk.length}</strong></div><div><span>未闭环证据</span><strong>${activeFindings.length}</strong></div></div><footer><button class="button button-primary button-small" data-route="approvals">查看审批</button><button class="button button-secondary button-small" data-route="policies">查看治理规则</button></footer></article>`;
+  return `<article class="role-context"><header><div><span class="role-context-kicker">${escapeHTML(profile.label)}</span><h3>当前待办</h3><p>${escapeHTML(profile.description)}</p></div><span class="role-context-badge">${escapeHTML(roleLabel(actor()?.role || "技术负责人"))}</span></header><div class="role-context-metrics"><div><span>待审批</span><strong>${pending.length}</strong></div><div><span>处理中高风险</span><strong>${highRisk.length}</strong></div><div><span>未闭环证据</span><strong>${activeFindings.length}</strong></div></div><footer><button class="button button-primary button-small" data-route="approvals">查看审批</button><button class="button button-secondary button-small" data-route="policies">查看治理规则</button></footer></article>`;
 }
 
 function renderDeveloperWorkbench() {
@@ -1315,7 +1315,7 @@ function renderAssets(main) {
   const activeRiskCount = records.reduce((sum, record) => sum + record.activeFindings.length, 0);
   const changedCount = records.filter(record => record.changes.length).length;
   const environments = [...new Set(state.apps.map(app => app.environment).filter(Boolean))];
-  const actions = `<button class="button button-secondary" data-route="panorama">${svg("activity")}打开治理全景</button>${canManage ? `<button class="button button-primary" data-app-create>${svg("plus")}纳管业务服务</button>` : ""}`;
+  const actions = `<button class="button button-secondary" data-route="panorama">${svg("activity")}打开总览</button>${canManage ? `<button class="button button-primary" data-app-create>${svg("plus")}纳管业务服务</button>` : ""}`;
   main.innerHTML = pageHeading("服务目录", "统一维护服务归属、代码仓库、运行时、上下游依赖、资源适配器和变更风险。", actions) + `
     <section class="registry-stat-grid">
       <article><span>纳管服务</span><strong>${records.length}</strong><small>按业务服务划分治理边界</small></article>
@@ -2272,23 +2272,19 @@ function renderAuthGate(message = "") {
       <span class="auth-orbit auth-orbit-4"></span>
       <i class="auth-scanline"></i>
       <div class="auth-floor" aria-hidden="true"></div>
-      <span class="auth-hud hud-tl"><b>SEC-LINK</b>CHG-01</span>
-      <span class="auth-hud hud-tr"><b>NODE</b>EAST-2</span>
-      <span class="auth-hud hud-bl"><b>ENCRYPT</b>AES-256</span>
-      <span class="auth-hud hud-br"><b>SIGNAL</b>STABLE</span>
       <div class="auth-visual-content">
-        <div class="auth-visual-badge"><span class="brand-mark">${svg("shield")}</span><div><strong>ChangeGuard</strong><small>Enterprise Change Risk Control</small></div></div>
-        <h2>让每一次研发变更<br>都可控、可审计、可回滚</h2>
-        <p>规则检查、预发验证、多级审批与全链路审计，构建企业级发布治理闭环。</p>
+        <div class="auth-visual-badge"><span class="brand-mark">${svg("shield")}</span><div><strong>ChangeGuard</strong><small>Change Risk Control</small></div></div>
+        <h2>生产变更先过门禁，<br>再进生产</h2>
+        <p>SQL、配置和 Kubernetes 变更先跑静态检查，再由人审批，最后发一张绑定制品摘要的一次性通行证给 CI。</p>
         <ul class="auth-visual-features">
-          <li><i></i><span><b>智能规则引擎</b>拦截高风险变更与冲突窗口</span></li>
-          <li><i></i><span><b>预发布验证</b>影子演练后再进入审批</span></li>
-          <li><i></i><span><b>全链路审计</b>身份、角色与审批动作可追溯</span></li>
+          <li><i></i><span><b>静态检查</b>按规则拦截高风险语句和冲突窗口</span></li>
+          <li><i></i><span><b>影子库验证</b>在影子库跑一遍再进审批</span></li>
+          <li><i></i><span><b>审计链</b>身份、角色和审批动作逐条留痕</span></li>
         </ul>
         <div class="auth-visual-metrics">
           <div><strong>01</strong><span>规则检查</span></div>
           <div><strong>02</strong><span>预发验证</span></div>
-          <div><strong>03</strong><span>审批闭环</span></div>
+          <div><strong>03</strong><span>审批发证</span></div>
         </div>
       </div>
     </aside>`;
@@ -2330,7 +2326,7 @@ function renderAuthGate(message = "") {
   ensureAuthCanvas(gate);
 }
 
-/* ─── 登录页深空粒子引擎：星尘 · 星座连线 · 流星 · 鼠标互动 ─── */
+// 登录页背景 canvas：粒子、连线、流星，跟随鼠标
 let __authParticlesRunning = false;
 
 function ensureAuthCanvas(gate) {
