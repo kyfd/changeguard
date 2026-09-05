@@ -74,3 +74,8 @@ services:
     <<: *backend
     ports:
       - "127.0.0.1:18081:8080"
+    # Bootstrap migrations currently require a single initializer on an empty
+    # database. Both processes run concurrently after the primary is ready.
+    depends_on:
+      dbguard:
+        condition: service_healthy

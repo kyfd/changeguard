@@ -64,6 +64,8 @@ go test ./internal/auth -run '^TestRedisSessionRepositoryIntegration$' -count=1 
 
 浏览器流程中的响应丢失实验使用两个后端容器和共享 PostgreSQL，加一个只丢响应的本机代理。它覆盖提交后客户端没有收到结果、向另一实例重试的窗口，不覆盖数据库提交失败、后端进程重启或部署重复执行。
 
+空库初始化时两个实例不能同时执行当前迁移，可能发生 PostgreSQL 系统目录唯一键冲突。Compose 用 `service_healthy` 依赖先完成主实例初始化，再启动第二实例；运行阶段两实例同时服务。这不是并发迁移验证。
+
 ## 记录结果
 
 性能测量见 [benchmarks.md](benchmarks.md)。每次记录至少包括版本、命令、环境、测试结果和未测内容。不要从规则扫描均值推导 API P95，也不要从 Gate 消费成功推导部署成功。
