@@ -70,7 +70,7 @@ function statusInfo(status) {
     DRAFT:["草稿","draft"], CHECKING:["规则检查中","running"], CHECK_FAILED:["检查未通过","failed"],
     READY_FOR_EXPERIMENT:["待预发布验证","ready"], EXPERIMENT_QUEUED:["验证排队中","queued"],
     EXPERIMENT_RUNNING:["验证进行中","running"], WAITING_APPROVAL:["待发布审批","waiting"],
-    APPROVED:["已批准","approved"], REJECTED:["已驳回","rejected"], COMPLETED:["已完成","completed"]
+    APPROVED:["已批准","approved"], REJECTED:["已驳回","rejected"], COMPLETED:["通行证已消费","completed"]
   };
   return map[status] || [status || "未知","draft"];
 }
@@ -906,7 +906,7 @@ function developerShipState(change) {
     WAITING_APPROVAL: ["等待独立审批", "补齐证据并等待审批", "当前证据已进入四眼审批阶段。"],
     APPROVED: ["可以按窗口发布", "在计划窗口使用通行证", "变更已获批准，仍需遵守计划窗口与通行证绑定。"],
     REJECTED: ["暂不可发布", "根据驳回意见修改并重提", "审批已驳回。"],
-    COMPLETED: ["已完成发布", "查看发布结果证据", "流程已闭环，可复核真实发布后信号。"]
+    COMPLETED: ["通行证已消费", "查看审计记录", "CI 已消费通行证，实际部署结果由流水线另行回传。"]
   };
   const result = stateByStatus[change?.status] || ["尚不能发布", "查看变更详情", "当前状态需要进一步核对。"];
   return {label:result[0], next:result[1], detail:result[2], openFindings};
@@ -1433,7 +1433,7 @@ function processIndex(status) {
 }
 function renderProcess(change) {
   const current = processIndex(change.status);
-  const steps = [["规则检查","多制品确定性规则"],["预发布验证","回滚与专项检查"],["发布审批","证据复核"],["发布完成","审计闭环"]];
+  const steps = [["规则检查","检查制品内容"],["预发布验证","SQL 迁移与回滚"],["独立审批","核对检查结果"],["CI 消费","不代表部署成功"]];
   return `<div class="process-strip">${steps.map((step,index) => `<div class="process-step ${index < current ? "done" : index === current ? "active" : ""}"><span class="process-node">${index < current ? "✓" : index+1}</span><div><strong>${step[0]}</strong><span>${step[1]}</span></div></div>`).join("")}</div>`;
 }
 function actionButtons(change) {
@@ -1504,6 +1504,7 @@ function renderReleasePlan(change) {
 
 function passportStatusMeta(pp) {
   if (!pp) return ["未签发", "draft"];
+  if (pp.status === "CONSUMED") return ["已消费", "completed"];
   if (pp.status === "REVOKED") return ["已吊销", "failed"];
   if (pp.status === "EXPIRED" || (pp.expires_at && new Date(pp.expires_at) < new Date())) return ["已过期", "failed"];
   if (pp.status === "ACTIVE") return ["有效", "approved"];
@@ -1566,7 +1567,7 @@ function renderDeveloperChangeDetail(main, change) {
 function renderReviewerChangeDetail(main, change) {
   const exp = change.experiment;
   main.innerHTML = `<div class="detail-head"><div class="detail-head-main"><a class="back-link" href="#/approvals">${svg("back")}返回审批队列</a><h2>${escapeHTML(change.title)}</h2><div class="detail-meta"><code>${escapeHTML(change.id)}</code>${riskBadge(change.risk)}${statusBadge(change.status)}<span>更新于 ${formatDate(change.updated_at)}</span></div></div><div class="detail-actions">${actionButtons(change)}</div></div>
-    <div class="detail-grid role-detail-grid"><div class="detail-column"><article class="panel"><header class="panel-header"><div><h3>风险变化与规则证据</h3><p>审批只基于确定性结果与已登记整改证据。</p></div><span>${(change.findings || []).length} 项</span></header><div class="panel-body"><div class="finding-list">${renderFindings(change)}</div></div></article><article class="panel"><header class="panel-header"><div><h3>仿真证据</h3><p>未真实执行时必须保持 NOT_RUN。</p></div>${exp ? `<span class="status ${exp.status === "PASSED" ? "status-approved" : "status-failed"}"><i></i>${escapeHTML(exp.status)}</span>` : '<span class="status status-draft"><i></i>NOT_RUN</span>'}</header><div class="panel-body">${renderExperiment(exp)}</div></article>${renderReviewerImpactPanel(change)}</div><aside class="detail-column side-column"><article class="panel"><header class="panel-header"><div><h3>审批理由</h3><p>责任、版本与人工判断</p></div></header><div class="panel-body side-info-list"><div class="side-info-row"><span>提交人</span><strong>${escapeHTML(change.submitter_name || "未登记")}</strong></div><div class="side-info-row"><span>审批人</span><strong>${escapeHTML(change.reviewer_name || "待独立审批")}</strong></div><div class="side-info-row"><span>审批意见</span><strong>${escapeHTML(change.review_comment || "尚未形成")}</strong></div><div class="side-info-row"><span>规则版本</span><strong>${Number(change.rule_set_version || 0) || "未登记"}</strong></div></div></article><article class="panel"><header class="panel-header"><div><h3>回滚前提</h3><p>审批前必须可执行</p></div></header><div class="panel-body"><p class="change-description">${escapeHTML(change.rollback_plan || "未登记回滚方案，不能形成完整批准证据。")}</p></div></article></aside></div>`;
+    <div class="detail-grid role-detail-grid"><div class="detail-column"><article class="panel"><header class="panel-header"><div><h3>风险变化与规则证据</h3><p>审批只基于确定性结果与已登记整改证据。</p></div><span>${(change.findings || []).length} 项</span></header><div class="panel-body"><div class="finding-list">${renderFindings(change)}</div></div></article><article class="panel"><header class="panel-header"><div><h3>仿真证据</h3><p>未真实执行时必须保持 NOT_RUN。</p></div>${exp ? `<span class="status ${exp.status === "PASSED" ? "status-approved" : "status-failed"}"><i></i>${escapeHTML(exp.status)}</span>` : '<span class="status status-draft"><i></i>NOT_RUN</span>'}</header><div class="panel-body">${renderExperiment(exp)}</div></article>${renderReviewerImpactPanel(change)}</div><aside class="detail-column side-column"><article class="panel"><header class="panel-header"><div><h3>审批理由</h3><p>责任、版本与人工判断</p></div></header><div class="panel-body side-info-list"><div class="side-info-row"><span>提交人</span><strong>${escapeHTML(change.submitter_name || "未登记")}</strong></div><div class="side-info-row"><span>审批人</span><strong>${escapeHTML(change.reviewer_name || "待独立审批")}</strong></div><div class="side-info-row"><span>审批意见</span><strong>${escapeHTML(change.review_comment || "尚未形成")}</strong></div><div class="side-info-row"><span>规则版本</span><strong>${escapeHTML(change.rule_set_version || "未登记")}</strong></div></div></article><article class="panel"><header class="panel-header"><div><h3>回滚前提</h3><p>审批前必须可执行</p></div></header><div class="panel-body"><p class="change-description">${escapeHTML(change.rollback_plan || "未登记回滚方案，不能形成完整批准证据。")}</p></div></article></aside></div>`;
   void loadImpactSnapshot(change.id);
 }
 
@@ -1706,7 +1707,12 @@ function findingStatusInfo(status) {
 }
 function renderFindings(change) {
   const findings = change.findings || [];
-  if (!findings.length) return '<div class="empty-state"><h3>尚未执行规则检查</h3><p>提交变更后将生成可复现的规则证据。</p></div>';
+  if (!findings.length) {
+    const check = change.check_run;
+    const passed = check?.status === "PASSED" && check.blocking === 0;
+    const title = passed ? "规则检查通过，无阻断项" : check ? "已有规则检查记录" : "尚未执行规则检查";
+    return `<div class="empty-state"><h3>${title}</h3><p>${check ? "本次未返回发现项，请结合检查状态与验证记录判断。" : "提交变更后将生成可复现的规则证据。"}</p></div>`;
+  }
   const currentUser = actor();
   const canCoordinate = ["数据库审核人","技术负责人"].includes(currentUser.role);
   const blocking = findings.filter(item => item.blocking || item.severity === "HIGH");
@@ -1956,29 +1962,10 @@ async function loadImpactSnapshot(changeId) {
   const body = document.querySelector("#impactGraphBody");
   const button = panel?.querySelector("[data-load-impact]");
   if (!panel || panel.getAttribute("data-change-id") !== changeId || !body) return;
-  if (button) {
-    button.disabled = true;
-    button.setAttribute("aria-busy", "true");
-    button.textContent = "刷新中…";
-  }
-  if (body) body.innerHTML = `<div class="blast-placeholder">正在计算资源关系与冲突…</div>`;
-  try {
-    const data = await api("/api/changes/" + changeId + "/impact");
-    if (document.querySelector("#impactGraphPanel")?.getAttribute("data-change-id") === changeId) {
-      body.innerHTML = renderImpactSnapshotHTML(data);
-    }
-  } catch (error) {
-    if (document.querySelector("#impactGraphPanel")?.getAttribute("data-change-id") === changeId) {
-      body.innerHTML = renderActionableFailure(error);
-      toast("影响图谱计算失败", "error", `${error.code || "REQUEST_FAILED"} · ${error.fix || error.message}`);
-    }
-  } finally {
-    if (document.querySelector("#impactGraphPanel")?.getAttribute("data-change-id") === changeId && button) {
-      button.disabled = false;
-      button.removeAttribute("aria-busy");
-      button.textContent = "刷新图谱";
-    }
-  }
+  // The current server has no per-change impact endpoint. Do not send a
+  // knowingly unsupported request or present missing calculations as success.
+  body.innerHTML = '<div class="blast-placeholder">当前版本未提供逐变更影响图谱。请在发布日历核对已登记的服务与窗口冲突；这里不作无冲突结论。</div>';
+  if (button) button.hidden = true;
 }
 
 async function loadOutcomeSignals(changeId) {
@@ -2274,7 +2261,7 @@ function renderAuthGate(message = "") {
       <div class="auth-floor" aria-hidden="true"></div>
       <div class="auth-visual-content">
         <div class="auth-visual-badge"><span class="brand-mark">${svg("shield")}</span><div><strong>ChangeGuard</strong><small>Change Risk Control</small></div></div>
-        <h2>生产变更先过门禁，<br>再进生产</h2>
+        <h2>检查变更，<br>核对审批。</h2>
         <p>SQL、配置和 Kubernetes 变更先跑静态检查，再由人审批，最后发一张绑定制品摘要的一次性通行证给 CI。</p>
         <ul class="auth-visual-features">
           <li><i></i><span><b>静态检查</b>按规则拦截高风险语句和冲突窗口</span></li>
@@ -2290,7 +2277,7 @@ function renderAuthGate(message = "") {
     </aside>`;
   if (inviteToken) {
     gate.innerHTML = `<div class="auth-shell">${authVisual}<section class="auth-card auth-card-invite">
-      <div class="auth-brand"><span class="brand-mark">${svg("shield")}</span><div><strong>ChangeGuard</strong><small>企业研发变更风险治理</small></div></div>
+      <div class="auth-brand"><span class="brand-mark">${svg("shield")}</span><div><strong>ChangeGuard</strong><small>变更检查与审批</small></div></div>
       <div class="auth-copy"><span class="eyebrow">企业成员邀请</span><h1>接受邀请并加入工作空间</h1><p>注册后将按照邀请人分配的职责参与提交、整改、审核或批准流程。</p></div>
       ${errorMessage ? `<div class="auth-message error">${escapeHTML(errorMessage)}</div>` : ""}
       <form id="acceptInviteForm" class="auth-form">
@@ -2305,13 +2292,13 @@ function renderAuthGate(message = "") {
     return;
   }
   gate.innerHTML = `<div class="auth-shell">${authVisual}<section class="auth-card">
-      <div class="auth-brand"><span class="brand-mark">${svg("shield")}</span><div><strong>ChangeGuard</strong><small>企业研发变更风险治理</small></div></div>
+      <div class="auth-brand"><span class="brand-mark">${svg("shield")}</span><div><strong>ChangeGuard</strong><small>变更检查与审批</small></div></div>
     <div class="auth-tabs ${state.authStatus?.local_enabled === false ? "single" : ""}"><button class="active" data-auth-tab="login">企业登录</button>${state.authStatus?.local_enabled !== false ? `<button data-auth-tab="register">创建企业</button>` : ""}</div>
     ${errorMessage ? `<div class="auth-message error">${escapeHTML(errorMessage)}</div>` : ""}
-    <div id="authLoginPanel"><div class="auth-copy"><span class="eyebrow">安全访问</span><h1>进入企业治理工作空间</h1><p>身份与企业、角色绑定，所有审批动作都会写入审计日志。</p></div>
+    <div id="authLoginPanel"><div class="auth-copy"><span class="eyebrow">登录</span><h1>进入工作空间</h1><p>使用所属组织的账号查看和处理变更。</p></div>
       ${state.authStatus?.local_enabled !== false ? `<form id="authLoginForm" class="auth-form" autocomplete="off" data-form-type="other"><label class="field"><span>企业邮箱</span><input name="email" type="email" required autocomplete="email" autocapitalize="none" spellcheck="false"></label><label class="field"><span>密码</span><input name="password" type="password" required autocomplete="current-password"></label><button class="button button-primary auth-submit" type="submit">登录工作空间</button></form>` : ""}${sso}
     </div>
-    <div id="authRegisterPanel" hidden><div class="auth-copy"><span class="eyebrow">创建企业</span><h1>建立独立的治理空间</h1><p>首位注册者将成为企业管理员和技术负责人，随后通过邀请分配员工职责。</p></div>
+    <div id="authRegisterPanel" hidden><div class="auth-copy"><span class="eyebrow">创建企业</span><h1>创建工作空间</h1><p>首位注册者负责管理成员、服务和规则，随后可以邀请其他成员。</p></div>
       <form id="enterpriseRegisterForm" class="auth-form auth-form-grid">
         <label class="field field-wide"><span>企业名称</span><input name="organization_name" required maxlength="80"></label>
         <label class="field"><span>企业标识</span><input name="organization_slug" required pattern="[a-z0-9][a-z0-9-]{2,39}" placeholder="stellar-tech"><small>小写字母、数字和短横线。</small></label>

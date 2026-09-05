@@ -26,6 +26,7 @@ ChangeGuard 的文档按使用场景组织。README 提供最小启动说明；�
 
 ## 部署与验证
 
+- [测试](testing.md)：并发消费、真实依赖和浏览器／CLI 流程的运行方法。
 - [部署与运维](enterprise-operations.md)：production profile、systemd、PostgreSQL、Redis、备份、恢复和升级。
 - [Benchmark](benchmarks.md)：可重复运行的性能测量及限制。
 - [本地走查步骤](demo-playbook.md)：本地页面和 API 的操作顺序。
