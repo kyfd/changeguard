@@ -1401,8 +1401,8 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .side-info-list { display: grid; gap: 0; }
 .side-info-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 12px 0; border-bottom: 1px solid #edf0f5; }
 .side-info-row:last-child { border-bottom: 0; }
-.side-info-row > span { color: var(--muted-light); font-size: 13px; }
-.side-info-row > strong { color: #445066; font-size: 13px; font-weight: 600; text-align: right; }
+.side-info-row > span { color: var(--muted-light); font-size: 13px; flex-shrink: 0; }
+.side-info-row > strong { color: #445066; font-size: 13px; font-weight: 600; text-align: right; min-width: 0; overflow-wrap: anywhere; }
 .type-icon { }
 .audit-id { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; color: var(--muted); }
 

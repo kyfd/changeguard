@@ -209,6 +209,7 @@ test("CONFIG and SQL: shadow validation, independent approval, CLI gate and audi
     await expect(reviewer.locator("#mainContent")).toContainText(rehearsed.rule_set_version);
     await expect(reviewer.locator("#impactGraphBody")).toContainText("当前版本未提供逐变更影响图谱");
     await expect(reviewer.locator("#mainContent")).not.toContainText("METHOD_NOT_ALLOWED");
+    expect(await reviewer.locator(".side-info-row").evaluateAll(rows => rows.every(row => row.scrollWidth <= row.clientWidth + 1))).toBe(true);
     await reviewer.screenshot({ path: testInfo.outputPath("gate-completed.png"), fullPage: true });
   } finally {
     await reviewerContext.close();
