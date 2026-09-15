@@ -245,7 +245,8 @@ pytest            46 项通过（其中界面相关 13 项）
 **未验证项**（不得当作通过）：
 
 - 未在真实浏览器里做过交互验证（没有前端端到端测试，也没有截图证据）；
-- 界面未接入真实会话认证，仅支持演示用请求头身份；
+- ~~界面未接入真实会话认证，仅支持演示用请求头身份~~ —— 该限制已在下一节
+  "合并为单一入口"中消除：界面改用治理服务的会话，身份由服务端解析后注入；
 - 真实模型起草质量、多实例一致性、真实治理后端的端到端联调，仍未验证。
 
 **本轮顺带发现的既有缺陷**（未修，已记入 `agent-app/README.md`）：
@@ -288,12 +289,25 @@ compose config              通过；解析确认 agent-app 无 published 端口
                             下游实际收到 org_demo / usr_developer
 ```
 
-**未验证项**（不得当作通过）：
+**现已由 CI 覆盖**（`quality-agent` 作业，随 PR #11 加入）：
 
-- **镜像未构建**：本机 Docker 守护进程未运行。`agent-app/Dockerfile` 只做了静态审查，
-  以及 `pip install .` 的本地等价验证（setuptools 自动发现会失败，已补显式 `packages.find`）。
-  `docker compose up --build` 全程未跑过。
-- 生产 Postgres / Redis 形态下的端到端未跑（本轮用文件存储 + 内存会话）。
+原先 agent 侧的 pytest 与镜像构建**完全没有自动化覆盖**，是本轮补上的：
+
+| 覆盖项 | 之前 | 现在 |
+| --- | --- | --- |
+| agent-app 的 pytest | 从未在 CI 运行（39 项） | `quality-agent` 作业运行，实测 `39 passed in 0.96s` |
+| `agent-app/Dockerfile` 构建 | 从未在任何地方构建过 | `docker build -f agent-app/Dockerfile .`，CI 中通过 |
+| `internal/httpapi/web/agent/*.js` 语法 | 单层 glob 漏掉子目录 | `quality-js` 改为递归检查 |
+
+这些检查挂在聚合作业 `quality` 下，因此**自动成为 main 规则集要求的检查**，
+无需修改规则集配置。口径是：镜像"能构建"已被证明，而不是只做过静态审查。
+
+**仍未验证项**（不得当作通过）：
+
+- **`docker compose up --build` 完整编排未跑过**：镜像单独构建已验证，但五个服务
+  （primary/shadow Postgres、Redis、dbguard、agent-app）一起起来的编排没跑过。
+  CI 的 `e2e` 用的是**独立的** `compose.e2e.yml`，其中不含 `agent-app`。
+- Agent 路径的端到端只在**文件存储 + 内存会话**下验证过（本地 8080 + 8091 手工跑通）。
 - 真实模型起草质量、多实例一致性仍未验证。
 
 架构与边界说明见 `docs/agent-architecture.md`，服务说明见 `agent-app/README.md`。
