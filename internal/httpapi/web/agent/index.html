@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f7f9fc">
   <title>变更准备 · ChangeGuard</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=3">
 </head>
 <body>
   <a class="skip-link" href="#workbench">跳到主要内容</a>
@@ -39,14 +39,21 @@
   <div class="banner banner-warn" id="identityBanner" hidden></div>
   <div class="banner banner-danger" id="errorBanner" hidden></div>
 
+  <ol class="steps" id="steps" aria-label="流程进度">
+    <li class="step is-current" data-step="requirement"><span class="step-dot">1</span><span class="step-label">提需求</span></li>
+    <li class="step" data-step="clarify"><span class="step-dot">2</span><span class="step-label">补信息</span></li>
+    <li class="step" data-step="draft"><span class="step-dot">3</span><span class="step-label">出草案</span></li>
+  </ol>
+
   <main class="workbench" id="workbench">
     <section class="col col-chat" aria-labelledby="chatTitle">
       <header class="col-head">
         <h2 id="chatTitle">对话</h2>
-        <span class="col-hint">提需求 · 补信息 · 进度</span>
+        <button class="button button-ghost button-small" id="newTaskButton" type="button" hidden>+ 新建任务</button>
       </header>
+
       <div class="col-body" id="chatBody">
-        <form class="card" id="createForm">
+        <form class="card card-compose" id="createForm">
           <label class="field">
             <span>需求</span>
             <textarea id="requirement" rows="4" placeholder="例如：给订单表按用户和创建时间准备一个索引变更，目标 PostgreSQL，安排在周五晚上。"></textarea>
@@ -97,6 +104,6 @@
     </section>
   </main>
 
-  <script src="app.js" defer></script>
+  <script src="app.js?v=3" defer></script>
 </body>
 </html>

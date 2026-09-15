@@ -53,6 +53,7 @@ const state = {
   busy: false,
   editing: false,
   edits: { sql: null, rollback: null },
+  pollFailures: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -275,22 +276,42 @@ async function createTask(event) {
 
   state.busy = true;
   $("createButton").disabled = true;
+  $("createButton").textContent = "正在准备…";
   clearError();
   try {
     const task = await api("/api/agent/tasks", { method: "POST", body: payload });
     adoptTask(task);
+    focusNextAction();
   } catch (error) {
     handleActionError(error);
   } finally {
     state.busy = false;
     $("createButton").disabled = false;
+    $("createButton").textContent = "开始准备材料";
   }
+}
+
+/** 提交后把视线带到"下一步该做什么"，而不是留在已经用过的表单上。 */
+function focusNextAction() {
+  window.requestAnimationFrame(() => {
+    const target = $("questionFields") || $("conversation");
+    if (target && target.scrollIntoView) {
+      target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    const firstInput = document.querySelector("#questionFields [data-field]");
+    if (firstInput) firstInput.focus({ preventScroll: true });
+  });
 }
 
 async function clarify(payload) {
   if (!state.task || state.busy) return;
   state.busy = true;
   clearError();
+  const button = $("clarifyButton");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在生成…";
+  }
   try {
     const task = await api(`/api/agent/tasks/${state.task.task_id}/clarify`, {
       method: "POST",
@@ -300,6 +321,9 @@ async function clarify(payload) {
     adoptTask(task);
   } catch (error) {
     handleActionError(error);
+    // 提交失败往往意味着界面停在旧状态：响应丢失、状态已被推进、会话失效。
+    // 无论哪种原因，都拉一次真实状态，把界面拉回来，而不是留在失效的表单上。
+    await refreshCurrentTask();
   } finally {
     state.busy = false;
   }
@@ -338,13 +362,46 @@ function handleActionError(error) {
   showError(error.message);
 }
 
+function safeRender() {
+  // 渲染失败绝不能终止轮询：轮询是把界面拉回真实状态的唯一路径。
+  try {
+    render();
+  } catch (error) {
+    console.error("渲染任务视图失败", error);
+  }
+}
+
 function adoptTask(task) {
   state.task = task;
-  render();
+  state.pollFailures = 0;
+  safeRender();
   if (TERMINAL.has(task.status)) {
     stopPolling();
   } else {
     startPolling();
+  }
+}
+
+async function refreshCurrentTask() {
+  if (!state.task) return;
+  try {
+    const task = await api(`/api/agent/tasks/${state.task.task_id}`);
+    adoptTask(task);
+  } catch (error) {
+    // 尽力恢复：第一条错误已经展示给用户，这里静默即可。
+  }
+}
+
+async function restoreLatestTask() {
+  // 刷新或浏览器恢复标签页后，界面回到最近一次任务的真实状态，
+  // 而不是停留在"提交后全丢"的空页面。服务端只返回当前成员自己的任务。
+  try {
+    const tasks = await api("/api/agent/tasks");
+    const list = Array.isArray(tasks) ? tasks : [];
+    if (!list.length) return;
+    adoptTask(list[list.length - 1]);
+  } catch (error) {
+    // 首次进入或会话失效时没有可恢复的任务，保持初始界面即可。
   }
 }
 
@@ -371,27 +428,80 @@ async function pollOnce() {
   if (!state.task || state.busy) return;
   try {
     const task = await api(`/api/agent/tasks/${state.task.task_id}`);
+    state.pollFailures = 0;
     const previous = state.task;
     state.task = task;
     // 只有状态或草案发生变化才整体重绘，避免打断正在阅读或编辑的人。
     if (previous.status !== task.status || JSON.stringify(previous.draft || null) !== JSON.stringify(task.draft || null)) {
       resetEdits();
-      render();
+      safeRender();
     }
     if (TERMINAL.has(task.status)) stopPolling();
   } catch (error) {
-    stopPolling();
-    handleActionError(error);
+    // 单次失败（网络抖动、网关瞬断）不停止轮询；连续失败才判定服务不可达。
+    state.pollFailures += 1;
+    if (state.pollFailures >= 5) {
+      stopPolling();
+      handleActionError(error);
+    }
   }
 }
 
 /* ---------- 渲染总入口 ---------- */
 
 function render() {
+  renderSteps();
+  renderCompose();
   renderPanel();
   renderConversation();
   renderDraft();
   renderEvidence();
+}
+
+/** 顶部三步进度：让"现在轮到谁做事"一眼可见。 */
+function renderSteps() {
+  const task = state.task;
+  let active = "requirement";
+  if (task) {
+    if (task.status === "NEEDS_INFO") active = "clarify";
+    else if (task.draft || TERMINAL.has(task.status)) active = "draft";
+    else active = "clarify";
+  }
+  const order = ["requirement", "clarify", "draft"];
+  const activeIndex = order.indexOf(active);
+  document.querySelectorAll("#steps .step").forEach((node) => {
+    const index = order.indexOf(node.getAttribute("data-step"));
+    node.classList.toggle("is-current", index === activeIndex);
+    node.classList.toggle("is-done", index < activeIndex);
+  });
+}
+
+/** 有任务在进行时收起需求表单，避免它和追问表单同时抢注意力。 */
+function renderCompose() {
+  const form = $("createForm");
+  const newTaskButton = $("newTaskButton");
+  const workbench = $("workbench");
+  const hasTask = Boolean(state.task);
+  const asking = Boolean(state.task && state.task.status === "NEEDS_INFO" && !state.task.draft);
+  // 首屏没有任务时收敛成单列；补信息时把表单放到主区域，不塞进最窄的一栏。
+  if (workbench) {
+    workbench.classList.toggle("is-intro", !hasTask);
+    workbench.classList.toggle("is-asking", asking);
+  }
+  if (!form) return;
+  form.classList.toggle("is-collapsed", hasTask);
+  if (newTaskButton) newTaskButton.hidden = !hasTask;
+}
+
+function startNewTask() {
+  stopPolling();
+  state.task = null;
+  state.pollFailures = 0;
+  resetEdits();
+  clearError();
+  $("requirement").value = "";
+  safeRender();
+  $("requirement").focus();
 }
 
 function renderPanel() {
@@ -419,11 +529,10 @@ function renderConversation() {
   const blocks = [];
 
   blocks.push(`
-    <article class="turn turn-user">
-      <div class="turn-head"><span>需求</span><span>·</span><span>${esc(task.task_id)}</span></div>
+    <details class="details details-requirement">
+      <summary>本次需求 · ${esc(task.task_id)} ${statusBadge(task.status)}</summary>
       <div class="bubble">${esc(task.requirement)}</div>
-      <div>${statusBadge(task.status)}</div>
-    </article>
+    </details>
   `);
 
   if (task.error) {
@@ -449,6 +558,16 @@ function renderConversation() {
       <article class="card card-warn">
         <div class="card-title"><span>必须补充</span></div>
         <p>计划时间尚未提供。它是生成草案的必要信息之一，不会被猜测填补。</p>
+      </article>
+    `);
+  }
+
+  if (ACTIVE.has(task.status)) {
+    blocks.push(`
+      <article class="card card-running">
+        <div class="working"><span class="spinner" aria-hidden="true"></span>
+        <div><strong>正在准备材料…</strong>
+        <p class="note-inline">检索规范、起草 SQL、再跑一次确定性检查，通常需要半分钟左右。</p></div></div>
       </article>
     `);
   }
@@ -497,19 +616,20 @@ function renderQuestions(task) {
       control = `<input data-field="${esc(question.field)}" id="${inputName}" type="text" placeholder="${esc((field && field.placeholder) || "")}">`;
     }
     return `
-      <label class="field">
+      <label class="field ${question.field === "query_sql" ? "field-wide" : ""}">
         <span>${esc(label)}</span>
         ${control}
-        <span class="note-inline">${esc(question.reason || "")}</span>
+        ${question.reason ? `<span class="note-inline">${esc(question.reason)}</span>` : ""}
       </label>
     `;
   }).join("");
 
   return `
-    <article class="card">
-      <div class="card-title"><span>需要你补充</span><span class="badge badge-warn">缺失信息不会被猜测</span></div>
-      <div class="stack" id="questionFields">${rows}</div>
+    <article class="card card-ask" id="askCard">
+      <div class="card-title"><span>需要你补充</span><span class="badge badge-warn">共 ${(task.questions || []).length} 项</span></div>
+      <div class="ask-grid" id="questionFields">${rows}</div>
       <button class="button button-primary" type="button" id="clarifyButton">提交并继续</button>
+      <p class="note-inline">缺失信息不会被推测或编造，请逐项填写。</p>
     </article>
   `;
 }
@@ -547,12 +667,13 @@ function renderTimeline(task) {
       <span class="detail">${esc(item.detail)}</span>
     </li>
   `).join("");
+  // 默认折叠：执行日志是排查用的次要信息，不该占据主视线。
   return `
-    <article class="card card-flat">
-      <div class="card-title"><span>进度</span><span>${events.length} 步</span></div>
+    <details class="details details-timeline">
+      <summary>执行进度 · ${events.length} 步</summary>
       <ol class="timeline">${items}</ol>
       <p class="note-inline">只记录步骤与结论，不记录模型思维链。</p>
-    </article>
+    </details>
   `;
 }
 
@@ -883,26 +1004,26 @@ function renderEvidenceList(draft) {
 
 function renderShadowNotice() {
   return `
-    <article class="card card-flat">
-      <div class="card-title"><span>隔离库演练（影子验证）</span><span class="badge badge-muted">本服务不触发</span></div>
+    <details class="details">
+      <summary>隔离库演练（影子验证）· 本服务不触发</summary>
       <p class="note-inline">变更准备<strong>不做</strong>隔离库演练：它不会执行任何 SQL，也不会接触数据库。</p>
       <p class="note-inline">真实演练由具备权限的人在 ChangeGuard 治理后端触发；只有
       <code>Mode=POSTGRES</code>、<code>Status=PASSED</code>、回滚验证通过、且摘要与规则版本一致时才算有效证据。</p>
       <p class="note-inline"><code>DEMO_ONLY</code> 与 <code>NOT_RUN</code> 在任何情况下都不能当作验证通过。</p>
-    </article>
+    </details>
   `;
 }
 
 function renderProvenance() {
   return `
-    <article class="card card-flat">
-      <div class="card-title"><span>出处与边界</span></div>
+    <details class="details">
+      <summary>出处与边界</summary>
       <ul class="note-inline">
         <li>确定性检查由<b>本地静态扫描</b>产生，模型只能提供参考建议。</li>
         <li>语料是合成示例，不是生产规范；结论不可直接用于生产决策。</li>
         <li>变更准备<b>不参与审批与发布</b>，也不判定变更能否上线。</li>
       </ul>
-    </article>
+    </details>
   `;
 }
 
@@ -910,6 +1031,7 @@ function renderProvenance() {
 
 async function init() {
   $("createForm").addEventListener("submit", createTask);
+  $("newTaskButton").addEventListener("click", startNewTask);
   $("healthChip").addEventListener("click", () => {
     window.alert($("healthChip").title || "无健康信息。");
   });
@@ -931,6 +1053,7 @@ async function init() {
   }
 
   await refreshHealth();
+  await restoreLatestTask();
 }
 
 if (document.readyState === "loading") {
