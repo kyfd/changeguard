@@ -105,8 +105,8 @@ class AgentService:
         await self._dispatch(record["task_id"])
         return self._view(self._require(record["task_id"])), slots
 
-    async def clarify(self, task_id: str, request: ClarifyRequest) -> TaskView:
-        record = self._require(task_id)
+    async def clarify(self, task_id: str, request: ClarifyRequest, context: TrustedContext) -> TaskView:
+        record = self._require_owned(task_id, context)
         status = record.get("status")
         if status not in RESUMABLE_STATUSES:
             raise TaskNotResumable(f"当前状态 {status} 不允许补充信息")
@@ -128,14 +128,20 @@ class AgentService:
         await self._dispatch(task_id)
         return self._view(self._require(task_id))
 
-    async def get_task(self, task_id: str) -> TaskView:
-        return self._view(self._require(task_id))
+    async def get_task(self, task_id: str, context: TrustedContext) -> TaskView:
+        return self._view(self._require_owned(task_id, context))
 
-    async def list_tasks(self) -> list[TaskView]:
-        return [self._view(item) for item in self._repository.list()]
+    async def list_tasks(self, context: TrustedContext) -> list[TaskView]:
+        owned = [
+            item
+            for item in self._repository.list()
+            if item.get("user_id") == context.user_id
+            and item.get("organization_id") == context.organization_id
+        ]
+        return [self._view(item) for item in owned]
 
-    async def cancel(self, task_id: str) -> TaskView:
-        record = self._require(task_id)
+    async def cancel(self, task_id: str, context: TrustedContext) -> TaskView:
+        record = self._require_owned(task_id, context)
         running = self._running.pop(task_id, None)
         if running and not running.done():
             running.cancel()
@@ -240,6 +246,17 @@ class AgentService:
     def _require(self, task_id: str) -> dict[str, Any]:
         record = self._repository.get(task_id)
         if record is None:
+            raise TaskNotFound(task_id)
+        return record
+
+    def _require_owned(self, task_id: str, context: TrustedContext) -> dict[str, Any]:
+        """任务读取与续作的归属闸门：成员只能触达自己组织里自己的任务。"""
+        record = self._require(task_id)
+        if (
+            record.get("user_id") != context.user_id
+            or record.get("organization_id") != context.organization_id
+        ):
+            # 归属不一致按"不存在"处理，不泄露其他成员任务的存在性。
             raise TaskNotFound(task_id)
         return record
 
