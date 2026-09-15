@@ -44,3 +44,4 @@ deploy/k8s/secret.yaml
 
 # Stray files from CLI flag typos
 --*
+tmp-deploy/

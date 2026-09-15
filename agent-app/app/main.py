@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from app.api.routes import router
 from app.config import Settings
 from app.service import AgentService
+from app.usage import UsageLimits, UsageLimiter
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -26,6 +27,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     application.state.settings = resolved
     application.state.service = AgentService(resolved)
+    application.state.usage = UsageLimiter(
+        UsageLimits(
+            per_minute=resolved.rate_per_minute,
+            per_user_daily=resolved.user_daily_limit,
+            global_daily=resolved.global_daily_limit,
+        )
+    )
     application.include_router(router)
 
     @application.get("/", include_in_schema=False)

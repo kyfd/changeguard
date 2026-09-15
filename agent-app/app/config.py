@@ -54,6 +54,12 @@ class Settings:
     # 意义是：本服务即使被误暴露，也不能被直接调用冒充治理服务。
     upstream_token: str = ""
 
+    # 用量限额（app/usage.py）。模型调用按量计费，这三层是防滥用的闸门；
+    # 0 表示不启用对应层。账单硬顶仍由模型服务商控制台的用量封顶负责。
+    rate_per_minute: int = 6
+    user_daily_limit: int = 60
+    global_daily_limit: int = 400
+
     @property
     def llm_configured(self) -> bool:
         return bool(self.llm_base_url.strip()) and bool(self.llm_api_key.strip())
@@ -84,4 +90,7 @@ class Settings:
             allow_header_identity=os.getenv("AGENT_ALLOW_HEADER_IDENTITY", "0").strip()
             in {"1", "true", "on", "yes"},
             upstream_token=os.getenv("AGENT_UPSTREAM_TOKEN", "").strip(),
+            rate_per_minute=int(os.getenv("AGENT_RATE_PER_MINUTE", str(defaults.rate_per_minute))),
+            user_daily_limit=int(os.getenv("AGENT_USER_DAILY_LIMIT", str(defaults.user_daily_limit))),
+            global_daily_limit=int(os.getenv("AGENT_GLOBAL_DAILY_LIMIT", str(defaults.global_daily_limit))),
         )
