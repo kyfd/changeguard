@@ -81,6 +81,10 @@ class ClarificationQuestion(BaseModel):
     question: str
     reason: str
     examples: list[str] = Field(default_factory=list)
+    # 从需求原文确定性抽取出的候选值：仅作预填建议。
+    # 未经用户提交不会进入 slots，也不参与任何缺失判定或检查结论。
+    suggested: str | None = None
+    suggested_from: str | None = None
 
 
 class EvidenceRef(BaseModel):

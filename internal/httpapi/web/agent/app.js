@@ -598,38 +598,50 @@ function renderConversation() {
 }
 
 function renderQuestions(task) {
+  let suggestedCount = 0;
   const rows = (task.questions || []).map((question, index) => {
     const field = CLARIFY_FIELDS.find((item) => item.name === question.field);
     const label = field ? field.label : question.field;
     const inputName = `q_${esc(question.field)}_${index}`;
+    // 建议值来自需求原文的确定性抽取，预填进控件但仍需用户确认后才提交。
+    const suggested = question.suggested || "";
+    if (suggested) suggestedCount += 1;
+    const valueAttr = suggested ? ` value="${esc(suggested)}"` : "";
     let control;
     if (field && field.type === "select") {
       const options = field.options
-        .map(([value, text]) => `<option value="${esc(value)}">${esc(text)}</option>`)
+        .map(([value, text]) => `<option value="${esc(value)}"${value === suggested ? " selected" : ""}>${esc(text)}</option>`)
         .join("");
       control = `<select data-field="${esc(question.field)}" id="${inputName}">${options}</select>`;
     } else if (field && field.type === "textarea") {
-      control = `<textarea data-field="${esc(question.field)}" id="${inputName}" rows="3" placeholder="${esc(field.placeholder || "")}"></textarea>`;
+      control = `<textarea data-field="${esc(question.field)}" id="${inputName}" rows="3" placeholder="${esc(field.placeholder || "")}">${esc(suggested)}</textarea>`;
     } else if (question.field === "planned_at") {
-      control = `<input data-field="planned_at" id="${inputName}" type="datetime-local">`;
+      control = `<input data-field="planned_at" id="${inputName}" type="datetime-local"${valueAttr}>`;
     } else {
-      control = `<input data-field="${esc(question.field)}" id="${inputName}" type="text" placeholder="${esc((field && field.placeholder) || "")}">`;
+      control = `<input data-field="${esc(question.field)}" id="${inputName}" type="text" placeholder="${esc((field && field.placeholder) || "")}"${valueAttr}>`;
     }
+    const hint = suggested
+      ? `<span class="note-inline tone-info">已按${esc(question.suggested_from || "需求原文")}预填，请核对后再提交。</span>`
+      : (question.reason ? `<span class="note-inline">${esc(question.reason)}</span>` : "");
     return `
-      <label class="field ${question.field === "query_sql" ? "field-wide" : ""}">
+      <label class="field ${question.field === "query_sql" ? "field-wide" : ""}${suggested ? " is-suggested" : ""}">
         <span>${esc(label)}</span>
         ${control}
-        ${question.reason ? `<span class="note-inline">${esc(question.reason)}</span>` : ""}
+        ${hint}
       </label>
     `;
   }).join("");
+
+  const suggestedNote = suggestedCount
+    ? `<p class="note-inline">其中 ${suggestedCount} 项已从需求原文预填，<strong>这些是待你确认的建议值，不是系统已确认的信息</strong>；错了请直接改。</p>`
+    : `<p class="note-inline">缺失信息不会被推测或编造，请逐项填写。</p>`;
 
   return `
     <article class="card card-ask" id="askCard">
       <div class="card-title"><span>需要你补充</span><span class="badge badge-warn">共 ${(task.questions || []).length} 项</span></div>
       <div class="ask-grid" id="questionFields">${rows}</div>
       <button class="button button-primary" type="button" id="clarifyButton">提交并继续</button>
-      <p class="note-inline">缺失信息不会被推测或编造，请逐项填写。</p>
+      ${suggestedNote}
     </article>
   `;
 }

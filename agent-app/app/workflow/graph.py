@@ -45,6 +45,7 @@ from app.schemas.drafts import (
 from app.tools.business import Toolbox
 from app.tools.registry import TrustedContext
 from app.tools.scan import feedback_lines
+from app.workflow.extract import suggest_slots
 from app.workflow.state import WorkflowState, build_questions, event, slots_from_state
 
 # 允许模型提供的字段。其余字段一律拒绝，避免模型改写服务端已确认的信息。
@@ -258,10 +259,19 @@ class DraftWorkflow:
         missing = slots.missing()
         events = list(state.get("events") or [])
         if missing:
-            events.append(event("check_info", f"缺少必要信息：{', '.join(missing)}"))
+            # 从需求原文确定性抽取候选值，作为表单预填建议。
+            # 它不写入 slots，因此不改变缺失判定，也不替用户完成确认。
+            suggestions = suggest_slots(state.get("requirement", ""), missing)
+            detail = f"缺少必要信息：{', '.join(missing)}"
+            if suggestions:
+                detail += f"；已从需求原文预填 {', '.join(sorted(suggestions))} 供核对"
+            events.append(event("check_info", detail))
             return {
                 "status": TaskStatus.NEEDS_INFO.value,
-                "questions": [item.model_dump(mode="json") for item in build_questions(missing)],
+                "questions": [
+                    item.model_dump(mode="json")
+                    for item in build_questions(missing, suggestions=suggestions)
+                ],
                 "events": events,
             }
         events.append(event("check_info", "必要信息完整，继续生成草案"))

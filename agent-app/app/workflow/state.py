@@ -50,8 +50,22 @@ def questions_for(missing: list[str]) -> list[ClarificationQuestion]:
     return [QUESTION_TEMPLATES[field] for field in missing if field in QUESTION_TEMPLATES]
 
 
-def build_questions(missing: list[str], extra: list[str] | None = None) -> list[ClarificationQuestion]:
+def build_questions(
+    missing: list[str],
+    extra: list[str] | None = None,
+    suggestions: dict[str, str] | None = None,
+) -> list[ClarificationQuestion]:
     questions = questions_for(missing)
+    if suggestions:
+        # 建议值只挂在追问上供用户核对，不代表这些槽位已被填上。
+        questions = [
+            item.model_copy(
+                update={"suggested": suggestions[item.field], "suggested_from": "需求原文"}
+            )
+            if item.field in suggestions
+            else item
+            for item in questions
+        ]
     for note in extra or []:
         questions.append(
             ClarificationQuestion(

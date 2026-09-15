@@ -297,6 +297,10 @@ textarea.stale { border-color: #e0b060; background: #fffdf6; }
 /* 追问表单：两列网格，长文本独占整行 */
 .ask-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .ask-grid .field-wide { grid-column: 1 / -1; }
+/* 预填项：浅蓝底色表明"这是建议值，等你确认"，与用户已输入的内容区分开。 */
+.ask-grid .is-suggested input,
+.ask-grid .is-suggested select,
+.ask-grid .is-suggested textarea { background: var(--accent-soft); border-color: #b9d0ff; }
 @media (max-width: 1100px) { .ask-grid { grid-template-columns: 1fr; } }
 
 .note { font-size: 12px; color: var(--text-muted); background: var(--surface-sunken); padding: 7px 9px; border-radius: 6px; }
