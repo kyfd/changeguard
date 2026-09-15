@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#f7f9fc">
+  <title>变更准备 · ChangeGuard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#workbench">跳到主要内容</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2.7 20 6v5.2c0 5.1-3.3 8.6-8 10.1-4.7-1.5-8-5-8-10.1V6l8-3.3Z"/>
+          <path d="m8.5 12 2.1 2.1 4.9-5"/>
+        </svg>
+      </span>
+      <div class="brand-text">
+        <strong>变更准备</strong>
+        <span>材料准备与静态检查；审批与发布仍由 ChangeGuard 控制</span>
+      </div>
+    </div>
+
+    <div class="topbar-right">
+      <span class="chip" id="actorChip" title="身份来自控制台会话，由服务端解析后注入，页面无法自行声明身份。">
+        <span id="actorName">读取登录状态…</span>
+      </span>
+      <button class="chip chip-button" id="healthChip" type="button" title="查看服务健康信息">
+        <i class="dot" id="healthDot"></i><span id="healthText">未连接</span>
+      </button>
+      <a class="button button-ghost button-small" href="/">返回控制台</a>
+    </div>
+  </header>
+
+  <div class="banner banner-warn" id="identityBanner" hidden></div>
+  <div class="banner banner-danger" id="errorBanner" hidden></div>
+
+  <main class="workbench" id="workbench">
+    <section class="col col-chat" aria-labelledby="chatTitle">
+      <header class="col-head">
+        <h2 id="chatTitle">对话</h2>
+        <span class="col-hint">提需求 · 补信息 · 进度</span>
+      </header>
+      <div class="col-body" id="chatBody">
+        <form class="card" id="createForm">
+          <label class="field">
+            <span>需求</span>
+            <textarea id="requirement" rows="4" placeholder="例如：给订单表按用户和创建时间准备一个索引变更，目标 PostgreSQL，安排在周五晚上。"></textarea>
+          </label>
+
+          <details class="details" id="knownInfo">
+            <summary>可选：直接提供已知信息（缺什么会被追问）</summary>
+            <div class="grid-2">
+              <label class="field"><span>应用</span><input id="optApplication" autocomplete="off" placeholder="order-service"></label>
+              <label class="field"><span>环境</span><input id="optEnvironment" autocomplete="off" placeholder="生产"></label>
+              <label class="field"><span>数据库</span>
+                <select id="optDatabase">
+                  <option value="">未知</option>
+                  <option value="postgresql">PostgreSQL</option>
+                  <option value="mysql">MySQL</option>
+                </select>
+              </label>
+              <label class="field"><span>表名</span><input id="optTable" autocomplete="off" placeholder="orders"></label>
+              <label class="field"><span>计划时间</span><input id="optPlannedAt" type="datetime-local"></label>
+              <label class="field"><span>时区</span><input id="optTimezone" autocomplete="off" placeholder="Asia/Shanghai"></label>
+            </div>
+            <label class="field"><span>触发这次变更的查询 SQL</span><textarea id="optQuerySql" rows="3" placeholder="慢查询原文"></textarea></label>
+            <label class="field"><span>表结构快照</span><textarea id="optSchema" rows="3" placeholder="粘贴字段列表或 CREATE TABLE。首版只使用上传快照，不接生产库实时探索。"></textarea></label>
+          </details>
+
+          <p class="note">生成的是<strong>待确认的草案</strong>。它不会自动提交变更，也不会进入审批流程。</p>
+          <button class="button button-primary" id="createButton" type="submit">开始准备材料</button>
+        </form>
+
+        <div id="conversation" class="stack"></div>
+      </div>
+    </section>
+
+    <section class="col col-draft" aria-labelledby="draftTitle">
+      <header class="col-head">
+        <h2 id="draftTitle">草案</h2>
+        <span class="col-hint" id="draftMeta">尚未生成</span>
+      </header>
+      <div class="col-body" id="draftBody"></div>
+    </section>
+
+    <section class="col col-evidence" aria-labelledby="evidenceTitle">
+      <header class="col-head">
+        <h2 id="evidenceTitle">证据与检查</h2>
+        <span class="col-hint">确定性结论 · 引用来源</span>
+      </header>
+      <div class="col-body" id="evidenceBody"></div>
+    </section>
+  </main>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

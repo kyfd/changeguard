@@ -126,6 +126,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/upgrade/upload", s.handleUpgradeUpload)
 	mux.HandleFunc("/api/upgrade/apply", s.handleUpgradeApply)
 	mux.HandleFunc("/api/upgrade/abort", s.handleUpgradeAbort)
+	// 变更准备 Agent：浏览器只与本服务通信，身份由服务端解析后注入下游。
+	mux.HandleFunc("/api/agent/", s.handleAgentProxy)
+	// 工作台页面与资源。必须显式注册：根静态处理器会把目录路径回退成控制台首页。
+	mux.HandleFunc("/agent/", s.handleAgentWorkbench)
 	staticFS, err := fs.Sub(webAssets, "web")
 	if err != nil {
 		panic(err)
@@ -290,6 +294,7 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 		"operations_integration_configured": s.integrations.OperationsConfigured(),
 		"store_mode":                        s.service.StoreMode(),
 		"session_mode":                      s.auth.SessionMode(),
+		"prepare_agent_enabled":             AgentEnabled(),
 	})
 }
 

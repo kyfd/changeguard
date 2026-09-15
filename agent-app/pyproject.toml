@@ -1,0 +1,29 @@
+[project]
+name = "changeguard-agent-app"
+version = "0.1.0"
+description = "ChangeGuard 数据库变更准备 Agent：需求澄清、规范检索、结构化草案与确定性检查"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pydantic>=2.9",
+    "httpx>=0.27",
+    "langgraph>=0.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# 容器构建需要能直接 `pip install .`。仓库里有 app/ tests/ evals/ 多个顶层目录，
+# setuptools 自动发现会直接报错，所以必须显式声明只打包 app。
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]

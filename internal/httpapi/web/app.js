@@ -376,12 +376,16 @@ function renderNav() {
   const route = currentRoute()[0];
   const nav = document.querySelector("#navList");
   if (!nav) return;
-  nav.innerHTML = visibleNavGroups().map(group => `
+  const groups = visibleNavGroups().map(group => `
     <div class="nav-group-label">${group.group}</div>
     ${group.items.map(item => `<button class="nav-item ${route === item.route ? "active" : ""}" data-route="${item.route}" ${route === item.route ? 'aria-current="page"' : ""}>
       ${svg(item.icon)}<span>${item.label}</span>${item.count && item.count() ? `<b class="nav-count">${item.count()}</b>` : ""}
     </button>`).join("")}
   `).join("");
+  // 变更准备是独立文档（由本服务同源提供），所以用真实链接而不是前端路由：
+  // 它不做路由跳转，点击即导航到 /agent/。刻意不带 data-route，避免被路由处理器接管。
+  nav.innerHTML = groups + `<div class="nav-group-label">变更准备</div>
+    <a class="nav-item" href="/agent/" title="打开变更准备工作台：材料准备与静态检查">${svg("flask")}<span>变更准备</span></a>`;
   requestAnimationFrame(() => nav.querySelector(".nav-item.active")?.scrollIntoView({block:"nearest"}));
 }
 function setHeader(title, breadcrumb = title) {

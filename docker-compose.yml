@@ -93,6 +93,11 @@ services:
       CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN: ${CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN:-}
       CHANGEGUARD_OPERATIONS_ORGANIZATION_ID: ${CHANGEGUARD_OPERATIONS_ORGANIZATION_ID:-org_demo}
       CHANGEGUARD_METRICS_TOKEN: ${CHANGEGUARD_METRICS_TOKEN:-}
+      # 变更准备 Agent（内部后端）。不配置也能运行：/api/agent/* 会显式返回 503，
+      # 治理、审批与发布门禁完全不受影响。
+      CHANGEGUARD_AGENT_BASE_URL: ${CHANGEGUARD_AGENT_BASE_URL:-http://agent-app:8091}
+      # 与 agent-app 的 AGENT_UPSTREAM_TOKEN 必须一致；留空表示不校验（仅限内网部署）。
+      CHANGEGUARD_AGENT_UPSTREAM_TOKEN: ${CHANGEGUARD_AGENT_UPSTREAM_TOKEN:-}
     depends_on:
       primary-postgres:
         condition: service_healthy
@@ -105,6 +110,31 @@ services:
       interval: 10s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
+
+  # 变更准备 Agent：**内部后端**，刻意不发布端口。
+  # 只有 dbguard 通过 /api/agent/* 反向代理访问它；界面由 dbguard 同源提供（/agent/）。
+  # 也刻意不放进 dbguard 的 depends_on —— Agent 挂了，治理与发布必须照常工作。
+  agent-app:
+    build:
+      context: .
+      dockerfile: agent-app/Dockerfile
+    environment:
+      # 身份由 dbguard 在服务端解析会话后注入；本服务只应被 dbguard 调用。
+      AGENT_ALLOW_HEADER_IDENTITY: "1"
+      AGENT_UPSTREAM_TOKEN: ${CHANGEGUARD_AGENT_UPSTREAM_TOKEN:-}
+      AGENT_EXECUTION_MODE: background
+      AGENT_MAX_REVISIONS: ${CHANGEGUARD_AGENT_MAX_REVISIONS:-2}
+      AGENT_TASK_TIMEOUT: ${CHANGEGUARD_AGENT_TASK_TIMEOUT:-120}
+      AGENT_TASK_STORE: /app/data/agent-tasks.json
+      # 合成语料在镜像内：检索的依据来源，缺失时草案会标注"依据不足"。
+      AGENT_DEMO_DIR: /app/corpus
+      AGENT_LLM_BASE_URL: ${CHANGEGUARD_LLM_BASE_URL:-}
+      AGENT_LLM_API_KEY: ${CHANGEGUARD_LLM_API_KEY:-}
+      AGENT_LLM_MODEL: ${CHANGEGUARD_LLM_MODEL:-deepseek-chat}
+      AGENT_LLM_TIMEOUT: ${CHANGEGUARD_AGENT_LLM_TIMEOUT:-20}
+    volumes:
+      - agent-task-data:/app/data
     restart: unless-stopped
 
   nginx:
@@ -122,3 +152,4 @@ volumes:
   primary-data:
   redis-data:
   shadow-data:
+  agent-task-data:
