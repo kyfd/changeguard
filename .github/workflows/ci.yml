@@ -86,17 +86,45 @@ jobs:
 
       - name: Check frontend JavaScript syntax
         run: |
-          for file in internal/httpapi/web/*.js internal/httpapi/web/*.mjs; do
-            [ -e "$file" ] || continue
-            node --check "$file"
-          done
+          # 必须递归：变更准备工作台是独立文档，放在 internal/httpapi/web/agent/，
+          # 单层 glob 会静默漏掉它。
+          find internal/httpapi/web -type f \( -name '*.js' -o -name '*.mjs' \) -print0 |
+            xargs -0 -r -n1 node --check
 
       - name: Run frontend unit tests
         run: npm test
 
+  quality-agent:
+    name: quality-agent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: agent-app/pyproject.toml
+
+      - name: Install agent dependencies
+        working-directory: agent-app
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run agent tests
+        working-directory: agent-app
+        run: python -m pytest -q
+
+      # 变更准备 Agent 是独立镜像，与治理服务镜像分开构建。
+      # 构建上下文必须是仓库根目录：检索语料在 agent-app/ 之外，且由
+      # agent-app/Dockerfile.dockerignore 负责裁剪上下文。
+      - name: Build agent container image
+        run: docker build -t changeguard-agent:ci -f agent-app/Dockerfile .
+
   quality:
     name: quality
-    needs: [quality-go, quality-js]
+    needs: [quality-go, quality-js, quality-agent]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -104,6 +132,7 @@ jobs:
         run: |
           test "${{ needs.quality-go.result }}" = "success"
           test "${{ needs.quality-js.result }}" = "success"
+          test "${{ needs.quality-agent.result }}" = "success"
 
   integration:
     name: integration
