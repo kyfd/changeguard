@@ -196,6 +196,28 @@ func ActorID(ctx context.Context) (string, bool) {
 	return value, ok && value != ""
 }
 
+// ActorOrganization 返回已认证成员所属的组织。
+//
+// 存在的意义是：下游服务（例如变更准备 Agent）需要组织范围才能做隔离，
+// 而这个范围**只能由服务端从会话解析**，绝不能来自请求体或调用方自定义的头。
+func (m *Manager) ActorOrganization(userID string) (string, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "", errors.New("actor id is required")
+	}
+	user, err := m.store.User(userID)
+	if err != nil {
+		return "", fmt.Errorf("resolve actor %s: %w", userID, err)
+	}
+	if !user.Active {
+		return "", fmt.Errorf("actor %s is inactive", userID)
+	}
+	if strings.TrimSpace(user.OrganizationID) == "" {
+		return "", fmt.Errorf("actor %s has no organization", userID)
+	}
+	return user.OrganizationID, nil
+}
+
 func (m *Manager) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.cleanup()

@@ -1,0 +1,33 @@
+# agent-app/Dockerfile 的专属忽略文件。
+#
+# 为什么要单独一份：Dockerfile 的构建上下文是**仓库根目录**（因为语料在
+# agent-app/ 之外）。按 Docker 规则，存在 `Dockerfile.dockerignore` 时会**替换**
+# 根目录的 .dockerignore，所以这里必须写全，不能只写增量。
+
+# 版本库与本地配置
+.git
+.github
+.codebuddy
+.env
+.env.*
+
+# Python 本地虚拟环境与缓存（体积最大，必须排除）
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+
+# 运行态数据与产物
+**/data
+bin
+tmp
+dist
+coverage.out
+*.log
+*.exe
+*.EXE
+screenshots
+
+# 前端依赖与文档
+**/node_modules
+docs

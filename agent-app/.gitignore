@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# pip 构建产物。build/lib 是 app/ 的一份完整副本，
+# 提交它会制造第二个源码树，必然漂移。
+build/
+dist/
+*.egg-info/
+
+# 运行时数据与本地文件
+data/
+.env
+*.log
+
+# 评测运行的临时任务存储（与 data/ 同类，不是结果）
+evals/.work/
