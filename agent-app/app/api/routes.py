@@ -99,15 +99,15 @@ async def create_task(payload: CreateTaskRequest, request: Request) -> TaskView:
 
 @router.get("/tasks", response_model=list[TaskView])
 async def list_tasks(request: Request) -> list[TaskView]:
-    await resolve_context(request)
-    return await _service(request).list_tasks()
+    context = await resolve_context(request)
+    return await _service(request).list_tasks(context)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskView)
 async def get_task(task_id: str, request: Request) -> TaskView:
-    await resolve_context(request)
+    context = await resolve_context(request)
     try:
-        return await _service(request).get_task(task_id)
+        return await _service(request).get_task(task_id, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
 
@@ -118,7 +118,7 @@ async def clarify(task_id: str, payload: ClarifyRequest, request: Request) -> Ta
     # clarify 会恢复工作流并再次调用模型，所以与 create 共用同一套用量闸门。
     _enforce_usage(request, context)
     try:
-        return await _service(request).clarify(task_id, payload)
+        return await _service(request).clarify(task_id, payload, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
     except TaskNotResumable as error:
@@ -127,8 +127,8 @@ async def clarify(task_id: str, payload: ClarifyRequest, request: Request) -> Ta
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskView)
 async def cancel(task_id: str, request: Request) -> TaskView:
-    await resolve_context(request)
+    context = await resolve_context(request)
     try:
-        return await _service(request).cancel(task_id)
+        return await _service(request).cancel(task_id, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
