@@ -1,16 +1,26 @@
 """编排层：把 HTTP 请求、工作流、存储串起来。
 
-三条与计划一致的约束：
+四条与计划一致的约束：
 
 1. **可信上下文来自 API 层**，不是请求体，也不是工具参数。
 2. **每个任务有超时**，超时按失败处理，而不是让状态永远停在 RUNNING。
 3. **取消会真正停止后续工作**，包括正在等待模型调用的那一刻。
+4. **执行受监督**：任何退出路径都必须留下「已落盘的终态」或「显式的降级记录」，
+   两者必居其一。既不能假装成功，也不能让任务在没有监督者的情况下留在在途状态。
+
+关于第 3、4 条的边界（不要过度宣称）：
+
+- 取消是**协作式**的。工作流在 await 点被终止，因此不会再调度后续的工具或模型调用；
+  但如果某个外部依赖不响应取消（例如同步阻塞调用），我们无法中断它正在进行的那个调用。
+  能保证的是：不再调度后续步骤，且迟到结果不会被发布。
+- `inline` 与 `background` 共用同一套受管理执行，区别只在等待方式。
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -37,6 +47,14 @@ RESUMABLE_STATUSES = {TaskStatus.NEEDS_INFO.value, TaskStatus.FAILED.value, Task
 # 不在其列，重启时保持原样。
 INTERRUPTED_STATUSES = {TaskStatus.RECEIVED.value, TaskStatus.RUNNING.value}
 
+# 终态落盘的结果。三种情形的含义不同，不能合并成一个 bool：
+#   persisted —— 已落盘，任务有明确可查询的终态；
+#   skipped   —— 已被取消或新执行接管，**不写才是对的**，不是故障；
+#   failed    —— 用完重试仍写不进去，存储不可用，必须显式降级。
+PERSIST_PERSISTED = "persisted"
+PERSIST_SKIPPED = "skipped"
+PERSIST_FAILED = "failed"
+
 
 class TaskNotFound(Exception):
     """任务不存在。"""
@@ -44,6 +62,40 @@ class TaskNotFound(Exception):
 
 class TaskNotResumable(Exception):
     """当前状态不允许继续。"""
+
+
+class TaskCancelRejected(Exception):
+    """取消失效：取消状态未能落盘，任务仍在运行。
+
+    这是一个**可重试**的失败：调用方应当重试，而不是以为任务已经停下。
+    """
+
+
+class TaskStateUnavailable(Exception):
+    """任务状态无法确定（例如终态未能落盘）。
+
+    存在的意义是：不能返回一个可能已经过期的视图来冒充"当前状态"。
+    """
+
+
+@dataclass
+class _Execution:
+    """一次受管理的执行。"""
+
+    task_id: str
+    execution_id: str
+    task: asyncio.Task[None]
+    finished: asyncio.Event
+
+
+@dataclass
+class _ExecutionProblem:
+    """执行留下的、值得外部知道的问题（用于健康状态与等待接口）。"""
+
+    execution_id: str
+    kind: str  # persist | exception
+    detail: str
+    recorded_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class AgentService:
@@ -55,7 +107,10 @@ class AgentService:
         # provider 可注入：评估集需要构造"模型输出非法/冲突"等场景。
         self._provider = provider or build_provider(settings)
         self._repository = TaskRepository(settings.task_store_path)
-        self._running: dict[str, asyncio.Task[None]] = {}
+        # 受管理的执行登记表：inline 与 background 都登记，二者因此都可被取消。
+        self._executions: dict[str, _Execution] = {}
+        # 未能留下可查询终态的执行（存储不可用）。健康状态据此报告降级。
+        self._problems: dict[str, _ExecutionProblem] = {}
         # 启动即处理上次进程遗留的在途任务，避免状态永远停在 RUNNING。
         self.interrupted_task_ids = self._mark_interrupted_tasks()
 
@@ -77,15 +132,21 @@ class AgentService:
         return self._retriever.size()
 
     async def health(self) -> dict[str, Any]:
-        running = sum(1 for task in self._running.values() if not task.done())
-        return {
-            "status": "ok",
+        running = sum(1 for execution in self._executions.values() if not execution.finished.is_set())
+        unpersisted = sorted(self._problems)
+        result: dict[str, Any] = {
+            # 有未落盘的执行结果时不能再报 ok：那会让"存储不可用"看起来像"一切正常"。
+            "status": "degraded" if unpersisted else "ok",
             "time": datetime.now(timezone.utc).isoformat(),
             "provider": self.provider_info(),
             "retriever": self.retriever_name(),
             "knowledge_chunks": self.knowledge_base_size(),
             "running_tasks": running,
+            "unpersisted_tasks": unpersisted,
         }
+        if unpersisted:
+            result["degraded_reason"] = "存在未能落盘的执行结果，存储可能不可用"
+        return result
 
     # -- 任务生命周期 ------------------------------------------------------
 
@@ -153,34 +214,54 @@ class AgentService:
 
     async def cancel(self, task_id: str, context: TrustedContext) -> TaskView:
         record = self._authorize(task_id, context)
-        # 先让在途执行失去所有权（递增代际 + 清空 execution_id），再取消协程。
-        # 顺序反过来的话，被取消的协程在退出前仍可能把自己的结果写回去，
-        # 把"取消后仍是成功态"暴露给调用方。
-        record["run_generation"] = int(record.get("run_generation") or 0) + 1
-        record["execution_id"] = ""
-        running = self._running.pop(task_id, None)
-        if running and not running.done():
-            running.cancel()
-        record["status"] = TaskStatus.CANCELLED.value
+        superseded_execution_id = record.get("execution_id") or ""
+
+        # 先在**副本**上构造取消后的状态，并且先落盘。
+        #
+        # 顺序是关键：如果先终止执行、再落盘，一旦落盘失败就会留下一个
+        # 「执行已经停了、仓储却仍是 RECEIVED」的孤儿——没有任何协程在推动它，
+        # 健康检查还显示一切正常，clarify 又因为状态不允许而拒绝。
+        # 所以落盘失败时必须什么都没发生，调用方拿到显式失败并可以重试。
+        candidate = dict(record)
+        candidate["run_generation"] = int(record.get("run_generation") or 0) + 1
+        candidate["execution_id"] = ""
+        candidate["status"] = TaskStatus.CANCELLED.value
         events = list(record.get("events") or [])
-        # 取消后不再继续任何后续工作。
         events.append(event("cancelled", "任务被取消，后续步骤不再执行"))
-        record["events"] = events
-        self._repository.save(record)
-        return self._view(record)
+        candidate["events"] = events
+
+        # 落盘前确认没有被并发接管。`TaskRepository.save` 是同步的，且这里到落盘之间
+        # 没有 await，因此在单进程事件循环里这一段是原子的（不会被其它协程插入）。
+        latest = self._repository.get(task_id)
+        if latest is not None and (latest.get("execution_id") or "") != superseded_execution_id:
+            raise TaskNotResumable("执行已被新的执行接管，取消未生效，请重试")
+
+        try:
+            self._repository.save(candidate)
+        except Exception as error:  # noqa: BLE001 - 任何落盘失败都必须变成显式的可重试失败
+            raise TaskCancelRejected(
+                f"取消未生效：状态未能落盘（{type(error).__name__}），任务仍在运行，请重试"
+            ) from error
+
+        # 落盘成功之后才终止执行并清理句柄，而且只清理**刚才那一个**执行。
+        self._terminate_superseded_execution(task_id, superseded_execution_id)
+        return self._view(candidate)
 
     async def wait_for(self, task_id: str, context: TrustedContext) -> TaskView:
         """等待后台执行结束（测试与演示用）。
 
         先校验归属再等待：否则等待本身就会变成一条无授权的存在性探测通道。
+
+        执行结束后若发现它没能留下可查询的终态（存储不可用），必须显式失败，
+        而不是把仓储里那份可能过期的记录当成"当前状态"返回。
         """
         self._authorize(task_id, context)
-        running = self._running.get(task_id)
-        if running:
-            try:
-                await running
-            except asyncio.CancelledError:
-                pass
+        execution = self._executions.get(task_id)
+        if execution is not None:
+            await execution.finished.wait()
+        problem = self._problems.get(task_id)
+        if problem is not None:
+            raise TaskStateUnavailable(problem.detail)
         return self._view(self._authorize(task_id, context))
 
     # -- 内部 --------------------------------------------------------------
@@ -193,6 +274,10 @@ class AgentService:
         """
         try:
             await self._dispatch(task_id)
+        except (TaskStateUnavailable, TaskCancelRejected):
+            # 存储本身已经出问题，再去写一条 FAILED 只会再失败一次并掩盖真正的原因。
+            # 这类失败由调用方显式返回，健康状态另行报告降级。
+            raise
         except Exception as error:
             record = self._repository.get(task_id)
             # 只有确实没跑起来（仍在途状态）才改状态，避免覆盖执行中已写入的终态。
@@ -206,14 +291,152 @@ class AgentService:
             raise
 
     async def _dispatch(self, task_id: str) -> None:
-        """按配置决定同步执行还是交给后台任务。"""
+        """按配置决定等待完成还是立即返回。
+
+        两种模式**共用同一套受管理执行**：都登记可取消的句柄，
+        区别只在于是不是在这里等它结束。这是 inline 也能被真正取消的前提。
+        """
         execution_id = self._begin_execution(task_id)
         if execution_id is None:
             return
+        execution = self._start_execution(task_id, execution_id)
         if self._settings.execution_mode == "inline":
-            await self._execute(task_id, execution_id)
+            await self._await_execution(execution)
+
+    def _start_execution(self, task_id: str, execution_id: str) -> _Execution:
+        """把一次执行登记成独立的受管理任务。
+
+        独立成 task 而不是直接 await 的好处：调用方的取消（客户端断开）与
+        工作流的取消可以分开处理，且句柄始终可被 `cancel` 找到。
+        """
+        task = asyncio.create_task(
+            self._run_managed(task_id, execution_id), name=f"agent-exec:{task_id}:{execution_id[:8]}"
+        )
+        execution = _Execution(task_id=task_id, execution_id=execution_id, task=task, finished=asyncio.Event())
+        self._executions[task_id] = execution
+        # 用回调统一收口：既取走异常（否则只会以 "Task exception was never retrieved"
+        # 的形式出现在日志里，没有任何机制能查询到），也负责释放句柄。
+        task.add_done_callback(lambda finished: self._on_execution_done(execution, finished))
+        return execution
+
+    def _on_execution_done(self, execution: _Execution, task: asyncio.Task[None]) -> None:
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                self._record_problem(
+                    execution.task_id,
+                    execution.execution_id,
+                    "exception",
+                    f"执行异常终止，状态未能确定：{type(error).__name__}: {error}",
+                )
+        # 释放句柄时必须校验身份，避免误删后来的新执行。
+        if self._executions.get(execution.task_id) is execution:
+            self._executions.pop(execution.task_id, None)
+        execution.finished.set()
+
+    async def _await_execution(self, execution: _Execution) -> None:
+        """等待受管理执行结束，并把它的失败如实向上暴露。"""
+        try:
+            await execution.finished.wait()
+        except asyncio.CancelledError:
+            # 调用方自己被取消（例如 inline 请求断开）。内部执行不能变成孤儿：
+            # 先终止它，再留下确定的终态，然后继续向上传播取消。
+            self._terminate_execution(execution)
+            self._abandon_execution(execution, "调用方取消：请求被中断，执行不再继续")
+            raise
+        problem = self._problems.get(execution.task_id)
+        if problem is not None and problem.execution_id == execution.execution_id:
+            raise TaskStateUnavailable(problem.detail)
+
+    async def _run_managed(self, task_id: str, execution_id: str) -> None:
+        """受管理执行的顶层入口：保证任何退出路径都不留无监督的在途任务。"""
+        try:
+            record = await self._execute(task_id, execution_id)
+        except asyncio.CancelledError:
+            # 取消的落盘由**发起方**负责，这里不写：
+            #   - 用户 cancel()：先落盘 CANCELLED，再取消执行；
+            #   - inline 调用方被取消：由 _await_execution 落盘 FAILED。
+            # 两处都不在这里，避免出现第二个写入者互相覆盖。
             return
-        self._running[task_id] = asyncio.create_task(self._execute(task_id, execution_id))
+        if record is None:
+            return  # 已被取消或新执行接管：不写才是对的
+        outcome = await self._persist_terminal(task_id, execution_id, record)
+        if outcome == PERSIST_FAILED:
+            self._record_problem(
+                task_id,
+                execution_id,
+                "persist",
+                "执行已完成，但终态未能落盘：存储不可用，任务状态无法确定",
+            )
+
+    async def _persist_terminal(self, task_id: str, execution_id: str, record: dict[str, Any]) -> str:
+        """带**有上限**重试的终态落盘，返回 persisted / skipped / failed。
+
+        只对终态做重试：一次性的存储抖动不应该把一个已经跑完的任务变成孤儿，
+        但也不能无限重试——重试用尽后必须显式降级，而不是假装写成功。
+        """
+        attempts = max(1, int(self._settings.persist_max_attempts))
+        for attempt in range(attempts):
+            if not self._owns(task_id, execution_id):
+                return PERSIST_SKIPPED
+            try:
+                self._repository.save(record)
+                return PERSIST_PERSISTED
+            except Exception:  # noqa: BLE001 - 任何落盘失败都先按可重试处理
+                if attempt + 1 >= attempts:
+                    return PERSIST_FAILED
+                # 退避期间若本执行被取消，CancelledError 应当继续向上传播：
+                # 那时终态的所有权已经转移（用户取消或调用方放弃会各自落盘），
+                # 在这里报一个"落盘失败"只会制造虚假的降级信号。
+                await asyncio.sleep(self._settings.persist_retry_backoff_seconds * (attempt + 1))
+        return PERSIST_FAILED
+
+    def _record_problem(self, task_id: str, execution_id: str, kind: str, detail: str) -> None:
+        self._problems[task_id] = _ExecutionProblem(execution_id=execution_id, kind=kind, detail=detail)
+
+    def _terminate_superseded_execution(self, task_id: str, execution_id: str) -> None:
+        """终止**刚被取代的那一个**执行。
+
+        必须比对 execution_id：如果在这中间已经有新执行接管，误杀它会让一个
+        正常推进的任务凭空停住。
+        """
+        execution = self._executions.get(task_id)
+        if execution is None or execution.execution_id != execution_id:
+            return
+        self._terminate_execution(execution)
+
+    def _terminate_execution(self, execution: _Execution) -> None:
+        if not execution.task.done():
+            execution.task.cancel()
+
+    def _abandon_execution(self, execution: _Execution, reason: str) -> None:
+        """为被放弃的执行留下确定终态。
+
+        这里是**同步**写入（`TaskRepository.save` 是同步的）：它会在协程已被取消时执行，
+        此时任何 await 都可能立刻再次抛出 CancelledError。
+        仍然校验执行身份——若已被用户取消或新执行接管，就不写。
+        """
+        record = self._owned(execution.task_id, execution.execution_id)
+        if record is None:
+            return
+        # 已经有确定的终态时不得覆盖：调用方被取消与执行完成之间可能只差一个事件循环轮次，
+        # 把已经落盘的 DRAFT_READY 改写成 FAILED 是比"不写"更糟的结果。
+        if (record.get("status") or "") not in INTERRUPTED_STATUSES:
+            return
+        record["status"] = TaskStatus.FAILED.value
+        record["error"] = reason
+        events = list(record.get("events") or [])
+        events.append(event("abandoned", reason))
+        record["events"] = events
+        try:
+            self._repository.save(record)
+        except Exception as error:  # noqa: BLE001 - 连放弃都写不进去时必须显式降级，不能沉默
+            self._record_problem(
+                execution.task_id,
+                execution.execution_id,
+                "persist",
+                f"放弃的执行未能落盘：{type(error).__name__}: {error}",
+            )
 
     def _begin_execution(self, task_id: str) -> str | None:
         """开启一次新执行：递增代际并分配 execution_id。
@@ -228,7 +451,13 @@ class AgentService:
         record["run_generation"] = int(record.get("run_generation") or 0) + 1
         record["execution_id"] = execution_id
         self._repository.save(record)
+        # 新执行意味着重新开始：清掉上一个执行留下的降级记录。
+        self._problems.pop(task_id, None)
         return execution_id
+
+    def _owns(self, task_id: str, execution_id: str) -> bool:
+        record = self._repository.get(task_id)
+        return record is not None and (record.get("execution_id") or "") == execution_id
 
     def _owned(self, task_id: str, execution_id: str) -> dict[str, Any] | None:
         """取记录，并确认本次执行仍持有所有权。"""
@@ -238,25 +467,27 @@ class AgentService:
         return record
 
     def _save_if_owner(self, task_id: str, execution_id: str, record: dict[str, Any]) -> None:
-        """只在仍持有执行所有权时落盘。
+        """单次、带所有权校验的落盘。
 
         取消与被接管都会换掉 execution_id，于是旧执行在这里被拒绝写入。
         注意这里**不是**吞掉持久化失败：真正落盘出错时 `save` 会照常抛出。
+        需要"失败后重试"的场景用 `_persist_terminal`。
         """
         if self._owned(task_id, execution_id) is None:
             return
         self._repository.save(record)
 
-    def _release(self, task_id: str) -> None:
-        """释放执行句柄；只有当前句柄仍是自己时才移除，避免误删新执行的句柄。"""
-        if self._running.get(task_id) is asyncio.current_task():
-            self._running.pop(task_id, None)
+    async def _execute(self, task_id: str, execution_id: str) -> dict[str, Any] | None:
+        """运行工作流并把结果整理成待落盘的记录。返回 None 表示不应落盘。
 
-    async def _execute(self, task_id: str, execution_id: str) -> None:
+        这里**不**吞掉 CancelledError，也不负责释放句柄：取消的语义由发起方决定，
+        资源的释放由 `_on_execution_done` 统一负责。这样"执行结束"与"结果已落盘"
+        就不会像以前那样互相抢顺序。
+        """
         record = self._owned(task_id, execution_id)
         if record is None:
             # 已被更新的执行接管，或任务已被取消：旧执行不得再写任何状态。
-            return
+            return None
         try:
             record = await asyncio.wait_for(
                 self._run_workflow(record),
@@ -267,16 +498,12 @@ class AgentService:
             record["error"] = f"任务超过 {self._settings.task_timeout_seconds:.0f} 秒未完成，已终止"
             record.setdefault("events", []).append(event("timeout", record["error"]))
         except asyncio.CancelledError:
-            # 取消状态由 cancel() 负责写入；被取消的执行不再落盘，
-            # 否则就会把"取消后仍然是成功态"暴露给调用方。
-            self._release(task_id)
-            return
+            raise
         except Exception as error:  # noqa: BLE001 - 任何执行异常都要转成显式失败状态
             record["status"] = TaskStatus.FAILED.value
             record["error"] = f"执行失败：{type(error).__name__}: {error}"
             record.setdefault("events", []).append(event("failed", record["error"]))
-        self._release(task_id)
-        self._save_if_owner(task_id, execution_id, record)
+        return record
 
     def _mark_interrupted_tasks(self) -> list[str]:
         """启动时把上次进程遗留的在途任务显式标为中断失败。

@@ -36,6 +36,11 @@ class Settings:
     max_revisions: int = 2
     task_timeout_seconds: float = 120.0
 
+    # 终态落盘失败时的**有上限**重试：一次存储抖动不应该让已经跑完的任务变成孤儿，
+    # 但也不允许无限重试。用尽后按降级处理（健康状态报告 degraded，见 AgentService.health）。
+    persist_max_attempts: int = 3
+    persist_retry_backoff_seconds: float = 0.05
+
     # 证据来源
     agent_demo_dir: str = ""
     task_store_path: str = "data/agent-tasks.json"
@@ -81,6 +86,8 @@ class Settings:
             llm_max_tokens=int(os.getenv("AGENT_LLM_MAX_TOKENS", "1200")),
             max_revisions=int(os.getenv("AGENT_MAX_REVISIONS", "2")),
             task_timeout_seconds=float(os.getenv("AGENT_TASK_TIMEOUT", "120")),
+            persist_max_attempts=int(os.getenv("AGENT_PERSIST_MAX_ATTEMPTS", "3")),
+            persist_retry_backoff_seconds=float(os.getenv("AGENT_PERSIST_RETRY_BACKOFF", "0.05")),
             agent_demo_dir=os.getenv("AGENT_DEMO_DIR", "").strip(),
             task_store_path=os.getenv("AGENT_TASK_STORE", defaults.task_store_path),
             execution_mode=os.getenv("AGENT_EXECUTION_MODE", defaults.execution_mode).strip() or defaults.execution_mode,

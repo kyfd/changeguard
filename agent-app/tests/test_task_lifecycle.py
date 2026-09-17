@@ -25,7 +25,14 @@ from app.main import create_app
 from app.service import AgentService
 from app.store.tasks import TaskRepository, TaskRepositoryCorrupted
 from app.tools.registry import TrustedContext
-from tests.conftest import DEMO_DIR, PLANNED_AT, bare_request, complete_request, run
+from tests.conftest import (
+    DEMO_DIR,
+    PLANNED_AT,
+    bare_request,
+    complete_request,
+    execution_handles,
+    run,
+)
 
 CONTEXT = TrustedContext(user_id="alice", organization_id="org_demo")
 
@@ -251,7 +258,7 @@ def test_cancel_prevents_the_cancelled_execution_from_publishing(tmp_path: Path)
     async def scenario() -> dict[str, Any]:
         provider = BlockingProvider()
         service, task_id = await _start_blocked_execution(tmp_path, provider)
-        handle = service._running[task_id]
+        handle = execution_handles(service)[0]
 
         await service.cancel(task_id, CONTEXT)
         # 放开阻塞：即使旧执行还能跑到结束，它也已经失去所有权。
@@ -273,7 +280,7 @@ def test_redispatch_fences_the_previous_execution(tmp_path: Path) -> None:
     async def scenario() -> tuple[dict[str, Any], str]:
         provider = BlockingProvider()
         service, task_id = await _start_blocked_execution(tmp_path, provider)
-        stale_handle = service._running[task_id]
+        stale_handle = execution_handles(service)[0]
         stale_execution = service._repository.get(task_id)["execution_id"]
 
         # 再派发一次：新执行立刻接管所有权，旧执行被栅栏挡住。
@@ -297,9 +304,15 @@ def test_health_reports_no_running_task_after_cancel(tmp_path: Path) -> None:
         service, task_id = await _start_blocked_execution(tmp_path, provider)
         assert (await service.health())["running_tasks"] == 1
 
+        handles = execution_handles(service)
         await service.cancel(task_id, CONTEXT)
         provider.release.set()
+        # 取消是协作式的：cancel() 返回时只是"已发出取消并已落盘"，
+        # 必须等实际执行退出，句柄才会被释放、健康计数才会归零。
+        await asyncio.gather(*handles, return_exceptions=True)
         await asyncio.sleep(0)
+
+        assert execution_handles(service) == [], "取消后必须释放执行句柄"
         return await service.health()
 
     health = run(scenario())
