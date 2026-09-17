@@ -154,7 +154,15 @@ func (s *Server) routes() http.Handler {
 		w.Header().Set("Cache-Control", "no-cache")
 		fileServer.ServeHTTP(w, r)
 	})
-	return s.metrics.Middleware(withRecover(s.auth.Middleware(mux), s.logger), s.logger)
+	authenticated := s.auth.Middleware(mux)
+
+	// 内部只读工具接口单独成一棵树：它由共享密钥做服务认证，**刻意不复用会话中间件**。
+	// Agent 后端没有、也不应该持有治理会话（见 agenttools.go 的说明）；
+	// 浏览器拿不到共享密钥，因此这个入口对浏览器不可达。
+	root := http.NewServeMux()
+	root.Handle(agentToolsPrefix, http.HandlerFunc(s.handleAgentTools))
+	root.Handle("/", authenticated)
+	return s.metrics.Middleware(withRecover(root, s.logger), s.logger)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -295,6 +303,7 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 		"store_mode":                        s.service.StoreMode(),
 		"session_mode":                      s.auth.SessionMode(),
 		"prepare_agent_enabled":             AgentEnabled(),
+		"agent_tools_enabled":               AgentToolsEnabled(),
 	})
 }
 

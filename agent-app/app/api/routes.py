@@ -18,7 +18,13 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.schemas.drafts import ClarifyRequest, CreateTaskRequest, TaskView
-from app.service import AgentService, TaskNotFound, TaskNotResumable
+from app.service import (
+    AgentService,
+    TaskCancelRejected,
+    TaskNotFound,
+    TaskNotResumable,
+    TaskStateUnavailable,
+)
 from app.tools.registry import TrustedContext
 
 
@@ -89,34 +95,44 @@ async def create_task(payload: CreateTaskRequest, request: Request) -> TaskView:
 
 @router.get("/tasks", response_model=list[TaskView])
 async def list_tasks(request: Request) -> list[TaskView]:
-    await resolve_context(request)
-    return await _service(request).list_tasks()
+    # 上下文必须传进 service：过滤在那里生效，路由层不做业务过滤。
+    context = await resolve_context(request)
+    return await _service(request).list_tasks(context)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskView)
 async def get_task(task_id: str, request: Request) -> TaskView:
-    await resolve_context(request)
+    context = await resolve_context(request)
     try:
-        return await _service(request).get_task(task_id)
+        return await _service(request).get_task(task_id, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
 
 
 @router.post("/tasks/{task_id}/clarify", response_model=TaskView)
 async def clarify(task_id: str, payload: ClarifyRequest, request: Request) -> TaskView:
-    await resolve_context(request)
+    context = await resolve_context(request)
     try:
-        return await _service(request).clarify(task_id, payload)
+        return await _service(request).clarify(task_id, payload, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
     except TaskNotResumable as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except TaskStateUnavailable as error:
+        # 存储不可用导致状态无法确定：不能返回可能是过期的视图。
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskView)
 async def cancel(task_id: str, request: Request) -> TaskView:
-    await resolve_context(request)
+    context = await resolve_context(request)
     try:
-        return await _service(request).cancel(task_id)
+        return await _service(request).cancel(task_id, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
+    except (TaskCancelRejected, TaskStateUnavailable) as error:
+        # 取消未生效、任务仍在运行：明确告诉调用方可以重试，
+        # 而不是返回一个"看起来已取消"的结果。
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error), headers={"Retry-After": "1"}
+        ) from error

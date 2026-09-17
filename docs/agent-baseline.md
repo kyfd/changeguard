@@ -311,3 +311,37 @@ compose config              通过；解析确认 agent-app 无 published 端口
 - 真实模型起草质量、多实例一致性仍未验证。
 
 架构与边界说明见 `docs/agent-architecture.md`，服务说明见 `agent-app/README.md`。
+
+### 2026-09-17：P0 安全与生命周期基础
+
+按 `docs/agent-upgrade-plan.md` 的阶段划分完成 P0（授权、执行所有权与持久化诚实性、
+只读工具服务间认证）。完整验证记录见 `docs/agent-upgrade-verification.md`。
+
+本节只记要点，避免与验证文档出现两处会漂移的副本：
+
+| 变化 | 之前 | 现在 |
+| --- | --- | --- |
+| 任务读写授权 | 只认证，任何已认证调用方都能读写他人任务 | 服务/仓储边界按组织 + 创建者校验；无权与不存在返回同一个 404 |
+| 检索可见性 | 带组织标记的语料对所有人可见 | 必须显式授权；默认只能看到公开合成语料 |
+| 任务落盘 | 先改内存再落盘；损坏文件静默当空库 | 先落盘后提交内存；损坏时失败关闭 |
+| 取消与重跑 | 无执行所有权，旧协程可回写 | `execution_id` / `run_generation` 栅栏 |
+| 进程重启 | 在途任务永远停在 `RECEIVED`/`RUNNING` | 显式标为中断失败，`restart_policy=interrupted_without_resume` |
+| 远程只读工具 | 请求需会话的 `/api/changes/{id}`，实测 401 | 走内部只读接口，共享密钥 + 成员委托两层认证 |
+
+```
+pytest -q        91 passed（基线 39 + 新增 52）
+go test ./...    全部包 ok
+go vet ./...     clean
+gofmt            clean
+evals            11/11
+npm test         2 passed
+```
+
+**本机无法运行、已由 CI 覆盖**（PR #14，run `35216812259`，均 pass）：
+`go test -race`（quality-go 1.25/1.26）、PostgreSQL/Redis 集成测试、Playwright 端到端。
+
+**至今未运行**（不得当作通过）：含 agent-app 的完整 `docker compose up --build`、
+真实模型质量、真实浏览器交互与截图。
+
+**一句必须说清的话**：P0 只修掉了安全与生命周期缺陷；"重启后安全续跑"**没有**实现，
+在途任务会被标为失败。不要把它表述为"已支持断点恢复"。

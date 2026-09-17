@@ -180,6 +180,11 @@ START → screen_input ──命中注入──▶ INPUT_REJECTED（停止）
 | 工具只读 | 注册表拒绝非只读工具（`test_non_read_only_tool_is_refused`） |
 | 工具失败 ≠ 通过 | `test_check_tool_failure_never_becomes_passing` |
 | 越权由后端裁决 | 治理后端返回 403 时工具显式失败，不重试、不降级为"没问题" |
+| 只读工具的服务间认证 | 三个远程只读工具走治理后端的**内部只读接口** `/api/agent-tools/changes/{id}`，要求共享密钥 + 成员委托两层认证；未配置密钥时**显式不可用且不发请求**（`test_governance_readonly_auth.py`、Go 侧 `TestAgentTools*`） |
+| 任务归属 | 组织与创建者都在**服务/仓储边界**校验，无权与不存在返回同一个 404（`test_authorization.py`） |
+| 检索租户隔离 | 带组织标记的语料必须显式授权才可见，默认只能看到公开合成语料（`test_authorization.py`） |
+| 落盘诚实性 | **先落盘、成功后才提交内存**；状态文件损坏时失败关闭，不从空库启动（`test_task_lifecycle.py`） |
+| 执行所有权 | 取消与重跑都会换掉 `execution_id`，旧执行无法回写；派发失败不留 `RECEIVED` 残骸（`test_task_lifecycle.py`） |
 | 注入安全停止 | 命中检测直接进入 `INPUT_REJECTED`，不生成草案 |
 | 依据不足要说出来 | 检索无命中时 `ok=False`；草案标注"依据检索不完整" |
 
@@ -198,6 +203,20 @@ START → screen_input ──命中注入──▶ INPUT_REJECTED（停止）
 | POST | `/api/agent/tasks/{id}/clarify` | 补充信息并继续 |
 | POST | `/api/agent/tasks/{id}/cancel` | 取消任务（真正停止后续工作） |
 
+### 治理后端为 Agent 提供的内部只读接口
+
+三个远程只读工具**不再**请求面向浏览器的 `/api/changes/{id}`（那条路径在会话中间件下，
+本服务没有也不应该持有会话，改造前必然 401）。它们走：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/agent-tools/changes/{id}?projection=context\|findings\|experiment` | 内部只读，窄投影 |
+
+两层认证缺一不可：`X-Agent-Upstream-Token`（服务认证，常量时间比较；未配置时 503 失败关闭）
+与 `X-Actor-Id`/`X-Org-Id`（**只是声明**，必须回查成员存在且启用、组织一致，再走应用级授权）。
+该入口**不复用会话中间件**，浏览器拿不到共享密钥，因此对它不可达。
+实现见 `internal/httpapi/agenttools.go`。
+
 ## 测试与评估
 
 ```powershell
@@ -205,7 +224,22 @@ START → screen_input ──命中注入──▶ INPUT_REJECTED（停止）
 .\.venv\Scripts\python.exe evals\run_eval.py     # 离线评估，产出可复现报告
 ```
 
-界面与代理的安全性由 **Go 侧**测试覆盖：`go test ./internal/httpapi/... -run Agent -v`。
+界面与代理的安全性由 **Go 侧**测试覆盖：
+`go test ./internal/httpapi/... -run 'Agent' -v`（含 `TestAgentTools*` 的十项拒绝路径）。
+
+回归测试按关注点分文件：
+
+| 文件 | 锁住的性质 |
+| --- | --- |
+| `tests/test_authorization.py` | 任务归属（跨组织/同组织他人/旧记录失败关闭）、无权与不存在不可区分、检索租户隔离 |
+| `tests/test_task_lifecycle.py` | 落盘诚实性（先落盘后提交内存、损坏失败关闭）、执行所有权与取消竞态、派发失败不留残骸、重启策略 |
+| `tests/test_governance_readonly_auth.py` | 内部只读接口的服务间认证：缺密钥不发请求、请求形状、拒绝状态码不变成成功 |
+
+**跨服务验收**（真实启动隔离的 Go 服务 + 合成演示数据，不使用 mock）：
+先跑 `go build -o dbguard.exe ./cmd/dbguard` 并以
+`PORT` / `DBGUARD_DATA_FILE` / `DBGUARD_ENABLE_DEMO_ACCOUNTS=true` /
+`DBGUARD_AGENT_UPSTREAM_TOKEN` 启动，再用带相同密钥的 `Settings` 驱动
+`Toolbox` 调用三个只读工具，验证可用性与各条拒绝路径。
 
 评估集 `evals/datasets/starter.jsonl` 覆盖：正常任务、信息缺失、规范冲突、
 工具失败、不可信输入、无依据。报告写入 `evals/reports/`，包含数据集哈希、
@@ -240,16 +274,22 @@ tests/                  单元与接口测试
 ## 已知限制
 
 - **上游凭据默认留空**（不校验）。生产部署必须设置 `AGENT_UPSTREAM_TOKEN`，
-  并确保本服务只在内网可达。
+  并确保本服务只在内网可达。同一密钥也用于本服务→治理服务的内部只读调用；
+  未配置时那三个远程只读工具会**显式不可用**（不会退化成匿名读取）。
 - 身份来自治理服务注入的请求头，**信任边界是"本服务只被治理服务调用"**；
   若本服务被直接暴露，请求头身份就不再可信。
 - 任务状态存文件，仅适配单实例；多实例需要外部状态存储。
+- **重启不做安全续跑**：启动时把上次进程遗留的 `RECEIVED`/`RUNNING` 任务显式标为
+  中断失败（`restart_policy=interrupted_without_resume`）。真正的节点级恢复需要
+  检查点与重新授权，属于后续工作。
+- 任务默认**仅创建者可操作**。仓库目前没有组织共享或管理员代管的规范，
+  因此没有隐式授予同组织其他用户读写权；将来若引入共享策略，必须在
+  `AgentService._authorize` 显式实现。
 - 关键词检索对中文只做字符二元组，**无关中文查询仍可能召回弱相关片段**；
   这正是评估要对比"关键词 vs 混合检索"的原因，向量检索接口已预留但未启用。
 - 评估集当前 11 例，未拆分开发集/保留测试集。
 - 未统计 token 与费用；未覆盖多轮对话与并发场景。
 - 界面只做**展示与调用**：没有"确认材料"的落库动作，确认结果未写入任务记录，
   也没有在界面上回写治理后端。
-- **任务未按调用方组织隔离**：记录里写了 `organization_id`，但 `GET /tasks`、`GET /tasks/{id}`、
-  `clarify`、`cancel` 都只做了认证、没有比对组织，因此任何已认证调用方都能读到或操作他人任务
-  （`app/api/routes.py`、`app/service.py`）。这是多租户上线前必须先修的项。
+- 任务执行期间**存储状态仍是 `RECEIVED`**（工作流结果在结束时一次性落盘），
+  因此进度只能通过 `events` 观察，不能靠状态字段判断"正在跑第几步"。

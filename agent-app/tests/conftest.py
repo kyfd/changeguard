@@ -35,6 +35,23 @@ def run(coro: Coroutine[Any, Any, Any]) -> Any:
     return asyncio.run(coro)
 
 
+def execution_handles(service: Any) -> list[asyncio.Task[Any]]:
+    """当前登记的执行任务（测试辅助）。
+
+    用途有两个：确认执行结束后**资源确实被清理**，以及等待一次执行跑完。
+    兼容改造前后的登记结构——测试不应该因为内部改名而失败，那不是业务问题。
+    """
+    registry = getattr(service, "_executions", None)
+    if registry is None:
+        registry = getattr(service, "_running", {}) or {}
+    handles: list[asyncio.Task[Any]] = []
+    for item in list(registry.values()):
+        task = getattr(item, "task", item)
+        if isinstance(task, asyncio.Task):
+            handles.append(task)
+    return handles
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(

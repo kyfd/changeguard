@@ -1,0 +1,370 @@
+# 变更准备 Agent 改造验证记录（P0）
+
+本文记录**已经实际执行**的内容及其结果。口径沿用 `docs/agent-baseline.md` 与 `AGENTS.md`：
+
+- 只写跑过的命令与真实输出；
+- `NOT_RUN` / 跳过项必须显式标注，**跳过不等于通过**；
+- 不把计划中的能力写成已完成；
+- 不编造在线流量、准确率或延迟数字。
+
+**本轮范围：P0（安全与生命周期基础）。P1–P3 尚未开始**，本文末尾列出剩余任务。
+
+---
+
+## 1. 环境与提交
+
+| 项 | 值 |
+| --- | --- |
+| 基线提交 | `e75cf90edaeb7c902a3e1ea44827e9e779f6fcb5` |
+| 本轮改动 | 未提交（工作区改动，见 §3） |
+| Python | 3.14.3（`agent-app/.venv`） |
+| Go | 见 `go.mod`（本机 `go1.26.3`） |
+| 平台 | Windows |
+
+解析到的关键依赖（供后续版本收紧参考）：
+
+```
+anyio==4.15.1     fastapi==0.141.1   httpx==0.28.1
+langgraph==1.2.11 pydantic==2.13.5   pytest==9.1.1
+starlette==1.6.0  uvicorn==0.53.0
+```
+
+> **与既有记录不符，已记录**：本次环境是 **Python 3.14.3**（既有记录为 3.12.14），
+> `langgraph` 实际解析到 **1.2.11**（`pyproject.toml` 只写了 `>=0.2`）。
+> 两个版本上的实测结果不能互相替代。
+
+---
+
+## 2. 实测命令与结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `gofmt -l ./internal ./cmd` | **clean** |
+| `go vet ./...` | **clean** |
+| `go test ./... -count=1` | **全部包 ok**（23 个有测试的包，无 FAIL） |
+| `python -m pytest -q`（`agent-app/`） | **105 passed**（基线 39 + 新增 66：首轮 52、收尾 14） |
+| `python evals/run_eval.py --provider deterministic` | **11/11 通过** → `evals/reports/20260917-113001-deterministic.json` |
+| 递归 `node --check`（`internal/httpapi/web/**/*.{js,mjs}`） | **clean** |
+| `npm test` | **2 passed，0 failed** |
+
+新增回归用例：
+
+| 位置 | 数量 | 覆盖 |
+| --- | --- | --- |
+| `agent-app/tests/test_authorization.py` | 14 | 任务归属、无权与不存在不可区分、旧记录失败关闭、检索租户隔离 |
+| `agent-app/tests/test_task_lifecycle.py` | 27 | 落盘诚实性、损坏失败关闭、执行所有权与取消竞态、派发残骸、重启策略 |
+| `agent-app/tests/test_governance_readonly_auth.py` | 11 | 内部只读接口的服务间认证与请求形状 |
+| `agent-app/tests/test_execution_lifecycle.py` | 14 | 取消竞态、落盘故障注入、执行监督、inline/background 取消一致性（见 §9） |
+| `internal/httpapi/agenttools_test.go` | 10 | 内部只读接口的服务认证、成员委托、组织/应用授权、通路隔离、窄投影 |
+
+### 未运行项
+
+下表区分「本机未运行、但 CI 已在 PR 上覆盖」与「至今未运行」。
+两者都不是"测试套件通过"就能当作已验证的项。
+
+**本机未运行，CI 已覆盖**（PR #14，run `35216812259`，全部 ✅ pass）：
+
+| 项 | CI 作业 | 结果 |
+| --- | --- | --- |
+| `go test -race ./...` | `quality-go (1.25.x)` / `quality-go (1.26.x)` | pass |
+| PostgreSQL / Redis 集成测试 | `integration` | pass |
+| Playwright 端到端 | `e2e` | pass |
+
+> 这几项在本机无法运行（Windows 无 C 工具链 / 无隔离数据库 / 未起 Compose），
+> 因此它们是**由 CI 提供证据**，不是由本机实测提供。引用时必须说明来源。
+
+**至今未运行**（不得当作通过）：
+
+| 项 | 原因 |
+| --- | --- |
+| `docker compose up --build` 完整编排（含 agent-app） | CI 的 `e2e` 用的是**不含** agent-app 的 `compose.e2e.yml` |
+| 真实模型（live）评测 | 未配置专用测试凭据与预算 |
+| 真实浏览器交互与截图 | P0 未改动前端；浏览器验收属于 P3 |
+
+---
+
+## 3. 本轮改动
+
+### 3.1 P0-1 服务/仓储边界授权
+
+| 文件 | 改动 |
+| --- | --- |
+| `app/api/routes.py` | `list/get/clarify/cancel` 把此前**被丢弃**的 `TrustedContext` 传入 service（`create_task` 原本就是对的） |
+| `app/service.py` | 新增 `_authorize`：组织与创建者都匹配才放行，失败一律 `TaskNotFound`（与"不存在"返回同一个 404，不用状态码差异泄露资源是否存在）；旧记录缺组织/创建者时**失败关闭**；`list_tasks` 只返回调用方自己创建的任务 |
+| `app/retrieval/base.py` | 新增 `organization_visible`：无组织标记=公开合成语料，带标记必须显式授权。**默认空集**，即不传就只能看到公开语料 |
+| `app/retrieval/keyword.py` | `KeywordRetriever.search` / `HybridRetriever.search` 增加租户作用域，在**打分循环内、排序前**生效 |
+| `app/retrieval/corpus.py` | `load_corpus` / `build_retriever` 接受显式 `organization_id` |
+| `app/tools/business.py` | `_search` 的组织范围取自 `TrustedContext`（工具参数里写不出来） |
+
+**顺带修掉的一个真实语义 bug**：`chunk_markdown` 原先把文档正文里的「适用范围」（如
+"PostgreSQL 生产库"）回填成 `Chunk.organization_id`，把**适用场景**当成了**租户身份**。
+一旦某份真实文档写着"适用范围：某客户"，就会产生错误的组织归属。已改为组织标记**只来自
+显式入参**，并删除了不再使用的 `_SCOPE` 正则。
+
+### 3.2 P0-2 执行所有权与持久化诚实性
+
+| 文件 | 改动 |
+| --- | --- |
+| `app/store/tasks.py` | `save` 改为**先落盘、成功后才提交内存**；`_load` 区分"文件不存在"（正常）与"损坏/不可读"（抛 `TaskRepositoryCorrupted`，失败关闭）；落盘失败清理临时文件；空路径由死代码改为显式 `ValueError` |
+| `app/service.py` | 引入 `execution_id` + `run_generation`：`cancel` 与重跑都会换掉 `execution_id`，旧执行在 `_save_if_owner` 处被拒绝写入；`finally` 不再无条件落盘；新增 `_dispatch_or_fail`（派发失败标为 `FAILED`，不留 `RECEIVED` 残骸）；新增 `_mark_interrupted_tasks`（启动时把上次遗留的 `RECEIVED`/`RUNNING` 标为中断失败并写 `restart_policy=interrupted_without_resume`） |
+
+### 3.3 P0-3 只读工具的服务间认证
+
+| 文件 | 改动 |
+| --- | --- |
+| `internal/httpapi/agenttools.go`（新增） | `GET /api/agent-tools/changes/{id}?projection=context\|findings\|experiment`。两层认证：共享密钥（常量时间比较，未配置时 503 失败关闭）+ 成员委托（回查成员存在且启用、组织一致，再走 `ChangeFor` 的组织与应用级授权）。未知投影直接拒绝，不做"默认返回全部"兜底 |
+| `internal/httpapi/server.go` | `routes()` 改为两棵树：内部只读接口**不复用会话中间件**，其余仍走 `auth.Middleware`；配置状态新增 `agent_tools_enabled` |
+| `app/tools/business.py` | `_fetch_change` 改调内部只读接口，携带共享密钥与委托身份；缺密钥时**显式不可用且不发请求**；401/403/404/503/其他分别给出明确错误 |
+| `app/config.py` | `upstream_token` 注释补上**双向**语义 |
+
+**没有新增环境变量**：复用了已有的 `DBGUARD_AGENT_UPSTREAM_TOKEN` ↔ `AGENT_UPSTREAM_TOKEN`
+配对。`runtimeconfig.applyBrandAliases` 是通用前缀映射，因此 `docker-compose.yml` 现有的
+`CHANGEGUARD_AGENT_UPSTREAM_TOKEN` 会自动映射到 Go 侧读取的名字，**编排文件无需改动**。
+
+---
+
+## 4. 缺陷复现证据（改前 vs 改后）
+
+复现不是在脑子里做的：P0-1 用 `git stash` 把改动暂存后对**原始代码**跑同一批用例；
+P0-2 用一份只依赖两版共有 API 的独立脚本（示例见 §6 的说明）跑改前/改后对照。
+
+### 4.1 任务授权（B1/B2/B10）
+
+原始代码：新增的 14 项授权用例**全部失败**，且失败是真实行为而非测试问题：
+
+- `test_other_callers_cannot_read_a_task`：跨组织读取返回 **200**（应为 404）；
+- `test_other_callers_cannot_cancel_a_task`：他人取消返回 **200**；
+- `test_tool_layer_scopes_search_to_the_caller_organization`：
+  `assert 'private#1' not in ['private#1', 'public#1']` —— **不同组织确实检索到了他人的私有语料**；
+- `test_demo_corpus_stays_public_after_scope_change`：证实了上述「适用范围→organization_id」的混淆。
+
+修复后：91 passed。
+
+### 4.2 生命周期与持久化（B4/B5/重启策略）
+
+| 观测项 | 原始代码 | 修复后 |
+| --- | --- | --- |
+| 损坏状态文件 | `silently loaded empty -> list()=[]` | `refused to load -> TaskRepositoryCorrupted` |
+| 落盘失败后的内存 | `memory=DRAFT_READY disk=RECEIVED`（**内存跑在磁盘前面**） | `memory=RECEIVED disk=RECEIVED` |
+| 落盘失败后读未落盘记录 | `get(task_new)={'task_id': 'task_new', ...}`（**能读到磁盘上不存在的记录**） | `get(task_new)=None` |
+| 重启时的在途任务 | `status=RUNNING restart_policy=None`（**永久卡住**） | `status=FAILED restart_policy=interrupted_without_resume` |
+
+### 4.3 B3（执行所有权）
+
+诚实说明：B3 是一个**竞态**，它的确定性复现依赖所有权原语本身，因此无法在原始代码上
+写出一条稳定失败的用例——原始代码根本没有能表达"这次执行是否仍是当前执行"的东西。
+它的证据是：新增的所有权单元测试（`test_stale_execution_cannot_overwrite_a_newer_one`
+等）在原始代码上**根本无法被收集**（`_begin_execution` / `_save_if_owner` 不存在），
+以及修复后这些用例全部通过。**这一条不要按"已复现"表述**。
+
+---
+
+## 5. 跨服务验收（真实进程，非 mock）
+
+按规格要求，真实启动隔离的 Go 服务 + 合成演示数据：
+
+```
+go build -o dbguard.exe ./cmd/dbguard
+# 以 PORT=18099 / DBGUARD_DATA_FILE=<隔离路径> / DBGUARD_ENABLE_DEMO_ACCOUNTS=true
+#    / DBGUARD_AGENT_UPSTREAM_TOKEN=e2e-shared-secret / DBGUARD_WORKERS=0 启动
+# 用带相同密钥的 Settings 驱动 Toolbox 调用三个只读工具（变更 chg_20260730_001）
+```
+
+结果（10/10 通过）：
+
+| 检查 | 结果 |
+| --- | --- |
+| 改造前的老路径 `/api/changes/{id}` 仅凭身份头被拒（**B11 的实测复现**） | PASS，`status=401` |
+| `get_change_context` 经内部只读接口可用 | PASS |
+| context 投影带制品摘要与 `description_untrusted` 标记 | PASS |
+| `get_rule_findings` 可用，带确定性风险等级 | PASS（`MEDIUM`） |
+| `get_experiment_report` 可用，状态可区分 `NOT_RUN` | PASS（`NOT_RUN`） |
+| 伪造共享密钥被拒 | PASS |
+| 未配置共享密钥时显式不可用 | PASS |
+| 冒充其他组织被拒 | PASS |
+| 不存在的变更明确失败 | PASS |
+
+验收后已停止该后台进程，未占用端口。
+
+---
+
+## 6. 迁移与回滚
+
+| 项 | 说明 |
+| --- | --- |
+| 数据迁移 | **无**。任务状态仍是同一个 JSON 文件，只是新增了 `execution_id` / `run_generation` / `restart_policy` 字段（旧记录缺这些字段时按失败关闭或按缺省处理） |
+| 配置迁移 | **无必需项**。未新增必需环境变量。P0 收尾新增两个**可选**配置项：`AGENT_PERSIST_MAX_ATTEMPTS`（默认 3）与 `AGENT_PERSIST_RETRY_BACKOFF`（默认 0.05 秒），不设置即用缺省 |
+| 接口变更 | **新增** `GET /api/agent-tools/...`；未修改或删除任何既有接口。`cancel`/`clarify` 新增 **503** 作为"操作未生效、可重试"的显式语义 |
+| 行为变更 | ① 任务读写默认仅创建者可见（原先任何已认证调用方都能读写）；② 损坏的状态文件会让服务启动失败（原先静默从空库启动）；③ 三个远程只读工具现在**必须**配置共享密钥才能用；④ 取消不再先停止执行再落盘，落盘失败时执行继续运行并返回 503；⑤ 终态落盘失败时会降级上报而不是静默丢监督 |
+| 回滚 | 全部改动集中在 8 个文件，`git checkout -- <paths>` 即可回到基线行为。回滚后需注意：跨组织读写、取消回写、静默清空等问题会一并回来 |
+
+---
+
+## 7. 残留风险
+
+- **重启不续跑**：在途任务被显式标为失败，用户需要重新发起。这是 P0 的有意取舍，
+  不是遗漏；真正的恢复（检查点 + 重新授权 + 输入版本校验）在 P2。
+- **执行期间存储状态仍是 `RECEIVED`**：工作流结果在结束时一次性落盘，因此无法从状态字段
+  判断"跑到第几步"。这是既有设计，本轮未改；靠 `events` 观察。
+- **跨实例认领**：任务仓储仍是单实例文件存储，多实例需要外部状态存储（既有已知限制）。
+- **`test_deny` 之外的授权策略**：默认仅创建者可操作。若将来需要组织共享或管理员代管，
+  必须在 `AgentService._authorize` 显式实现——目前没有任何隐式共享。
+- **只读接口的成员委托**仍依赖"本服务只被治理服务调用"这一前提；共享密钥是本轮的边界。
+- **取消是协作式的**（§9.5）：不响应取消的外部依赖，其**正在进行**的那次调用无法被中断。
+  能保证的是不再调度后续步骤、且其迟到结果不会被发布。
+- **`cancel` 返回时工作流可能仍在退出中**：取消落盘成功后即返回，句柄释放与健康计数归零
+  要等执行真正退出。这是有意的——否则一个不响应取消的依赖会把取消请求一起挂住。
+- **降级状态只在本进程内可见**：`unpersisted_tasks` 与 `degraded` 是内存状态，
+  单实例文件存储下进程重启即丢失；重启时在途任务会被标为中断失败（既有机制）。
+  多实例要看到一致的降级视图，需要外部状态存储（与既有限制同源）。
+- **降级记录按任务覆盖、不累积清理**：每个任务只保留最后一条问题记录，新执行开始时清除。
+  存储长时间不可用时会留下与受影响任务数同量级的条目——这是有意的（健康状态必须持续可见）。
+
+---
+
+## 8. 仅由当前代码与实测支持的表述
+
+以下每条都能用本文档 §2–§5 或仓库中可运行的测试复现，未引用任何外部材料，
+也未包含未测得的数字：
+
+1. 在 ChangeGuard 治理服务中新增了服务间专用只读接口，用**共享密钥 + 成员委托**两层认证
+   替代原先不可用的"仅身份头"调用路径，并通过真实跨进程验收证明链路可用
+   （旧路径实测 401，新路径实测可用，伪造凭据/跨组织实测被拒）。
+2. 把 Agent 的任务读写授权下沉到**服务与仓储边界**，并按组织与创建者隔离；
+   跨组织读取、列表泄露、他人取消在修复前均为可通过用例复现的缺陷。
+3. 使 Agent 任务持久化具备**诚实性**：先落盘后提交内存、损坏状态失败关闭、
+   `NOT_RUN` 与真实结果可区分；并用改前/改后对照证明了内存领先磁盘与静默清空两个缺陷。
+4. 为 Agent 执行引入**执行所有权（execution_id / run_generation）**，使取消与重跑能栅栏住
+   旧协程的回写，并把进程重启后的在途任务显式标注为"中断且未续跑"。
+5. 为检索层建立了**租户可见性边界**，并顺带修正了把文档"适用范围"误当作组织身份的语义错误。
+6. 让 Agent 执行具备**受监督的生命周期**：取消先落盘后终止执行、终态落盘带**有上限**重试、
+   持续存储故障显式降级而不是伪造已落盘的失败、`inline` 与 `background` 都可被真正取消；
+   并用真实浏览器验证了失败时不会被误诊为"功能未启用"、也不会禁用面板。
+
+**不能声称**的（本轮未做或未验证）：多轮对话、节点级检查点与进程重启续跑、
+多 Agent 协作、自进化 Prompt、评估集拆分与真实模型质量、任何准确率/延迟提升数字。
+
+---
+
+## 9. P0 收尾：执行生命周期加固
+
+本节记录 P0 的第二轮。审查基于提交 `c15d9fa`；三项问题在该提交上**均仍存在**，已复核。
+
+### 9.1 修了什么
+
+| # | 问题 | 根因 | 处理 |
+| --- | --- | --- | --- |
+| 1 | 取消落盘失败后执行成为孤儿 | `cancel` 先移除执行句柄并终止执行，最后才落盘；落盘失败时执行已停、仓储仍 `RECEIVED`，健康检查显示 `ok`、`running_tasks=0`，`clarify` 又因状态不允许而拒绝 | 改为**先在副本上构造并落盘**，成功后才终止执行与清理句柄；失败抛 `TaskCancelRejected`（503，可重试），此时句柄不动、执行继续跑 |
+| 2 | 终态落盘失败后丢失执行监督 | `_execute` 里 `_release` 在 `_save_if_owner` **之前**，落盘失败时句柄已移除、异常逃出既有异常处理，任务留在 `RECEIVED`，`wait_for` 无声返回陈旧状态 | 重新设计收尾：执行结束与持久化解耦，由**受管理执行**统一收口；终态落盘带**有上限**重试；用尽则记入降级状态，健康状态报 `degraded`，`wait_for` 抛 `TaskStateUnavailable` |
+| 3 | inline 取消不生效 | `inline` 直接 `await _execute`，从不登记句柄，`cancel` 找不到可取消的对象；只能拒绝回写，工作流仍在调用模型与工具 | `inline` 与 `background` **共用同一套受管理执行**：都登记句柄，区别只在等待方式 |
+
+### 9.2 自查发现的两个隐患（原清单未列）
+
+在写测试与复查实现时发现，均已修掉：
+
+- **落盘重试退避期间被取消会误报降级**：那时终态所有权已转移（用户取消或调用方放弃各自落盘），
+  再记一条"落盘失败"会制造虚假的降级信号。现在让 `CancelledError` 正常向上传播。
+- **放弃路径可能覆盖已落盘的终态**：调用方被取消与执行完成之间可能只差一个事件循环轮次，
+  把已经落盘的 `DRAFT_READY` 改写成 `FAILED` 比"不写"更糟。现在只对**在途状态**执行放弃写入。
+
+### 9.3 由本次改动引入、又被本次改动修掉的 UI 回归
+
+`cancel` 失败现在返回 **503**，而治理代理"下游 Agent 未配置"**也**返回 503。
+工作台的 `handleActionError` 原先按状态码判断，把 503 一律当成"功能未启用"：
+
+- 提示用户"配置 `DBGUARD_AGENT_BASE_URL` 后重启本服务"——**错误建议**；
+- 并调用 `markAgentDisabled`，**把整个面板永久置为不可用**（禁用创建按钮）。
+
+一次存储抖动就会触发上述两件事。修法是让错误对象保留服务端的 `code`，
+只在 `code === "SERVICE_UNAVAILABLE"` 时走"未启用"分支，其余 503 按普通错误展示。
+
+### 9.4 修复后的语义
+
+| 场景 | 行为 |
+| --- | --- |
+| 取消落盘失败 | 显式失败（`TaskCancelRejected`，HTTP 503 + `Retry-After`）；执行**继续运行**、句柄保留；重试可成功 |
+| 终态落盘一次性失败 | 有上限重试（默认 3 次，退避 0.05s × 尝试次数）后成功；任务进入明确可查询的终态；健康状态保持 `ok` |
+| 终态落盘持续失败 | 重试用尽；**不伪造已落盘的 FAILED**（仓储仍是最后一次成功写入的状态）；健康状态 `degraded` + `unpersisted_tasks`；`wait_for` 抛 `TaskStateUnavailable` |
+| 重试期间被新执行接管 | 记 `skipped`：既不写旧结果，也**不谎报**存储降级 |
+| 后台异常 | 由完成回调统一取走并记入降级状态，不再是只能靠 `Task exception was never retrieved` 在日志里偶遇 |
+| 资源释放 | 由完成回调统一负责，且**校验执行身份**后才移除句柄，不会误删后来的新执行 |
+| 调用方被取消（inline 请求断开） | 终止内部执行并留下确定的终态（`FAILED`，说明被中断），不留孤儿 |
+
+### 9.5 inline / background 取消保证与限制
+
+**保证**：取消会真正命中工作流（测试断言 provider 观察到取消），取消后**不再调度后续工具或模型调用**
+（用工具调用计数断言），迟到结果不会被发布。
+
+**限制**：取消是**协作式**的，在 await 点生效。若某个外部依赖不响应取消
+（例如同步阻塞调用），我们无法中断它**正在进行的**那一次调用；能保证的是不再调度后续步骤、
+且其结果不会被发布。"取消后不再回写"与"执行确实停了"是两件事，前者不能用来宣称后者——
+所以测试同时断言了 provider 收到取消，而不只是检查回写被拒。
+
+### 9.6 新增测试与改前/改后对照
+
+新增 `agent-app/tests/test_execution_lifecycle.py`（14 项），全部事件驱动、无随机 sleep、
+不依赖真实模型；落盘故障用包一层真实仓储的 `FlakyRepository` 注入。
+
+**修复前**（把 `agent-app/app` 暂存回基线后运行同一批用例）：**7 failed / 7 passed**。
+其中只有 **5 项是干净的业务复现**，必须如实区分：
+
+| 结果 | 项 | 改前失败原因 |
+| --- | --- | --- |
+| 业务复现 | 取消失败不得丢弃执行句柄 | `assert []`：句柄已被丢弃 |
+| 业务复现 | 一次性落盘故障后进入终态 | `'RECEIVED' == 'DRAFT_READY'`：卡在 RECEIVED |
+| 业务复现 | 持续落盘故障必须显式且不伪造 | `wait_for` 未抛错，无声返回陈旧状态 |
+| 业务复现 | 取消后不再调度工具（inline） | `provider.cancelled is False`：取消没命中工作流 |
+| 业务复现 | inline 请求被取消不留孤儿 | 终态仍是 `RECEIVED` |
+| **契约级** | inline 落盘故障要显式失败 | `assert 'ok' == 'degraded'`：断言的是新增健康契约，**不是**行为复现 |
+| **缺方法** | 放弃路径不得覆盖终态 | `AttributeError: no attribute '_abandon_execution'`：这是**新方法的护栏测试**，**不得称为复现** |
+
+**修复后**：该文件 14 项全过；全量 `pytest -q` **105 passed**（原 91 + 新增 14）。
+
+### 9.7 浏览器验证（真实 Chromium，含截图）
+
+三个进程独立启动：挂住的模型 stub（18999）、带触发文件故障注入的 Agent 服务（8091）、
+配置了 Agent 的治理服务（18099）。用演示账号真实登录后进入 `/agent/`。
+
+| 检查 | 结果 |
+| --- | --- |
+| 工作台加载后创建按钮可用 | PASS |
+| 加载时未误报"下游未配置" | PASS |
+| 任务停留在途状态（`RECEIVED`），停止按钮可见 | PASS |
+| 注入持续落盘故障后点"停止"→ 显示错误横幅 | PASS（文案：`取消未生效：状态未能落盘（OSError），任务仍在运行，请重试`） |
+| 错误信息说明可重试 | PASS |
+| **未把应用层 503 误诊为「下游未配置」** | PASS |
+| **未因一次存储失败禁用整个面板** | PASS |
+| 任务仍在运行，没有被假装取消 | PASS（仍为 `RECEIVED`） |
+| 恢复存储后重试 → 任务真正取消 | PASS（`CANCELLED`） |
+| 无未捕获的 JS 异常 | PASS |
+| 对照组：下游**确实**未配置时仍显示"未启用"并禁用按钮 | PASS（4/4） |
+
+截图（保存在会话临时目录，随会话清理）：`01-workbench-loaded`、`02-task-running`、
+`03-cancel-failed`、`04-cancel-succeeded`、`10-agent-disabled`。其中 `03-cancel-failed`
+可视确认错误横幅与"开始准备材料"按钮仍可用。
+
+> 注意：上一节的 `e2e` CI 作业**不能**作为本轮生命周期场景的证据——它跑的是既有的
+> 配置/SQL 黄金流程，不覆盖取消竞态与落盘故障。本节的浏览器检查是针对这些场景新做的。
+
+### 9.8 本轮未执行
+
+| 项 | 原因 |
+| --- | --- |
+| 窄屏（移动端）浏览器检查 | 本轮只做了 1440×900 桌面视口 |
+| `go test -race`（本机） | 仅 Linux CI 可跑 |
+| 含 agent-app 的完整 `docker compose up --build` | 未改编排文件 |
+| 真实模型质量 | 本轮不涉及；stub 只为"让任务停在调用上"，不模拟质量 |
+
+---
+
+## 10. 剩余任务
+
+| 阶段 | 状态 | 内容 |
+| --- | --- | --- |
+| P0 | ✅ 完成（含 §9 的收尾） | 授权、执行所有权与持久化诚实性、只读工具服务间认证；收尾补齐执行生命周期：取消竞态、落盘故障语义、inline 取消、执行监督与降级上报 |
+| P1 | ⬜ 未开始 | 受约束调查循环、provider 决策契约、预算与上下文（含已发现的 C1 重试相乘、C2 模型自封"已确认"、C3 版本恒为 1、C4/C5 澄清字段、C6 方言） |
+| P2 | ⬜ 未开始 | LangGraph checkpointer、进程重启恢复、材料确认记录。**注意**：本机 `langgraph` 为 1.2.11，checkpointer 包版本必须匹配 1.x，开始前需先收紧依赖并重新记录解析版本 |
+| P3 | ⬜ 未开始 | 真正可选的评测模式、开发/保留集拆分、可观测性与 `/agent/` 工作台 |
+
+未开始的原因不是阻碍，而是按规格"P0 → P1 → P2 → P3，每阶段新增回归并复跑测试"推进：
+P0 的授权与所有权是调查循环的前置条件，先做它可以让后续阶段的影响面可控。

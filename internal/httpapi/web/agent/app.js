@@ -136,6 +136,9 @@ async function api(path, options) {
       : (payload && payload.detail !== undefined ? payload.detail : (raw || `HTTP ${response.status}`));
     const error = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     error.status = response.status;
+    // 保留机器可读的错误码：调用方需要靠它在**同为 503 的两种情况**之间区分，
+    // 只按状态码判断会把应用层失败误诊成"功能未启用"。
+    error.code = payload && typeof payload.code === "string" ? payload.code : null;
     throw error;
   }
   return payload;
@@ -332,7 +335,16 @@ function handleActionError(error) {
     return;
   }
   if (error.status === 503) {
-    markAgentDisabled(error.message);
+    // 503 有两种含义，不能混为一谈：
+    //   - 治理代理在下游未配置时返回 SERVICE_UNAVAILABLE：功能没开，需要配置后重启；
+    //   - 应用层返回 503 表示"本次操作未生效、可重试"（例如取消时状态未能落盘，
+    //     任务仍在运行）。
+    // 把后者当成前者，一次存储抖动就会被误诊为"功能没启用"，并让整个面板不可用。
+    if (error.code === "SERVICE_UNAVAILABLE") {
+      markAgentDisabled(error.message);
+    } else {
+      showError(error.message);
+    }
     return;
   }
   showError(error.message);
