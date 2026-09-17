@@ -188,8 +188,11 @@ node --check / npm test      clean / 2 passed
 
 顺带修正的既有语义错误：`chunk_markdown` 把文档「适用范围」误当作 `organization_id`。
 
-**仍未验证**：race（仅 Linux CI）、PostgreSQL/Redis 集成、Playwright 端到端、
-真实模型质量、真实浏览器交互。
+**本机无法运行、已由 CI 覆盖**（PR #14，run `35216812259`，全部 pass）：
+`go test -race ./...`（quality-go 1.25/1.26）、PostgreSQL/Redis 集成测试、Playwright 端到端。
+
+**至今未运行**（不得当作通过）：含 agent-app 的完整 `docker compose up --build`、
+真实模型质量、真实浏览器交互与截图。
 
 **未按"已复现"表述**：B3 是竞态，其确定性复现依赖本轮才引入的所有权原语；
 原始代码上相关用例根本无法被收集。不要把它说成"已复现出失败"。

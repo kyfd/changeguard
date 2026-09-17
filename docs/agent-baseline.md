@@ -337,8 +337,11 @@ evals            11/11
 npm test         2 passed
 ```
 
-**未验证项**（不得当作通过）：`go test -race`（仅 Linux CI）、PostgreSQL/Redis 集成、
-Playwright 端到端、真实模型质量、真实浏览器交互。
+**本机无法运行、已由 CI 覆盖**（PR #14，run `35216812259`，均 pass）：
+`go test -race`（quality-go 1.25/1.26）、PostgreSQL/Redis 集成测试、Playwright 端到端。
+
+**至今未运行**（不得当作通过）：含 agent-app 的完整 `docker compose up --build`、
+真实模型质量、真实浏览器交互与截图。
 
 **一句必须说清的话**：P0 只修掉了安全与生命周期缺陷；"重启后安全续跑"**没有**实现，
 在途任务会被标为失败。不要把它表述为"已支持断点恢复"。

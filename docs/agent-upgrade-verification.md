@@ -56,16 +56,29 @@ starlette==1.6.0  uvicorn==0.53.0
 | `agent-app/tests/test_governance_readonly_auth.py` | 11 | 内部只读接口的服务间认证与请求形状 |
 | `internal/httpapi/agenttools_test.go` | 10 | 内部只读接口的服务认证、成员委托、组织/应用授权、通路隔离、窄投影 |
 
-### 未运行项（不得当作通过）
+### 未运行项
 
-| 项 | 状态 | 原因 |
+下表区分「本机未运行、但 CI 已在 PR 上覆盖」与「至今未运行」。
+两者都不是"测试套件通过"就能当作已验证的项。
+
+**本机未运行，CI 已覆盖**（PR #14，run `35216812259`，全部 ✅ pass）：
+
+| 项 | CI 作业 | 结果 |
 | --- | --- | --- |
-| `go test -race ./...` | **未运行** | 仅 Linux CI（本机无 C 工具链） |
-| PostgreSQL / Redis 集成测试 | **未运行** | 需专用测试实例与 DSN |
-| Playwright 端到端 | **未运行** | 需 Docker Compose |
-| `docker compose up --build` 完整编排 | **未运行** | 本轮未改动编排文件 |
-| 真实模型（live）评测 | **未运行** | 未配置专用测试凭据与预算 |
-| 真实浏览器交互与截图 | **未运行** | P0 未改动前端；浏览器验收属于 P3 |
+| `go test -race ./...` | `quality-go (1.25.x)` / `quality-go (1.26.x)` | pass |
+| PostgreSQL / Redis 集成测试 | `integration` | pass |
+| Playwright 端到端 | `e2e` | pass |
+
+> 这几项在本机无法运行（Windows 无 C 工具链 / 无隔离数据库 / 未起 Compose），
+> 因此它们是**由 CI 提供证据**，不是由本机实测提供。引用时必须说明来源。
+
+**至今未运行**（不得当作通过）：
+
+| 项 | 原因 |
+| --- | --- |
+| `docker compose up --build` 完整编排（含 agent-app） | CI 的 `e2e` 用的是**不含** agent-app 的 `compose.e2e.yml` |
+| 真实模型（live）评测 | 未配置专用测试凭据与预算 |
+| 真实浏览器交互与截图 | P0 未改动前端；浏览器验收属于 P3 |
 
 ---
 
