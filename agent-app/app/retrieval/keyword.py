@@ -11,7 +11,7 @@ import math
 import re
 from dataclasses import dataclass, field
 
-from app.retrieval.base import Chunk, RetrievalReport, ScoredChunk, VectorScorer
+from app.retrieval.base import Chunk, RetrievalReport, ScoredChunk, VectorScorer, organization_visible
 
 _ASCII_TOKEN = re.compile(r"[a-z0-9_]{2,}")
 _CJK = re.compile(r"[\u4e00-\u9fff]")
@@ -63,11 +63,20 @@ class KeywordRetriever:
             for token in counts:
                 self._document_frequency[token] = self._document_frequency.get(token, 0) + 1
 
-    def search(self, query: str, limit: int = 5, prefixes: tuple[str, ...] | None = None) -> list[ScoredChunk]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        prefixes: tuple[str, ...] | None = None,
+        organizations: tuple[str, ...] = (),
+    ) -> list[ScoredChunk]:
         """检索。
 
-        `prefixes` 是**作用域**：只在该范围内打分。
+        `prefixes` 是**文档作用域**：只在该范围内打分。
         作用域必须在排序之前生效——先全局排序再过滤，会让规范被案例挤出结果。
+
+        `organizations` 是**租户作用域**：同样在打分循环内生效，且默认是空的，
+        即默认只能看到公开合成语料。带组织标记的片段必须由调用方显式授权。
         """
         query_tokens = tokenize(query)
         if not query_tokens or not self._chunks:
@@ -76,7 +85,10 @@ class KeywordRetriever:
         unique_query = set(query_tokens)
         scored: list[ScoredChunk] = []
         for position, counts in enumerate(self._index):
-            if prefixes and not self._chunks[position].doc_id.startswith(prefixes):
+            chunk = self._chunks[position]
+            if prefixes and not chunk.doc_id.startswith(prefixes):
+                continue
+            if not organization_visible(chunk.organization_id, organizations):
                 continue
             score = 0.0
             for token in unique_query:
@@ -114,8 +126,18 @@ class HybridRetriever:
     def size(self) -> int:
         return self._keyword.size()
 
-    def search(self, query: str, limit: int = 5, prefixes: tuple[str, ...] | None = None) -> list[ScoredChunk]:
-        base = self._keyword.search(query, limit=max(limit * 3, 10), prefixes=prefixes)
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        prefixes: tuple[str, ...] | None = None,
+        organizations: tuple[str, ...] = (),
+    ) -> list[ScoredChunk]:
+        # 租户与文档作用域都在关键词层先生效，向量只对已授权候选重排，
+        # 因此不存在"向量把无权片段召回来"的路径。
+        base = self._keyword.search(
+            query, limit=max(limit * 3, 10), prefixes=prefixes, organizations=organizations
+        )
         if self.vector is None or not base:
             return base[:limit]
 

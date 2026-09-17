@@ -49,9 +49,12 @@ class Settings:
     # 合并部署下由 ChangeGuard 治理服务在服务端解析会话后注入，并显式打开本项。
     allow_header_identity: bool = False
 
-    # 上游（ChangeGuard 治理服务）共享密钥。
-    # 设置后，所有 /api/agent 请求必须携带匹配的 X-Agent-Upstream-Token。
-    # 意义是：本服务即使被误暴露，也不能被直接调用冒充治理服务。
+    # 与 ChangeGuard 治理服务的共享密钥，**双向**都要求它：
+    #   - 治理服务 → 本服务：所有 /api/agent 请求必须携带匹配的 X-Agent-Upstream-Token，
+    #     这样本服务即使被误暴露，也不能被直接调用来冒充治理服务；
+    #   - 本服务 → 治理服务：三个远程只读工具调用内部只读接口
+    #     /api/agent-tools/changes/{id} 时同样携带它。
+    # 未配置时，远程只读工具**显式不可用**，不会退化成匿名读取。
     upstream_token: str = ""
 
     @property

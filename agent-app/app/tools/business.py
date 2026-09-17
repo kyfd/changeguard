@@ -2,10 +2,13 @@
 
 统一返回结构：成功或失败、数据、证据标识、数据版本或时间、可公开错误。
 
-**两条安全性质**（对应计划里的"权限设计"）：
+**三条安全性质**（对应计划里的"权限设计"）：
 
 1. 用户/组织/应用来自 `TrustedContext`，由 API 层注入；工具参数里写不出来。
 2. 工具失败（超时、权限不足）返回 `ok=False`，**绝不能被解释成"检查通过"**。
+3. 三个远程只读工具走治理后端的**内部只读接口**（`/api/agent-tools/changes/{id}`），
+   该接口要求共享密钥 + 成员委托两层认证。缺密钥时显式不可用，而不是退化成匿名读取；
+   浏览器不可达（拿不到共享密钥），本服务也不持有治理会话。
 """
 
 from __future__ import annotations
@@ -149,17 +152,33 @@ class Toolbox:
             observed_at=check.checked_at,
         )
 
-    async def _search_norms(self, _context: TrustedContext, args: Mapping[str, Any]) -> ToolResult:
-        return self._search("search_norms", str(args.get("query") or ""), int(args.get("limit") or 5), ("norms/",))
-
-    async def _search_cases(self, _context: TrustedContext, args: Mapping[str, Any]) -> ToolResult:
+    async def _search_norms(self, context: TrustedContext, args: Mapping[str, Any]) -> ToolResult:
         return self._search(
-            "search_historical_changes", str(args.get("query") or ""), int(args.get("limit") or 3), ("cases/",)
+            "search_norms", str(args.get("query") or ""), int(args.get("limit") or 5), ("norms/",), context
         )
 
-    def _search(self, tool: str, query: str, limit: int, prefixes: tuple[str, ...]) -> ToolResult:
+    async def _search_cases(self, context: TrustedContext, args: Mapping[str, Any]) -> ToolResult:
+        return self._search(
+            "search_historical_changes",
+            str(args.get("query") or ""),
+            int(args.get("limit") or 3),
+            ("cases/",),
+            context,
+        )
+
+    def _search(
+        self,
+        tool: str,
+        query: str,
+        limit: int,
+        prefixes: tuple[str, ...],
+        context: TrustedContext,
+    ) -> ToolResult:
         # 作用域在排序前生效：规范检索只会在规范里排序，不会被案例挤掉。
-        selected = self._retriever.search(query, limit=limit, prefixes=prefixes)
+        # 租户范围同样在排序前生效，且只接受调用方**自己**的组织：
+        # 组织来自 TrustedContext，工具参数里写不出来（未知参数会被直接拒绝）。
+        organizations = (context.organization_id,) if context.organization_id else ()
+        selected = self._retriever.search(query, limit=limit, prefixes=prefixes, organizations=organizations)
         if not selected:
             # 找不到依据时必须明说，不能生成虚假引用。
             return ToolResult(
@@ -207,18 +226,42 @@ class Toolbox:
     async def _fetch_change(self, tool: str, context: TrustedContext, change_id: str, projection: str) -> ToolResult:
         if not change_id.strip():
             return ToolResult(ok=False, tool=tool, error="change_id 不能为空")
-        url = f"{self._settings.governance_base_url}/api/changes/{change_id}"
+
+        # 治理后端为 Agent 提供的是**内部只读接口**（/api/agent-tools/changes/{id}），
+        # 不是面向浏览器的 /api/changes/{id}：后者要求会话，而本服务没有也不应该持有会话。
+        # 该接口要求共享密钥 + 成员委托，两层都不可省。
+        token = self._settings.upstream_token.strip()
+        if not token:
+            # 缺密钥时显式不可用：不发一次注定被拒的匿名请求，
+            # 更不能退化成"没有凭据也照样能读"。
+            return ToolResult(
+                ok=False,
+                tool=tool,
+                error="内部只读接口未配置共享密钥（AGENT_UPSTREAM_TOKEN），无法读取治理后端数据。",
+            )
+
+        url = f"{self._settings.governance_base_url}/api/agent-tools/changes/{change_id}"
+        headers = dict(context.as_headers())
+        headers["X-Agent-Upstream-Token"] = token
         try:
             async with httpx.AsyncClient(timeout=self._settings.governance_timeout_seconds) as client:
-                response = await client.get(url, headers=context.as_headers())
+                response = await client.get(url, params={"projection": projection}, headers=headers)
         except Exception as error:  # noqa: BLE001 - 网络失败必须显式失败，不能沉默
             return ToolResult(ok=False, tool=tool, error=f"治理后端不可用：{type(error).__name__}: {error}")
 
+        if response.status_code == 401:
+            return ToolResult(ok=False, tool=tool, error="治理后端拒绝了服务凭据：内部只读接口共享密钥不匹配。")
         if response.status_code == 403:
-            # 后端按组织的权限检查在这里生效：跨组织访问会被拒绝。
-            return ToolResult(ok=False, tool=tool, error="治理后端拒绝了该访问（权限或组织范围不符）")
+            # 成员停用、组织不符或缺少应用授权都落到这里，不区分，避免探测。
+            return ToolResult(ok=False, tool=tool, error="治理后端拒绝了该访问（成员、组织或应用授权不符）")
         if response.status_code == 404:
             return ToolResult(ok=False, tool=tool, error="变更不存在")
+        if response.status_code == 503:
+            return ToolResult(
+                ok=False,
+                tool=tool,
+                error="治理后端未启用内部只读接口（缺少 DBGUARD_AGENT_UPSTREAM_TOKEN）。",
+            )
         if response.status_code != 200:
             return ToolResult(ok=False, tool=tool, error=f"治理后端返回状态码 {response.status_code}")
 
@@ -227,7 +270,11 @@ class Toolbox:
             data = {"risk": body.get("risk"), "findings": body.get("findings") or []}
         elif projection == "experiment":
             experiment = body.get("experiment")
-            data = {"experiment": experiment, "status": (experiment or {}).get("status", "NOT_RUN")}
+            data = {
+                "experiment": experiment,
+                # 未执行时必须仍是 NOT_RUN，不能被省略成看起来有结果。
+                "status": body.get("status") or (experiment or {}).get("status") or "NOT_RUN",
+            }
         else:
             data = {
                 "id": body.get("id"),
@@ -236,7 +283,8 @@ class Toolbox:
                 "environment": body.get("environment"),
                 "change_type": body.get("change_type"),
                 "artifact_sha256": body.get("artifact_sha256"),
-                "description_untrusted": body.get("description"),
+                # 字段名自带 untrusted 标记：这是数据，不是指令。
+                "description_untrusted": body.get("description_untrusted"),
             }
         return ToolResult(
             ok=True,
