@@ -206,6 +206,10 @@ C1 重试相乘、C2 模型自封"已确认"、C3 版本/修订说明、C4/C5 �
 已修复并有改前/改后证据（改前分别为 4 failed 与 10 failed，全部为行为复现）。
 `pytest -q` 125 passed、离线评估 11/11。详见 `docs/agent-upgrade-verification.md` §11。
 
-**P1 主体仍未开始**：受约束调查循环、预算（最大轮次/累计工具调用/单工具超时/任务总时限/输出预算）、
-空转检测、模型自主工具选择的决策契约、必需证据的确定性完成条件、工具结果结构化与摘要哈希、
-usage 缺失策略、`fixed_workflow`/`bounded_agent` 策略开关。不要把这些读成已完成。
+**P1 主体已实现**：`app/workflow/investigate.py` 的受约束调查循环（轮次与累计工具调用双上限、
+单工具超时、空转检测、必需证据由代码判定、决策者能力必须显式声明），以
+`investigation_strategy` 开关接入，默认仍是 `fixed_workflow` 因而不改变既有行为。
+
+**仍未完成**：模型原生工具选择（provider 未实现 `decide()`，目前只做到"显式报告不可用"
+而不是"真让模型选"）、工具结果摘要哈希、usage 缺失策略、`fixed_workflow` 与
+`bounded_agent` 的同输入对照评测。
