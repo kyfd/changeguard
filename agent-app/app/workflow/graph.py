@@ -46,6 +46,12 @@ from app.schemas.drafts import (
 from app.tools.business import Toolbox
 from app.tools.registry import TrustedContext
 from app.tools.scan import feedback_lines
+from app.workflow.investigate import (
+    BoundedInvestigation,
+    PlannerUnavailable,
+    build_planner,
+    evidence_from_tool_result,
+)
 from app.workflow.state import WorkflowState, build_questions, event, slots_from_state
 
 # 允许模型提供的字段。其余字段一律拒绝，避免模型改写服务端已确认的信息。
@@ -311,6 +317,26 @@ class DraftWorkflow:
         query = " ".join(part for part in [state.get("requirement", ""), slots.table or "", slots.query_sql or ""] if part)
         registry = self._deps.toolbox_factory(state.get("schema_snapshot", "")).build()
 
+        strategy = str(getattr(self._deps.settings, "investigation_strategy", "fixed_workflow") or "").lower()
+        if strategy == "bounded_agent":
+            evidence, notes, trace = await self._investigate(state, slots, registry)
+        else:
+            evidence, notes = await self._fixed_retrieval(query, registry)
+            trace = ""
+
+        events = list(state.get("events") or [])
+        events.append(event("retrieve_evidence", f"检索到 {len(evidence)} 条可引用片段"))
+        if trace:
+            # 决策者是谁、为什么停下、用了几次工具，都必须可见——不含模型内部推理。
+            events.append(event("retrieve_evidence", trace))
+        note = "；".join(notes) if notes else None
+        if not evidence:
+            # 找不到依据必须明说，不能生成虚假引用。
+            events.append(event("retrieve_evidence", "没有可引用的规范或案例片段，草案将标注依据不足"))
+        return {"evidence": [item.model_dump(mode="json") for item in evidence], "evidence_note": note, "events": events}
+
+    async def _fixed_retrieval(self, query: str, registry: Any) -> tuple[list[EvidenceRef], list[str]]:
+        """现有的固定检索顺序。保留为默认策略与回退路径。"""
         evidence: list[EvidenceRef] = []
         notes: list[str] = []
         for tool_name, limit in (("search_norms", 4), ("search_historical_changes", 2)):
@@ -320,28 +346,35 @@ class DraftWorkflow:
             if not result.ok:
                 notes.append(f"{tool_name}：{result.error}")
                 continue
-            for hit in result.data.get("hits") or []:
-                evidence.append(
-                    EvidenceRef(
-                        evidence_id=str(hit["evidence_id"]),
-                        doc_id=str(hit["doc_id"]),
-                        title=str(hit["title"]),
-                        section=hit.get("section"),
-                        version=hit.get("version") or None,
-                        snippet=str(hit.get("snippet") or ""),
-                        source=str(hit.get("source") or ""),
-                        status=str(hit.get("status") or "unknown"),
-                        score=float(hit.get("score") or 0.0),
-                    )
-                )
+            evidence.extend(evidence_from_tool_result(result))
+        return evidence, notes
 
-        events = list(state.get("events") or [])
-        events.append(event("retrieve_evidence", f"检索到 {len(evidence)} 条可引用片段"))
-        note = "；".join(notes) if notes else None
-        if not evidence:
-            # 找不到依据必须明说，不能生成虚假引用。
-            events.append(event("retrieve_evidence", "没有可引用的规范或案例片段，草案将标注依据不足"))
-        return {"evidence": [item.model_dump(mode="json") for item in evidence], "evidence_note": note, "events": events}
+    async def _investigate(
+        self, state: WorkflowState, slots: TaskSlots, registry: Any
+    ) -> tuple[list[EvidenceRef], list[str], str]:
+        """走受约束调查循环。预算、空转与完成条件都由代码强制。"""
+        try:
+            planner = build_planner(self._deps.settings, self._deps.provider)
+        except PlannerUnavailable as error:
+            # 显式报告不可用，而不是悄悄退回规则却仍把它说成"模型的选择"。
+            return [], [str(error)], f"调查循环未启动：{error}"
+        loop = BoundedInvestigation(
+            planner=planner,
+            registry=registry,
+            context=self._deps.trusted_context,
+            max_rounds=self._deps.settings.max_investigation_rounds,
+            max_total_tool_calls=self._deps.settings.max_total_tool_calls,
+            tool_timeout_seconds=self._deps.settings.tool_timeout_seconds,
+        )
+        outcome = await loop.run(
+            requirement=state.get("requirement", ""),
+            slots=slots,
+            schema_snapshot=state.get("schema_snapshot", ""),
+        )
+        notes = list(outcome.report.notes)
+        if outcome.report.missing_required:
+            notes.append("必需证据仍缺失：" + "、".join(outcome.report.missing_required))
+        return outcome.evidence, notes, f"调查循环：{outcome.report.summary()}"
 
     async def _generate_draft(self, state: WorkflowState) -> dict[str, Any]:
         slots = slots_from_state(state)

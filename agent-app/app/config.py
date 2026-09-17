@@ -41,6 +41,20 @@ class Settings:
     max_revisions: int = 2
     task_timeout_seconds: float = 120.0
 
+    # 调查策略：
+    #   fixed_workflow（默认）—— 现有的固定检索顺序，行为不变；
+    #   bounded_agent          —— 受约束调查循环，边界由代码强制（见 app/workflow/investigate.py）。
+    # 默认保持 fixed_workflow：新循环在验证充分前不应改变既有行为。
+    investigation_strategy: str = "fixed_workflow"
+    # 决策者：rule 是**确定性规则**决策者（不冒充模型）；provider 要求模型具备原生动作能力，
+    # 不具备时会显式报告不可用，而不是用规则顶替并宣称是模型决策。
+    investigation_planner: str = "rule"
+    # 调查预算。轮次与累计工具调用是两个独立上限：只限轮次挡不住一轮里调很多次。
+    max_investigation_rounds: int = 4
+    max_total_tool_calls: int = 8
+    # 单工具超时：超时按失败处理，不让循环挂住，也不当成"没问题"。
+    tool_timeout_seconds: float = 5.0
+
     # 终态落盘失败时的**有上限**重试：一次存储抖动不应该让已经跑完的任务变成孤儿，
     # 但也不允许无限重试。用尽后按降级处理（健康状态报告 degraded，见 AgentService.health）。
     persist_max_attempts: int = 3
@@ -92,6 +106,12 @@ class Settings:
             llm_max_tokens=int(os.getenv("AGENT_LLM_MAX_TOKENS", "1200")),
             max_revisions=int(os.getenv("AGENT_MAX_REVISIONS", "2")),
             task_timeout_seconds=float(os.getenv("AGENT_TASK_TIMEOUT", "120")),
+            investigation_strategy=os.getenv("AGENT_INVESTIGATION_STRATEGY", "fixed_workflow").strip()
+            or "fixed_workflow",
+            investigation_planner=os.getenv("AGENT_INVESTIGATION_PLANNER", "rule").strip() or "rule",
+            max_investigation_rounds=int(os.getenv("AGENT_MAX_INVESTIGATION_ROUNDS", "4")),
+            max_total_tool_calls=int(os.getenv("AGENT_MAX_TOTAL_TOOL_CALLS", "8")),
+            tool_timeout_seconds=float(os.getenv("AGENT_TOOL_TIMEOUT", "5")),
             persist_max_attempts=int(os.getenv("AGENT_PERSIST_MAX_ATTEMPTS", "3")),
             persist_retry_backoff_seconds=float(os.getenv("AGENT_PERSIST_RETRY_BACKOFF", "0.05")),
             agent_demo_dir=os.getenv("AGENT_DEMO_DIR", "").strip(),
