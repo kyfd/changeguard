@@ -29,7 +29,12 @@ class Settings:
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
     llm_timeout_seconds: float = 20.0
+    # provider 层：只针对传输失败与暂时性服务端故障（限流、超时、5xx）重试。
     llm_max_attempts: int = 2
+    # 工作流层：只针对"模型输出无法解析成草案"重试，与上面是两个独立开关。
+    # 一次生成最多打 `llm_max_attempts × draft_parse_attempts` 次模型调用——
+    # 以前两层共用同一个值，实际次数被悄悄平方。
+    draft_parse_attempts: int = 1
     llm_max_tokens: int = 1200
 
     # 工作流预算：有限循环，不允许无上限修订。
@@ -83,6 +88,7 @@ class Settings:
             llm_model=os.getenv("AGENT_LLM_MODEL", defaults.llm_model).strip(),
             llm_timeout_seconds=float(os.getenv("AGENT_LLM_TIMEOUT", "20")),
             llm_max_attempts=int(os.getenv("AGENT_LLM_MAX_ATTEMPTS", "2")),
+            draft_parse_attempts=int(os.getenv("AGENT_DRAFT_PARSE_ATTEMPTS", "1")),
             llm_max_tokens=int(os.getenv("AGENT_LLM_MAX_TOKENS", "1200")),
             max_revisions=int(os.getenv("AGENT_MAX_REVISIONS", "2")),
             task_timeout_seconds=float(os.getenv("AGENT_TASK_TIMEOUT", "120")),

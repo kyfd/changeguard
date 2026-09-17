@@ -181,12 +181,32 @@ class AgentService:
         slots = TaskSlots.model_validate(record.get("slots") or {})
         updated = _merge_slots(slots, request)
         record["slots"] = updated.model_dump(mode="json")
+        # 表结构快照是任务级材料而非槽位，但必须能在补充阶段补齐；
+        # 只有显式提供才覆盖，避免把已有快照清空。
+        if request.schema_snapshot is not None:
+            record["schema_snapshot"] = request.schema_snapshot
+        # 自由文本说明：以前被接收后直接丢弃。现在写进任务记录，
+        # 并在下一次执行时作为「补充说明」拼进需求文本，模型确实能看到它。
+        note = (request.note or "").strip()
+        if note:
+            notes = list(record.get("clarification_notes") or [])
+            notes.append(note)
+            record["clarification_notes"] = notes
         record["status"] = TaskStatus.RECEIVED.value
         record["error"] = None
         events = list(record.get("events") or [])
         provided = [
             name
-            for name in ("application", "environment", "database", "table", "query_sql", "planned_at")
+            for name in (
+                "application",
+                "environment",
+                "database",
+                "table",
+                "query_sql",
+                "planned_at",
+                "schema_snapshot",
+                "note",
+            )
             if getattr(request, name, None) is not None
         ]
         events.append(event("clarified", f"补充信息：{', '.join(provided) or '无字段变化'}"))
@@ -546,9 +566,16 @@ class AgentService:
             )
         )
 
+        # 用户后续提供的补充说明属于需求的一部分，必须让模型看到；
+        # 明确标注来源，避免与原始需求混为一谈。
+        notes = [str(item).strip() for item in (record.get("clarification_notes") or []) if str(item).strip()]
+        requirement = record.get("requirement", "")
+        if notes:
+            requirement = requirement + "\n\n补充说明（用户后续提供）：\n" + "\n".join(f"- {item}" for item in notes)
+
         initial_state: dict[str, Any] = {
             "task_id": record["task_id"],
-            "requirement": record.get("requirement", ""),
+            "requirement": requirement,
             "slots": record.get("slots") or {},
             "schema_snapshot": record.get("schema_snapshot") or "",
             "events": list(record.get("events") or []),

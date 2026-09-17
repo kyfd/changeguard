@@ -32,10 +32,11 @@ from langgraph.graph import END, START, StateGraph
 
 from app.config import Settings
 from app.guard import detect_injection
-from app.llm.provider import DraftProvider, DraftRequest
+from app.llm.provider import DraftProvider, DraftRequest, ModelCallError
 from app.schemas.drafts import (
     Assumption,
     CheckItem,
+    DatabaseKind,
     DeterministicCheck,
     Draft,
     EvidenceRef,
@@ -58,6 +59,10 @@ ALLOWED_MODEL_FIELDS = {
     "evidence_ids",
 }
 
+# 每条假设允许模型提供的字段。`confirmed` **不在**其中：
+# "已获人工确认"是人的结论，模型无权声明（见下方解析逻辑）。
+ALLOWED_ASSUMPTION_FIELDS = {"statement", "needs_confirmation"}
+
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
 
@@ -71,6 +76,8 @@ def parse_model_draft(
     requirement: str,
     slots: TaskSlots,
     evidence_pool: list[EvidenceRef],
+    version: int = 1,
+    revision_notes: list[str] | None = None,
 ) -> Draft:
     """严格解析模型输出。
 
@@ -113,11 +120,21 @@ def parse_model_draft(
     for item in payload.get("assumptions") or []:
         if not isinstance(item, dict) or not isinstance(item.get("statement"), str):
             raise DraftParseError("assumptions 的每一项都必须包含 statement 字符串")
+        unknown_assumption = sorted(set(item) - ALLOWED_ASSUMPTION_FIELDS)
+        if unknown_assumption:
+            # 其中 `confirmed` 尤其不能由模型提供：它表示"已获人工确认"，
+            # 是人的结论，不是模型的结论。按本解析器一贯的严格口径直接拒绝，
+            # 而不是悄悄忽略——被忽略的确认标记最容易变成一条虚假的审计记录。
+            raise DraftParseError(f"assumptions 包含未声明字段：{unknown_assumption}")
         assumptions.append(
             Assumption(
                 statement=item["statement"],
-                confirmed=bool(item.get("confirmed", False)),
-                needs_confirmation=bool(item.get("needs_confirmation", True)),
+                # 两个标志都由服务端决定，不采信模型：
+                #   confirmed 恒为 False——模型无权声称已获人工确认；
+                #   needs_confirmation 恒为 True——未经确认的假设就需要确认。
+                # 模型送来的 needs_confirmation 在契约内（不报错），但不作为依据。
+                confirmed=False,
+                needs_confirmation=True,
             )
         )
 
@@ -128,7 +145,10 @@ def parse_model_draft(
         raise DraftParseError(f"advisory_risk 取值非法：{advisory_risk}")
 
     return Draft(
-        version=1,
+        # 版本与修订说明由服务端写入，模型无从决定：模型无法把自己标成"第 1 版"
+        # 来掩盖"这已经是第三轮修订"。
+        version=max(1, int(version)),
+        revision_notes=list(revision_notes or []),
         requirement=requirement,
         application=slots.application or "",
         environment=slots.environment or "",
@@ -188,7 +208,7 @@ class DraftWorkflow:
         builder.add_conditional_edges(
             "check_info",
             self._route_entry,
-            {"needs_info": END, "continue": "retrieve_evidence"},
+            {"needs_info": END, "unsupported": END, "continue": "retrieve_evidence"},
         )
         builder.add_edge("retrieve_evidence", "generate_draft")
         builder.add_edge("generate_draft", "run_check")
@@ -213,6 +233,10 @@ class DraftWorkflow:
     def _route_entry(self, state: WorkflowState) -> str:
         if state.get("status") == TaskStatus.NEEDS_INFO.value:
             return "needs_info"
+        if state.get("status") == TaskStatus.FAILED.value:
+            # 入口阶段就已确定无法继续（例如目标数据库不在支持范围内）：直接结束，
+            # 不要继续走到检索与生成——那正是"给出方言不匹配的草案"的路径。
+            return "unsupported"
         return "continue"
 
     def _route_after_check(self, state: WorkflowState) -> str:
@@ -262,6 +286,21 @@ class DraftWorkflow:
             return {
                 "status": TaskStatus.NEEDS_INFO.value,
                 "questions": [item.model_dump(mode="json") for item in build_questions(missing)],
+                "events": events,
+            }
+        # 支持范围必须显式声明，并在入口就停下。
+        # 给 MySQL 输出 PostgreSQL 专属语法（CREATE INDEX CONCURRENTLY、SET lock_timeout）
+        # 是比直接拒绝更糟的结果：它看起来像一份可用的草案，而实际执行不了。
+        if slots.database not in (None, DatabaseKind.POSTGRESQL):
+            detail = (
+                f"本版本仅支持 PostgreSQL 索引变更，暂不支持 {slots.database.value}；"
+                "为避免给出与该方言不匹配的草案，任务停在此处而不是继续生成。"
+            )
+            events.append(event("check_info", detail))
+            return {
+                "status": TaskStatus.FAILED.value,
+                "error": detail,
+                "questions": [],
                 "events": events,
             }
         events.append(event("check_info", "必要信息完整，继续生成草案"))
@@ -322,7 +361,10 @@ class DraftWorkflow:
 
         events = list(state.get("events") or [])
         failures: list[str] = []
-        attempts = max(1, self._deps.settings.llm_max_attempts)
+        # 内容层的重试与 provider 的传输层重试用**两个不同的开关**：
+        # 以前两层共用 `llm_max_attempts`，于是一次生成最多打 2×2=4 次模型调用，
+        # 成本与延迟被悄悄放大，而且无法单独调整任何一层。
+        attempts = max(1, int(self._deps.settings.draft_parse_attempts))
         for attempt in range(attempts):
             try:
                 text = await self._deps.provider.generate(request)
@@ -331,7 +373,18 @@ class DraftWorkflow:
                     requirement=state.get("requirement", ""),
                     slots=slots,
                     evidence_pool=pool,
+                    # 版本与修订说明来自服务端：本轮修订对应的是**上一轮确定性检查的反馈**，
+                    # 而不是模型自己声称改了什么。
+                    version=revisions + 1,
+                    revision_notes=list(request.check_feedback),
                 )
+            except ModelCallError as error:
+                failures.append(f"第 {attempt + 1} 次尝试失败：{error}")
+                if not error.retryable:
+                    # 权限拒绝、参数错误这类失败，重试只会得到同样的结果，
+                    # 所以立刻停下，而不是把成本再乘一遍。
+                    break
+                continue
             except Exception as error:  # noqa: BLE001 - 模型输出不可信，任何异常都要转成明确失败
                 failures.append(f"第 {attempt + 1} 次尝试失败：{error}")
                 continue

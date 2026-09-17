@@ -72,6 +72,24 @@ SYSTEM_PROMPT = """你是数据库变更材料准备助手。你只输出 JSON�
 """
 
 
+class ModelCallError(RuntimeError):
+    """模型调用失败。
+
+    `retryable` 把"值得重试的暂时故障"与"重试也不会变的失败"分开：
+    权限拒绝、参数错误、请求体非法，重试多少次都是同一个结果，只会放大成本。
+    上层据此决定是否再试，而不是对所有异常一视同仁地重试。
+    """
+
+    def __init__(self, message: str, *, retryable: bool) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+# 只有这些状态码才值得重试：限流、超时与网关/服务端暂时不可用。
+# 其余的 4xx（401/403 权限、400/422 参数）重试不会改变结果。
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
 class OpenAICompatibleProvider:
     """OpenAI 兼容的 Chat Completions 客户端。"""
 
@@ -95,31 +113,54 @@ class OpenAICompatibleProvider:
         }
         url = self._settings.llm_base_url + "/chat/completions"
 
+        # 这里的重试只负责**传输层与暂时性服务端故障**。
+        # 内容层面的重试（模型输出无法解析成草案）由工作流用另一个开关决定，
+        # 两层不再共用同一个配置——那正是"重试次数相乘"的来源。
+        attempts = max(1, int(self._settings.llm_max_attempts))
+        last_error: ModelCallError | None = None
         async with self._semaphore:
-            last_error: Exception | None = None
-            for attempt in range(max(1, self._settings.llm_max_attempts)):
+            for attempt in range(attempts):
                 try:
-                    async with httpx.AsyncClient(timeout=self._settings.llm_timeout_seconds) as client:
-                        response = await client.post(
-                            url,
-                            json=payload,
-                            headers={"Authorization": f"Bearer {self._settings.llm_api_key}"},
-                        )
-                    if response.status_code != 200:
-                        raise RuntimeError(f"模型返回状态码 {response.status_code}: {response.text[:200]}")
-                    body = response.json()
-                    choices = body.get("choices") or []
-                    if not choices:
-                        raise RuntimeError("模型未返回任何候选结果")
-                    content = (choices[0].get("message") or {}).get("content") or ""
-                    if not content.strip():
-                        raise RuntimeError("模型返回了空内容")
-                    return content
-                except Exception as error:  # noqa: BLE001 - 需要把任意失败都转成重试或明确错误
+                    return await self._call_once(url, payload)
+                except ModelCallError as error:
                     last_error = error
-                    if attempt + 1 < max(1, self._settings.llm_max_attempts):
-                        await asyncio.sleep(0.3 * (attempt + 1))
-            raise RuntimeError(f"模型调用失败：{last_error}")
+                    if not error.retryable:
+                        break
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(0.3 * (attempt + 1))
+        if last_error is None:  # pragma: no cover - attempts >= 1 保证不会走到
+            raise ModelCallError("模型调用失败：未发起调用", retryable=False)
+        raise last_error
+
+    async def _call_once(self, url: str, payload: dict[str, Any]) -> str:
+        try:
+            async with httpx.AsyncClient(timeout=self._settings.llm_timeout_seconds) as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self._settings.llm_api_key}"},
+                )
+        except Exception as error:  # noqa: BLE001 - 网络抖动与超时值得重试
+            raise ModelCallError(
+                f"模型调用失败（传输层）：{type(error).__name__}: {error}", retryable=True
+            ) from error
+
+        if response.status_code != 200:
+            raise ModelCallError(
+                f"模型返回状态码 {response.status_code}: {response.text[:200]}",
+                retryable=response.status_code in _RETRYABLE_STATUS,
+            )
+        try:
+            body = response.json()
+        except Exception as error:  # noqa: BLE001 - 网关返回非 JSON 可能是暂时性的
+            raise ModelCallError("模型返回的不是合法 JSON", retryable=True) from error
+        choices = body.get("choices") or []
+        if not choices:
+            raise ModelCallError("模型未返回任何候选结果", retryable=True)
+        content = (choices[0].get("message") or {}).get("content") or ""
+        if not content.strip():
+            raise ModelCallError("模型返回了空内容", retryable=True)
+        return content
 
 
 def _render_user_prompt(request: DraftRequest) -> str:
@@ -162,6 +203,13 @@ class DeterministicProvider:
 
     async def generate(self, request: DraftRequest) -> str:
         slots = request.slots
+        # 本生成器只会产出 PostgreSQL 语法（CONCURRENTLY、lock_timeout）。
+        # 工作流在入口就会拦下不支持的方言；这里再挡一道，是为了让"给 MySQL 输出
+        # PG 语法"这件事不可能从别的调用路径重新混进来。
+        if slots.database is not None and slots.database != DatabaseKind.POSTGRESQL:
+            raise RuntimeError(
+                f"确定性生成器只实现 PostgreSQL 索引变更，无法为 {slots.database.value} 生成草案。"
+            )
         table = (slots.table or "").strip() or "unknown_table"
         equality_column, sort_column = _infer_columns(slots.query_sql or "")
         index_name = _index_name(table, equality_column, sort_column)
@@ -187,16 +235,16 @@ class DeterministicProvider:
             assumptions.append(
                 {
                     "statement": f"按查询形态推断索引列为 ({', '.join(columns)})，与查询的等值与排序条件一致。",
-                    "confirmed": False,
                     "needs_confirmation": True,
                 }
             )
         if "热表" in request.schema_snapshot:
+            # 这里**不能**写 confirmed：它表示"已获人工确认"，只能由人的动作产生。
+            # 离线生成器自己把假设标成已确认，正是需要修掉的失败模式之一。
             assumptions.append(
                 {
                     "statement": "该表为热表，因此使用 CREATE INDEX CONCURRENTLY。",
-                    "confirmed": True,
-                    "needs_confirmation": False,
+                    "needs_confirmation": True,
                 }
             )
 
