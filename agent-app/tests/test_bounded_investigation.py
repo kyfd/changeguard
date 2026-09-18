@@ -48,9 +48,24 @@ def hit(evidence_id: str, doc_id: str = "norms/sql-change-standards") -> dict[st
         "section": "并发建索引",
         "snippet": "片段",
         "source": f"{doc_id}.md",
+        # 规范片段必须带可核对身份（版本或来源），否则必需证据判定会判为不足。
+        "version": "v1.0",
         "status": "active",
         "score": 1.0,
     }
+
+
+def deprecated_hit(evidence_id: str) -> dict[str, Any]:
+    payload = hit(evidence_id)
+    payload["status"] = "deprecated"
+    return payload
+
+
+def unversioned_hit(evidence_id: str) -> dict[str, Any]:
+    payload = hit(evidence_id)
+    payload["version"] = ""
+    payload["source"] = ""
+    return payload
 
 
 class FakeRegistry:
@@ -95,8 +110,11 @@ def build(
     )
 
 
-async def investigate(loop: BoundedInvestigation):
-    return await loop.run(requirement="订单索引", slots=SLOTS)
+SNAPSHOT = "CREATE TABLE orders (id bigint, user_id bigint, created_at timestamptz);"
+
+
+async def investigate(loop: BoundedInvestigation, *, schema_snapshot: str = SNAPSHOT):
+    return await loop.run(requirement="订单索引", slots=SLOTS, schema_snapshot=schema_snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +252,144 @@ def test_rule_planner_is_labelled_as_rules_not_as_a_model() -> None:
     planner = build_planner(Settings(), DeterministicProvider())
     assert isinstance(planner, RulePlanner)
     assert planner.name == "rule"
+
+
+# ---------------------------------------------------------------------------
+# 必需证据判定：不止看 norms/ 前缀
+# ---------------------------------------------------------------------------
+
+
+def test_deprecated_norms_alone_do_not_count_as_sufficient() -> None:
+    """命中的规范全部已废弃时不得判为"够了"——前缀一样，但引用的是失效条款。"""
+    planner = ScriptedPlanner([CallTool("search_norms", {"query": "索引"}), Finish()])
+    registry = FakeRegistry({"search_norms": [deprecated_hit("norms/x#1")]})
+
+    outcome = run(investigate(build(planner, registry)))
+
+    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert any("废弃" in item for item in outcome.report.missing_required), outcome.report.missing_required
+
+
+def test_norms_without_version_or_source_are_insufficient() -> None:
+    """规范片段必须带可核对身份，否则无法说明依据的是哪一版。"""
+    planner = ScriptedPlanner([CallTool("search_norms", {"query": "索引"}), Finish()])
+    registry = FakeRegistry({"search_norms": [unversioned_hit("norms/x#1")]})
+
+    outcome = run(investigate(build(planner, registry)))
+
+    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert any("版本或来源" in item for item in outcome.report.missing_required)
+
+
+def test_targeted_table_without_snapshot_is_insufficient() -> None:
+    """指定了目标表却没有快照时无法核对字段名，不得判为证据足够。"""
+    planner = ScriptedPlanner([CallTool("search_norms", {"query": "索引"}), Finish()])
+    registry = FakeRegistry({"search_norms": [hit("norms/x#1")]})
+
+    outcome = run(investigate(build(planner, registry), schema_snapshot=""))
+
+    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert any("结构快照" in item for item in outcome.report.missing_required)
+
+
+# ---------------------------------------------------------------------------
+# 结构化观察与 usage 已知性
+# ---------------------------------------------------------------------------
+
+
+def test_all_tool_results_are_fed_back_not_only_search_hits() -> None:
+    """表结构等非 hits 结果同样要反馈给下一轮决策，不能丢掉。"""
+    registry = FakeRegistry({"search_norms": [hit("norms/x#1")]})
+
+    class NonSearchRegistry(FakeRegistry):
+        async def call(self, name: str, args: Any, context: Any) -> ToolResult:
+            self.calls.append((name, dict(args or {})))
+            if name == "scan_sql":
+                return ToolResult(
+                    ok=True,
+                    tool=name,
+                    data={"status": "BLOCKED", "items": [{"code": "MISSING_LOCK_TIMEOUT"}]},
+                    data_version="scan-v2",
+                )
+            return await super().call(name, args, context)
+
+    planner = ScriptedPlanner(
+        [
+            CallTool("search_norms", {"query": "索引"}),
+            CallTool("scan_sql", {"sql": "CREATE INDEX ..."}),
+            Finish(),
+        ]
+    )
+    seen: list[list[Any]] = []
+
+    class ObservingPlanner(ScriptedPlanner):
+        def plan(self, **kwargs: Any):
+            seen.append(list(kwargs.get("observations") or []))
+            return super().plan(**kwargs)
+
+    loop = build(ObservingPlanner(list(planner._actions)), NonSearchRegistry())
+    outcome = run(investigate(loop))
+
+    # 第一轮没有观察；第二轮应当看到 search_norms；第三轮应当看到 search_norms + scan_sql。
+    assert len(seen) == 3
+    assert [item.tool for item in seen[-1]] == ["search_norms", "scan_sql"]
+    scanned = seen[-1][-1]
+    assert scanned.kind == "material", "非 hits 结果不能被当成搜索片段丢掉"
+    assert "MISSING_LOCK_TIMEOUT" in scanned.summary
+    assert scanned.payload_digest, "结构化观察必须带内容摘要哈希，截断不等于无法核对"
+    assert scanned.data_version == "scan-v2"
+    assert outcome.report.observations
+
+
+def test_failed_tool_is_observed_with_its_error() -> None:
+    planner = ScriptedPlanner([CallTool("scan_sql", {"sql": "x"}), Finish()])
+    registry = FakeRegistry(failing=("scan_sql",))
+
+    outcome = run(investigate(build(planner, registry)))
+
+    failures = [item for item in outcome.report.observations if not item.ok]
+    assert len(failures) == 1
+    assert "注入的工具失败" in failures[0].error
+    assert failures[0].payload_digest == "", "失败的调用没有内容摘要"
+
+
+def test_timeout_is_observed_too() -> None:
+    planner = ScriptedPlanner([CallTool("search_norms", {"query": "慢"})])
+    registry = FakeRegistry(hang=("search_norms",))
+
+    outcome = run(investigate(build(planner, registry, tool_timeout=0.01)))
+
+    assert outcome.report.observations
+    assert outcome.report.observations[0].kind == "timeout"
+    assert "超时" in outcome.report.observations[0].error
+
+
+def test_usage_is_unknown_rather_than_zero() -> None:
+    """provider 未提供 usage 时必须标 unknown，不得填 0 冒充已知消耗。"""
+    planner = ScriptedPlanner([CallTool("search_norms", {"query": "索引"}), Finish()])
+    registry = FakeRegistry({"search_norms": [hit("norms/x#1")]})
+
+    outcome = run(investigate(build(planner, registry)))
+
+    usage = outcome.report.usage
+    assert usage.known is False
+    assert usage.prompt_tokens is None and usage.completion_tokens is None
+    assert usage.cost_estimate is None
+    assert "unknown" in outcome.report.summary()
+
+
+def test_usage_is_recorded_when_the_decider_reports_it() -> None:
+    class ReportingPlanner(ScriptedPlanner):
+        last_usage = {"prompt_tokens": 120, "completion_tokens": 30}
+
+    planner = ReportingPlanner([CallTool("search_norms", {"query": "索引"}), Finish()])
+    registry = FakeRegistry({"search_norms": [hit("norms/x#1")]})
+
+    outcome = run(investigate(build(planner, registry)))
+
+    assert outcome.report.usage.known is True
+    assert outcome.report.usage.prompt_tokens == 120
+    assert outcome.report.usage.completion_tokens == 30
 
 
 # ---------------------------------------------------------------------------
