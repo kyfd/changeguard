@@ -495,6 +495,27 @@ class DraftWorkflow:
             "tool_calls": report.tool_calls,
             "missing_required": list(report.missing_required),
             "blocked": False,
+            # 预算与工具结果摘要：工作台要展示"实际用了什么、为什么停下"。
+            # 摘要本身已经是有界截断，且属于不可信数据，展示时按纯文本转义。
+            "usage": {
+                "known": report.usage.known,
+                "prompt_tokens": report.usage.prompt_tokens,
+                "completion_tokens": report.usage.completion_tokens,
+                "cost_estimate": report.usage.cost_estimate,
+                "note": report.usage.note,
+            },
+            "tool_observations": [
+                {
+                    "tool": item.tool,
+                    "ok": item.ok,
+                    "kind": item.kind,
+                    "summary": item.summary,
+                    "error": item.error,
+                    "data_version": item.data_version,
+                    "evidence_ids": list(item.evidence_ids),
+                }
+                for item in report.observations
+            ],
         }
 
         if report.clarification_requests:

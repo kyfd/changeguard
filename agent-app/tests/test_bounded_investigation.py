@@ -436,3 +436,38 @@ def test_bounded_agent_reports_planner_unavailable_instead_of_faking_a_model_dec
     details = " ".join(item.detail for item in view.events)
     assert "planner=unavailable" in details, "必须标明决策者不可用，而不是写成规则或模型"
     assert "decide" in (view.error or ""), view.error
+
+
+# ---------------------------------------------------------------------------
+# 工作台要看到的执行轨迹与预算
+# ---------------------------------------------------------------------------
+
+
+def test_task_view_exposes_strategy_investigation_and_budget(settings: Settings) -> None:
+    """策略、停止原因、工具观察与预算必须真的出现在视图里，而不是只留在日志中。"""
+    scoped = replace(settings, investigation_strategy="bounded_agent", max_revisions=0)
+    service = AgentService(scoped)
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    assert view.strategy == "bounded_agent"
+    assert view.investigation is not None
+    assert view.investigation["strategy"] == "bounded_agent"
+    assert view.investigation["planner"] == "rule"
+    assert view.investigation["stop_reason"], "停止原因必须可见"
+    assert isinstance(view.investigation["tool_observations"], list)
+    assert view.investigation["tool_calls"] >= 1
+    # provider 未提供 usage 时必须是 unknown，不得填 0 冒充已知消耗。
+    assert view.usage is not None
+    assert view.usage["known"] is False
+    assert view.usage["prompt_tokens"] is None
+
+
+def test_task_view_reports_the_actual_fixed_strategy(settings: Settings) -> None:
+    """默认（固定流程）也要如实标注策略，不能让界面误以为走了模型调查。"""
+    service = AgentService(replace(settings, investigation_strategy="fixed_workflow", max_revisions=0))
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    assert view.strategy == "fixed_workflow"
+    assert (view.investigation or {}).get("strategy") == "fixed_workflow"

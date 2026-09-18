@@ -228,6 +228,11 @@ class TaskView(BaseModel):
     # 当前材料摘要与人工确认记录（确认 ≠ 审批 ≠ 执行许可）。
     material_hash: str | None = None
     confirmations: list[Confirmation] = Field(default_factory=list)
+    # 执行策略与调查轨迹（决策者、停止原因、预算、工具结果摘要），供工作台展示。
+    strategy: str | None = None
+    investigation: dict[str, Any] | None = None
+    # usage 与预算：provider 未提供时是 unknown，不填 0。
+    usage: dict[str, Any] | None = None
 
 
 class CreateTaskRequest(BaseModel):

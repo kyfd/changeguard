@@ -716,11 +716,117 @@ failed/not_run/skipped）、逐例结果与失败原因、错误类型、**实�
 
 ---
 
-## 15. 剩余任务
+## 15. P3（PR-D）：工作台展示、操作与真实浏览器验收
+
+### 15.1 后端补的只读视图
+
+`TaskView` 新增 `strategy` / `investigation` / `usage`；`investigation` 由 `bounded_agent` 的调查
+结果填充，包含**决策者、停止原因、轮次与工具调用数、缺失的必需证据、usage 与工具结果摘要**
+（`tool_observations`：工具名、成功/失败、类型、有界摘要、数据版本）。固定流程也会如实标注
+`strategy=fixed_workflow`，不让界面误以为走了模型调查。
+
+### 15.2 展示与操作
+
+| 要求 | 实现 |
+| --- | --- |
+| 展示执行策略 / 调查动作 / 工具结果摘要 / 证据来源 / 停止原因 / 预算 | 新增「执行轨迹与预算」卡片：策略徽章、决策者、停止原因（可读文案）、轮次/工具调用、缺失证据、工具观察列表、token 预算（未知即写 unknown） |
+| 补充材料 | 追问表单（现在显示**问题原文与示例**，并补齐 `planned_at_timezone` / `schema_snapshot` 字段） |
+| 人工确认 | 「材料确认」卡片：确认人、时间、材料版本与内容哈希；重复确认后按钮置为"当前材料已确认" |
+| 取消 | 运行中显示「停止」 |
+| 受支持的恢复 | 有检查点时按钮是「从检查点恢复」（调用 `POST /resume`）；没有检查点时才显示「重新执行一次」——不把重跑说成续跑 |
+
+### 15.3 四态必须一眼可分
+
+- **模型建议**：灰底徽章「不参与放行判定」；
+- **确定性检查**：绿/红徽章，并注明"仅为本地静态扫描的结论"；
+- **材料确认**：新增紫色徽章「人工确认 ≠ 治理审批 ≠ 执行许可」，独立成卡；
+- **治理审批**：独立一栏「治理审批 · 不在此处」，明示审批与通行证由治理服务完成。
+
+顺带修正：`DRAFT_READY`「草案已生成 · 待人工确认」此前与 `RECEIVED`/`RUNNING` 同为蓝色，
+现在使用专属紫色 tone，使"唯一需要人做决定的状态"不再与其他状态混在一起。
+
+### 15.4 错误状态与不误诊
+
+- 存储降级（`health.status==="degraded"`、`unpersisted_tasks`、`degraded_reason`）现在会**显示**，
+  并明确写"这不是功能未启用"；
+- 模型不可用时显示「模型不可用 · 确定性生成器」，说明这是可运行状态；
+- 工具失败：确定性检查错误与调查轨迹里的工具观察都会展示；
+- **修正 `refreshHealth` 的 503 判别**：与 `handleActionError` 一致，先看 `error.code`，
+  只有 `SERVICE_UNAVAILABLE` 才走"未启用"；应用层 503 提示"未生效、可重试"，
+  避免一次落盘抖动被误诊为"功能没开"并禁用整个面板。
+
+### 15.5 不泄漏
+
+页面只调用既有的 6 个接口，不请求 `/provider`、`/tools`；不读取也不显示任何密钥、Cookie 或
+原始敏感数据；工具结果与证据片段一律经 `esc()` 转义后按纯文本展示；事件区明确写"不记录模型思维链"。
+
+### 15.6 真实浏览器验收（真实前后端 + 真实登录）
+
+`tests/manual/agent-workbench-acceptance.mjs`（**不放在 `tests/e2e/`**：CI 的 e2e 用
+`compose.e2e.yml`，其中不含 agent-app）。真实启动：`bin/dbguard.exe`（18099，demo 账号、
+隔离数据文件、`DBGUARD_AGENT_BASE_URL` 指向 agent-app）+ `uvicorn`（18091，`bounded_agent`、
+stub 模型端点），Chromium 真实登录 `developer@example.com / Demo1234`：
+
+```
+[PASS] 真实登录成功（developer@example.com）
+[PASS] 工作台可加载
+[PASS] 展示实际执行策略
+[PASS] 缺信息时停在待补充并给出追问表单
+[PASS] 显示"从检查点恢复"而不是"重新执行一次"
+[PASS] 展示执行轨迹与预算
+[PASS] 预算区分已知/未知 — 未知（provider 未提供）
+[PASS] 补充后从等待点继续并产出草案
+[PASS] 入口节点只执行过一次（未从头重跑） — screen_input=1
+[PASS] 四态区分：材料确认与治理审批各自成卡
+[PASS] 可以人工确认材料且记录落库
+[PASS] 重复确认被置为已确认（幂等）
+[PASS] 保存桌面截图
+[PASS] 运行中的任务可以取消
+[PASS] 错误处理：空需求被拦下并给出提示
+[PASS] 窄屏无横向溢出 — overflow=0px
+[PASS] 保存窄屏截图
+[PASS] 工作台无未捕获 JS 异常
+[PASS] 工作台接口无 4xx/5xx
+[INFO] 页面出现过的非 2xx 响应（含登录页预期 401）：401 /api/auth/session
+结果：19/19 通过
+```
+
+> 登录页在未认证时会正常探测 `/api/auth/session` 并得到 401，这是控制台既有行为，
+> 不属于工作台缺陷；断言因此限定在"工作台与 Agent 接口无 4xx/5xx + 无未捕获 JS 异常"。
+
+截图（真实 Chromium，已随仓库保留）：
+`docs/assets/agent-workbench-desktop.png`（1440×900）、`docs/assets/agent-workbench-narrow.png`（420×900）。
+截图里可见：时间线（created → screen_input → check_info → resumed → retrieve_evidence → generate_draft
+→ run_check → finalize → confirmed）、「执行轨迹与预算」中的策略/决策者/停止原因/预算 unknown、
+工具观察、以及带紫色徽章的「材料确认」记录。
+
+验收后已停止两个后台进程，未占用端口。
+
+### 15.7 本轮命令与结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `pytest -q` | **210 passed**（PR-C 后 208 + 本轮新增 2） |
+| `run_eval.py --provider scripted --strategy bounded_agent --split dev` | **14/14** |
+| `go test ./... -count=1` | 全部包 **ok** |
+| `go vet ./...` / `gofmt -l ./internal ./cmd` | clean / clean |
+| `npm test` | 2 passed |
+| 递归 `node --check`（含验收脚本） | clean |
+| `tests/manual/agent-workbench-acceptance.mjs` | **19/19** |
+
+### 15.8 未运行（不得当作通过）
+
+真实模型（live）评测仍为 `NOT_RUN`（无凭据/预算）；`go test -race`、PostgreSQL/Redis 集成、
+CI 的 Playwright e2e 由 CI 提供证据（CI e2e 栈不含 agent-app，因此不能作为本工作台的验收证据——
+本工作台的证据是本节的真实浏览器验收）。
+
+---
+
+## 16. 剩余任务
 
 | 阶段 | 状态 | 内容 |
 | --- | --- | --- |
 | P0 | ✅ 完成 | 授权、执行所有权与持久化诚实性、只读工具服务间认证；执行生命周期收尾 |
 | P1 | ✅ 完成 | 重试分层、草案契约、方言边界、补充字段；受约束调查循环；provider 原生动作决策 |
 | P2 | ✅ 完成 | PR-A：检查点持久化、节点级中断与恢复、恢复前重校验、独立进程验收（§12）；PR-B：材料确认记录（确认人/时间/版本+内容哈希、幂等、新修订失效）与 flaky 修复（§13）。任务书 §P2-8 迁移记为 N/A |
-| P3 | ⏳ **进行中** | PR-C 已完成：评测 `--strategy`/`--provider` 真正生效、开发/保留集拆分、确定性评分与报告（§14）。**待做**：`/agent/` 工作台展示与操作、四态区分、真实浏览器验收（PR-D） |
+| P3 | ✅ 完成 | PR-C：评测 `--strategy`/`--provider` 真正生效、开发/保留集拆分、确定性评分与报告（§14）；PR-D：工作台展示与操作、四态区分、存储降级可见、真实浏览器验收 19/19 与截图（§15） |
