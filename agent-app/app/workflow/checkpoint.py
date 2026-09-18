@@ -23,8 +23,12 @@ from app.config import Settings
 
 
 def checkpoint_path(settings: Settings) -> str:
-    """解析检查点文件路径；未配置即显式失败，不静默不持久化。"""
-    path = (getattr(settings, "checkpoint_path", "") or "").strip()
+    """解析检查点文件路径；未配置即显式失败，不静默不持久化。
+
+    未显式配置时与任务存储同目录（见 `Settings.checkpoint_file`），
+    因此"换了任务存储路径"的调用方不会继续共用默认路径上的同一个检查点文件。
+    """
+    path = (getattr(settings, "checkpoint_file", "") or "").strip()
     if not path:
         # 与任务仓储同样的口径：静默不落盘不是可接受的降级。
         raise ValueError("检查点路径不能为空；进程重启恢复依赖磁盘检查点")

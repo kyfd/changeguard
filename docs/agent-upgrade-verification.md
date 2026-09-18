@@ -822,7 +822,84 @@ CI 的 Playwright e2e 由 CI 提供证据（CI e2e 栈不含 agent-app，因此�
 
 ---
 
-## 16. 剩余任务
+## 16. 后续修复：恢复并发竞态、检查点路径隔离与用例挂死
+
+### 16.1 恢复流程的并发竞态（**已复现 → 已修复**）
+
+**缺陷**：`resume` 在"读完检查点"（`_inspect_checkpoint`，一个 await）与"占用执行"之间没有原子性，
+多个并发恢复请求都能先通过校验、再各自派发，于是在**同一个 `thread_id`** 上并发调用 LangGraph。
+检查点不是并发安全的共享可变状态：这不是"最后写入者胜"，而是可能互相交错写入。
+
+**复现**（确定性：放大那个 await 并统计真正重叠进入图恢复的次数）
+`tests/test_resume_concurrency.py`，修复前：
+
+```
+{'max_overlap': 4, 'accepted': 5, 'refused': 0, 'final_status': 'DRAFT_READY', 'resume_mode': 'interrupt'}
+```
+
+即 5 个并发恢复全部被受理，4 次图恢复互相重叠。
+
+**修复**：
+
+- 入口处先看是否已有**未结束的执行**，有则直接 409，绝不在同一 `thread_id` 上再起一次图；
+- 读检查点前记下"代际 + 状态"，读完后再**同步地**（同一段没有 await 的代码里）重新确认并占用执行；
+  并发的第二个恢复会看到代际已变而得到 409。
+
+修复后：`max_overlap=1, accepted=1, refused=4`。另加一条用例验证"执行在途时恢复被拒绝"。
+
+### 16.2 检查点路径隔离（顺带修掉的真实缺陷）
+
+**缺陷**（PR-A 引入）：只有 `conftest.settings` 与 `test_api.build_client` 显式设置了 `checkpoint_path`，
+其余用例（`test_authorization` / `test_execution_lifecycle` / `test_task_lifecycle` / `test_tools` /
+`test_upstream` / `test_workflow`）都落到默认路径，于是**整个测试套件共用仓库里同一个**
+`agent-app/data/agent-checkpoints.sqlite`：用例之间互相污染状态，并在并发打开时产生锁冲突。
+
+**修复**：`checkpoint_path` 默认留空，`Settings.checkpoint_file` 在与**任务存储同目录**处解析
+（默认仍等价于 `data/agent-checkpoints.sqlite`，生产行为不变）；显式配置与 `AGENT_CHECKPOINT_PATH` 仍然优先。
+于是"换了任务存储路径"的调用方（尤其是测试）自动拿到独立文件。
+
+回归断言：`test_checkpoint_file_defaults_next_to_the_task_store` 与
+`test_service_writes_its_checkpoint_next_to_the_task_store`。
+实测：删除仓库里的该文件后重跑全量 `pytest` → **214 passed**，且 `agent-app/data/` **不再出现**。
+
+### 16.3 由此暴露出的一处用例挂死（**已复现 → 已修复**）
+
+修好路径隔离后，`test_execution_lifecycle.py::test_handle_and_health_after_timeout` **必定挂死**
+（全量运行卡在该用例）。诊断结果：
+
+| 项 | 实测 |
+| --- | --- |
+| 走到 provider 的耗时（全新检查点库） | **488 ms** |
+| 走到 provider 的耗时（已存在的检查点库） | 94 ms |
+| 该用例设置的任务超时 | **0.05 s** |
+| 该用例对 `provider.entered` 的等待 | **无界**（`await provider.entered.wait()`） |
+
+即：超时值小于"打开检查点 + 启动图 + 走到 provider"的耗时，任务在**到达 provider 之前**就被超时终止，
+而用例又在无界等待一个永远不会发生的进入事件 → 永久挂死。此前它之所以"通过"，是因为共用的
+`data/agent-checkpoints.sqlite` 已存在（第 16.2 节的缺陷恰好掩盖了它）。
+
+**修复**：超时改为 2.0 s（留出余量），并把该文件的 5 处 `entered.wait()` 与
+`test_task_lifecycle.py` 的同类等待全部改为**有界等待**（超时 15 s）——挂死应表现为失败，而不是卡住。
+
+### 16.4 临时目录权限错误：**未复现，暂不判定**
+
+报告的现象在本机未能复现。已执行：
+
+| 尝试 | 结果 |
+| --- | --- |
+| 单次全量 `pytest -q`（干净环境） | 214 passed |
+| 重复全量运行（含 16.1–16.3 修复前后共 6 次） | 均通过；唯一一次异常是进程被外部 Ctrl+C 终止（`STATUS_CONTROL_C_EXIT`，日志只有 `^C`，未跑任何用例），**不是**用例结果 |
+| `tempfile.gettempdir()` 可写性探测（`E:\C_DRIV~3\Temp`） | 可创建、可写入、可删除 |
+| 并发运行 `pytest` 与 `scripts/recovery_acceptance.py` | 触发的是上面的 Ctrl+C 中断，不是权限错误 |
+
+因此**不把该项判为通过，也不判为失败**：缺的是可归因的错误原文。
+最小所需信息：完整 traceback（含 `PermissionError`/`WinError` 的**具体路径**）与当时的命令，
+以便判断它属于 pytest 临时目录清理、并发运行、还是本机环境（安全软件/目录联接）。
+在本节补上该信息之前，全量测试的结论以"本机 6 次干净运行均通过"为限。
+
+---
+
+## 17. 剩余任务
 
 | 阶段 | 状态 | 内容 |
 | --- | --- | --- |

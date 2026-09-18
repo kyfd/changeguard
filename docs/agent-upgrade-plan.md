@@ -334,3 +334,21 @@ tests/manual/agent-workbench-acceptance.mjs        19/19（真实登录 + 真实
 验收后已停止后台进程，未占用端口。
 
 **P2 与 P3 全部完成**；真实模型（live）评测仍为 `NOT_RUN`（无凭据/预算）。
+
+### 2026-09-18：后续修复（恢复并发竞态、检查点路径隔离、用例挂死）
+
+- **恢复并发竞态（已复现 → 已修复）**：`resume` 在读检查点（await）与占用执行之间不原子，
+  并发恢复会各自派发，在同一个 `thread_id` 上并发跑图。修复前复现：`max_overlap=4, accepted=5`；
+  修复后：`max_overlap=1, accepted=1, refused=4`（先拒绝"已有在途执行"，再在**无 await** 的同一段代码里
+  重新确认代际并占用执行）。
+- **检查点路径隔离**：`checkpoint_path` 默认改为与任务存储同目录（`Settings.checkpoint_file`）。
+  此前 6 个测试模块回落到仓库里的同一个 `agent-app/data/agent-checkpoints.sqlite`，互相污染状态；
+  现在测试不再创建该文件。
+- **顺带修掉一处用例挂死**：`test_handle_and_health_after_timeout` 的任务超时为 0.05 s，而全新检查点库下
+  走到 provider 需 **488 ms**（文件已存在时 94 ms），于是任务在到达 provider 前就超时，用例却在
+  **无界**等待 `entered` → 永久挂死。已改为 2.0 s 超时，并把所有同类等待改为**有界**（15 s）。
+- **临时目录权限错误：未复现，暂不判定**（6 次干净全量运行均通过；唯一异常是外部 Ctrl+C 中断，
+  未跑任何用例）。需要完整 traceback 与其具体路径才能归因。
+
+验证：`pytest -q` **214 passed**（且 `agent-app/data/` 不再出现）；`evals` 14/14；跨进程恢复 13/13；
+`go test ./...` / `go vet` / `gofmt` / `npm test` 全部 clean。
