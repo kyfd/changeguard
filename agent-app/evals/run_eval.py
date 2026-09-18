@@ -99,6 +99,7 @@ def build_settings(tmp_path: Path, demo_dir: Path) -> Settings:
     return Settings(
         agent_demo_dir=str(demo_dir),
         task_store_path=str(tmp_path / "eval-tasks.json"),
+        checkpoint_path=str(tmp_path / "eval-checkpoints.sqlite"),
         execution_mode="inline",
         max_revisions=2,
     )

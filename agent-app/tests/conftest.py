@@ -57,6 +57,7 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(
         agent_demo_dir=str(DEMO_DIR),
         task_store_path=str(tmp_path / "agent-tasks.json"),
+        checkpoint_path=str(tmp_path / "agent-checkpoints.sqlite"),
         execution_mode="inline",
         max_revisions=2,
         allow_header_identity=True,
@@ -71,6 +72,7 @@ def empty_settings(tmp_path: Path) -> Settings:
     return Settings(
         agent_demo_dir=str(empty_dir),
         task_store_path=str(tmp_path / "agent-tasks.json"),
+        checkpoint_path=str(tmp_path / "agent-checkpoints.sqlite"),
         execution_mode="inline",
         max_revisions=2,
     )

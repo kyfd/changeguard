@@ -136,3 +136,21 @@ async def cancel(task_id: str, request: Request) -> TaskView:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error), headers={"Retry-After": "1"}
         ) from error
+
+
+@router.post("/tasks/{task_id}/resume", response_model=TaskView)
+async def resume(task_id: str, request: Request, payload: ClarifyRequest | None = None) -> TaskView:
+    """从检查点恢复。
+
+    恢复前由服务层重新校验归属、执行代际与输入/材料版本；校验不过返回 409，
+    **不做**"尽力继续"。请求体可选：不提供时按记录中已有的输入继续。
+    """
+    context = await resolve_context(request)
+    try:
+        return await _service(request).resume(task_id, context, payload)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
+    except TaskNotResumable as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except TaskStateUnavailable as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error

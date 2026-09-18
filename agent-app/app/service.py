@@ -38,8 +38,9 @@ from app.schemas.drafts import (
 from app.store.tasks import TaskRepository
 from app.tools.business import Toolbox
 from app.tools.registry import TrustedContext
+from app.workflow.checkpoint import has_checkpoint, open_checkpointer
 from app.workflow.graph import DraftWorkflow, WorkflowDeps
-from app.workflow.state import event
+from app.workflow.state import event, input_version, merge_slot_data
 
 RESUMABLE_STATUSES = {TaskStatus.NEEDS_INFO.value, TaskStatus.FAILED.value, TaskStatus.CHECK_BLOCKED.value}
 
@@ -54,6 +55,11 @@ INTERRUPTED_STATUSES = {TaskStatus.RECEIVED.value, TaskStatus.RUNNING.value}
 PERSIST_PERSISTED = "persisted"
 PERSIST_SKIPPED = "skipped"
 PERSIST_FAILED = "failed"
+
+# 恢复模式。三者必须可区分：`interrupt` 是从节点级中断继续，`checkpoint` 是续跑未完成的节点，
+# 两者都**不是**从头重跑；`restart_from_scratch` 才是重跑，且必须如实这样标注。
+RESUME_INTERRUPT = "interrupt"
+RESUME_CHECKPOINT = "checkpoint"
 
 
 class TaskNotFound(Exception):
@@ -154,19 +160,28 @@ class AgentService:
         self, request: CreateTaskRequest, context: TrustedContext
     ) -> tuple[TaskView, TaskSlots]:
         slots = self._slots_from_request(request)
+        slots_payload = slots.model_dump(mode="json")
+        requirement = request.requirement.strip()
+        schema_snapshot = request.schema_snapshot or ""
         record: dict[str, Any] = {
             "task_id": f"task_{uuid.uuid4().hex[:12]}",
             "organization_id": context.organization_id,
             "user_id": context.user_id,
-            "requirement": request.requirement.strip(),
-            "slots": slots.model_dump(mode="json"),
-            "schema_snapshot": request.schema_snapshot or "",
+            "requirement": requirement,
+            "slots": slots_payload,
+            "schema_snapshot": schema_snapshot,
             "status": TaskStatus.RECEIVED.value,
             "questions": [],
             "draft": None,
             "events": [event("created", "任务已创建")],
             "revisions": 0,
             "error": None,
+            # 输入与材料版本：恢复前必须与记录当前值一致，否则拒绝带着陈旧上下文继续。
+            "input_version": input_version(
+                requirement=requirement, slots=slots_payload, schema_snapshot=schema_snapshot
+            ),
+            "awaiting_input": False,
+            "resume_count": 0,
         }
         self._repository.save(record)
         await self._dispatch_or_fail(record["task_id"])
@@ -179,7 +194,7 @@ class AgentService:
             raise TaskNotResumable(f"当前状态 {status} 不允许补充信息")
 
         slots = TaskSlots.model_validate(record.get("slots") or {})
-        updated = _merge_slots(slots, request)
+        updated = merge_slot_data(slots, request.model_dump())
         record["slots"] = updated.model_dump(mode="json")
         # 表结构快照是任务级材料而非槽位，但必须能在补充阶段补齐；
         # 只有显式提供才覆盖，避免把已有快照清空。
@@ -192,8 +207,6 @@ class AgentService:
             notes = list(record.get("clarification_notes") or [])
             notes.append(note)
             record["clarification_notes"] = notes
-        record["status"] = TaskStatus.RECEIVED.value
-        record["error"] = None
         events = list(record.get("events") or [])
         provided = [
             name
@@ -210,9 +223,86 @@ class AgentService:
             if getattr(request, name, None) is not None
         ]
         events.append(event("clarified", f"补充信息：{', '.join(provided) or '无字段变化'}"))
+        # 输入/材料变了就作废旧草案与旧结果——不能带着陈旧上下文继续。
+        _apply_input_version(record)
         record["events"] = events
+
+        if record.get("awaiting_input"):
+            # 图停在**节点级中断**上：把当前完整输入交给 interrupt()，从等待点继续，
+            # 之前的节点不会重跑。
+            record["awaiting_input"] = False
+            record["status"] = TaskStatus.RUNNING.value
+            record["error"] = None
+            record["resume_mode"] = RESUME_INTERRUPT
+            record["resume_count"] = int(record.get("resume_count") or 0) + 1
+            self._repository.save(record)
+            await self._dispatch_or_fail(
+                task_id, resume={"mode": RESUME_INTERRUPT, "value": _resume_value(record)}
+            )
+            return self._view(self._require(task_id))
+
+        # 没有待恢复的检查点：按既有语义重新执行（可能再次停在中断上）。
+        record["status"] = TaskStatus.RECEIVED.value
+        record["error"] = None
+        record["resume_mode"] = None
         self._repository.save(record)
         await self._dispatch_or_fail(task_id)
+        return self._view(self._require(task_id))
+
+    async def resume(
+        self, task_id: str, context: TrustedContext, request: ClarifyRequest | None = None
+    ) -> TaskView:
+        """从检查点恢复。
+
+        恢复**之前**必须重新校验：归属（组织 + 创建者）、执行代际、输入与材料版本。
+        任何一项不满足都抛 `TaskNotResumable`，任务保持原状——不做"尽力继续"。
+        """
+        record = self._authorize(task_id, context)
+        status = record.get("status")
+        # 终态（取消、输入被拒等）不允许借恢复回到执行路径。
+        if status not in RESUMABLE_STATUSES:
+            raise TaskNotResumable(f"当前状态 {status} 不允许恢复")
+        if request is not None:
+            slots = TaskSlots.model_validate(record.get("slots") or {})
+            record["slots"] = merge_slot_data(slots, request.model_dump()).model_dump(mode="json")
+            if request.schema_snapshot is not None:
+                record["schema_snapshot"] = request.schema_snapshot
+            note = (request.note or "").strip()
+            if note:
+                notes = list(record.get("clarification_notes") or [])
+                notes.append(note)
+                record["clarification_notes"] = notes
+        _apply_input_version(record)
+
+        checkpoint = await self._inspect_checkpoint(task_id)
+        if checkpoint is None:
+            raise TaskNotResumable("没有可恢复的检查点状态；请重新发起任务")
+
+        if checkpoint["interrupt"]:
+            # 停在节点级中断上：把当前完整输入交给 interrupt()。
+            mode = RESUME_INTERRUPT
+            value: Any = _resume_value(record)
+        elif checkpoint["next"]:
+            # 续跑未完成节点：输入必须与检查点一致，否则会带着陈旧的检索/检查结果继续。
+            # 核对不出来（检查点没有记录版本）时**失败关闭**，不放行"尽力继续"。
+            stored = checkpoint.get("input_version") or ""
+            if not stored or stored != (record.get("input_version") or ""):
+                raise TaskNotResumable("输入或材料已变更或无法核对，检查点结果不再适用；请重新发起任务")
+            mode = RESUME_CHECKPOINT
+            value = None
+        else:
+            raise TaskNotResumable("检查点没有待继续的步骤；请重新发起任务")
+
+        record["awaiting_input"] = False
+        record["status"] = TaskStatus.RUNNING.value
+        record["error"] = None
+        record["resume_mode"] = mode
+        record["resume_count"] = int(record.get("resume_count") or 0) + 1
+        events = list(record.get("events") or [])
+        events.append(event("resumed", f"从检查点恢复（mode={mode}）"))
+        record["events"] = events
+        self._repository.save(record)
+        await self._dispatch_or_fail(task_id, resume={"mode": mode, "value": value})
         return self._view(self._require(task_id))
 
     async def get_task(self, task_id: str, context: TrustedContext) -> TaskView:
@@ -286,14 +376,14 @@ class AgentService:
 
     # -- 内部 --------------------------------------------------------------
 
-    async def _dispatch_or_fail(self, task_id: str) -> None:
+    async def _dispatch_or_fail(self, task_id: str, resume: dict[str, Any] | None = None) -> None:
         """派发执行；失败时把任务标为失败。
 
         否则记录会永远停在 `RECEIVED`：没有任何协程在推动它，也没有超时兜底，
         调用方看到的是一个"一直在运行"的任务。
         """
         try:
-            await self._dispatch(task_id)
+            await self._dispatch(task_id, resume)
         except (TaskStateUnavailable, TaskCancelRejected):
             # 存储本身已经出问题，再去写一条 FAILED 只会再失败一次并掩盖真正的原因。
             # 这类失败由调用方显式返回，健康状态另行报告降级。
@@ -310,7 +400,7 @@ class AgentService:
                 self._repository.save(record)
             raise
 
-    async def _dispatch(self, task_id: str) -> None:
+    async def _dispatch(self, task_id: str, resume: dict[str, Any] | None = None) -> None:
         """按配置决定等待完成还是立即返回。
 
         两种模式**共用同一套受管理执行**：都登记可取消的句柄，
@@ -319,18 +409,18 @@ class AgentService:
         execution_id = self._begin_execution(task_id)
         if execution_id is None:
             return
-        execution = self._start_execution(task_id, execution_id)
+        execution = self._start_execution(task_id, execution_id, resume)
         if self._settings.execution_mode == "inline":
             await self._await_execution(execution)
 
-    def _start_execution(self, task_id: str, execution_id: str) -> _Execution:
+    def _start_execution(self, task_id: str, execution_id: str, resume: dict[str, Any] | None = None) -> _Execution:
         """把一次执行登记成独立的受管理任务。
 
         独立成 task 而不是直接 await 的好处：调用方的取消（客户端断开）与
         工作流的取消可以分开处理，且句柄始终可被 `cancel` 找到。
         """
         task = asyncio.create_task(
-            self._run_managed(task_id, execution_id), name=f"agent-exec:{task_id}:{execution_id[:8]}"
+            self._run_managed(task_id, execution_id, resume), name=f"agent-exec:{task_id}:{execution_id[:8]}"
         )
         execution = _Execution(task_id=task_id, execution_id=execution_id, task=task, finished=asyncio.Event())
         self._executions[task_id] = execution
@@ -368,10 +458,12 @@ class AgentService:
         if problem is not None and problem.execution_id == execution.execution_id:
             raise TaskStateUnavailable(problem.detail)
 
-    async def _run_managed(self, task_id: str, execution_id: str) -> None:
+    async def _run_managed(
+        self, task_id: str, execution_id: str, resume: dict[str, Any] | None = None
+    ) -> None:
         """受管理执行的顶层入口：保证任何退出路径都不留无监督的在途任务。"""
         try:
-            record = await self._execute(task_id, execution_id)
+            record = await self._execute(task_id, execution_id, resume)
         except asyncio.CancelledError:
             # 取消的落盘由**发起方**负责，这里不写：
             #   - 用户 cancel()：先落盘 CANCELLED，再取消执行；
@@ -497,7 +589,9 @@ class AgentService:
             return
         self._repository.save(record)
 
-    async def _execute(self, task_id: str, execution_id: str) -> dict[str, Any] | None:
+    async def _execute(
+        self, task_id: str, execution_id: str, resume: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
         """运行工作流并把结果整理成待落盘的记录。返回 None 表示不应落盘。
 
         这里**不**吞掉 CancelledError，也不负责释放句柄：取消的语义由发起方决定，
@@ -510,7 +604,7 @@ class AgentService:
             return None
         try:
             record = await asyncio.wait_for(
-                self._run_workflow(record),
+                self._run_workflow(record, resume),
                 timeout=self._settings.task_timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -526,20 +620,27 @@ class AgentService:
         return record
 
     def _mark_interrupted_tasks(self) -> list[str]:
-        """启动时把上次进程遗留的在途任务显式标为中断失败。
+        """启动时处理上次进程遗留的在途任务。
 
-        P0 **不做安全续跑**——那需要检查点、重新授权与输入版本校验（见 P2 规划）。
-        这里刻意不宣称"已恢复"：留在 RECEIVED/RUNNING 会让健康检查与界面看起来
-        还有任务在推进，而实际上没有任何协程在推动它。
+        与 P0 的区别：**有检查点的任务标为可恢复**，不再一律"中断不续跑"。
+        但这里**不自动续跑**——恢复必须由创建者显式发起，并在恢复前重新校验
+        归属、代际与输入版本（见 `resume`）。留在 RECEIVED/RUNNING 会让健康检查与界面
+        看起来还有任务在推进，而实际上没有任何协程在推动它，因此仍显式落一个终态。
         """
         interrupted: list[str] = []
         for record in self._repository.list():
             if record.get("status") not in INTERRUPTED_STATUSES:
                 continue
             task_id = str(record.get("task_id") or "")
+            resumable = bool(task_id) and has_checkpoint(self._settings, task_id)
             record["status"] = TaskStatus.FAILED.value
-            record["error"] = "进程重启：任务在执行中被中断，本版本不进行自动续跑"
-            record["restart_policy"] = "interrupted_without_resume"
+            record["awaiting_input"] = False
+            if resumable:
+                record["error"] = "进程重启：任务在执行中被中断，存在可恢复的检查点，需由创建者显式恢复"
+                record["restart_policy"] = "checkpoint_available"
+            else:
+                record["error"] = "进程重启：任务在执行中被中断，且没有可用的检查点，无法续跑"
+                record["restart_policy"] = "interrupted_without_resume"
             events = list(record.get("events") or [])
             events.append(event("restart", record["error"]))
             record["events"] = events
@@ -548,42 +649,52 @@ class AgentService:
                 interrupted.append(task_id)
         return interrupted
 
-    async def _run_workflow(self, record: dict[str, Any]) -> dict[str, Any]:
-        toolbox_factory = lambda snapshot: Toolbox(  # noqa: E731 - 需要按任务注入快照
-            settings=self._settings,
-            retriever=self._retriever,
-            schema_snapshot=snapshot,
-        )
-        workflow = DraftWorkflow(
-            WorkflowDeps(
-                settings=self._settings,
-                provider=self._provider,
-                trusted_context=TrustedContext(
-                    user_id=record.get("user_id") or "",
-                    organization_id=record.get("organization_id") or "",
-                ),
-                toolbox_factory=toolbox_factory,
-            )
-        )
+    async def _run_workflow(
+        self, record: dict[str, Any], resume: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """运行（或恢复）工作流。检查点按 task_id 作为线程。
 
-        # 用户后续提供的补充说明属于需求的一部分，必须让模型看到；
-        # 明确标注来源，避免与原始需求混为一谈。
-        notes = [str(item).strip() for item in (record.get("clarification_notes") or []) if str(item).strip()]
-        requirement = record.get("requirement", "")
-        if notes:
-            requirement = requirement + "\n\n补充说明（用户后续提供）：\n" + "\n".join(f"- {item}" for item in notes)
-
+        - `resume is None`：全新执行，先清掉该线程的旧检查点，避免意外"接着上次跑"；
+        - `mode=interrupt`：从节点级中断继续，之前的节点不会重跑；
+        - `mode=checkpoint`：续跑最后未完成的节点。
+        """
+        task_id = record["task_id"]
         initial_state: dict[str, Any] = {
-            "task_id": record["task_id"],
-            "requirement": requirement,
+            "task_id": task_id,
+            "requirement": _effective_requirement(record),
             "slots": record.get("slots") or {},
             "schema_snapshot": record.get("schema_snapshot") or "",
+            "input_version": record.get("input_version") or "",
             "events": list(record.get("events") or []),
             "revisions": 0,
             "max_revisions": self._settings.max_revisions,
         }
-        result = await workflow.run(initial_state)  # type: ignore[arg-type]
 
+        async with open_checkpointer(self._settings) as saver:
+            workflow = self._build_workflow(record, saver)
+            if resume is None:
+                await _delete_thread(saver, task_id)
+                record["resume_mode"] = None
+                result = await workflow.run(initial_state, thread_id=task_id)  # type: ignore[arg-type]
+            elif resume.get("mode") == RESUME_INTERRUPT:
+                result = await workflow.resume_interrupt(thread_id=task_id, value=resume.get("value") or {})
+            else:
+                result = await workflow.continue_pending(thread_id=task_id)
+
+        interrupts = result.get("__interrupt__") if isinstance(result, dict) else None
+        if interrupts:
+            # 图停在**节点级中断**上：状态是 NEEDS_INFO，但检查点可从此节点续跑。
+            payload = _first_interrupt_value(interrupts)
+            record["status"] = TaskStatus.NEEDS_INFO.value
+            record["questions"] = payload.get("questions") or []
+            record["error"] = None
+            record["awaiting_input"] = True
+            events = list(result.get("events") or record.get("events") or [])
+            events.append(event("awaiting_input", "图停在节点级中断上，等待用户补充信息后从该节点继续"))
+            record["events"] = events
+            return record
+
+        record["awaiting_input"] = False
         record.update(
             {
                 "status": result.get("status", TaskStatus.FAILED.value),
@@ -596,6 +707,43 @@ class AgentService:
             }
         )
         return record
+
+    def _build_workflow(self, record: dict[str, Any], checkpointer: Any) -> DraftWorkflow:
+        toolbox_factory = lambda snapshot: Toolbox(  # noqa: E731 - 需要按任务注入快照
+            settings=self._settings,
+            retriever=self._retriever,
+            schema_snapshot=snapshot,
+        )
+        return DraftWorkflow(
+            WorkflowDeps(
+                settings=self._settings,
+                provider=self._provider,
+                trusted_context=TrustedContext(
+                    user_id=record.get("user_id") or "",
+                    organization_id=record.get("organization_id") or "",
+                ),
+                toolbox_factory=toolbox_factory,
+                checkpointer=checkpointer,
+            )
+        )
+
+    async def _inspect_checkpoint(self, task_id: str) -> dict[str, Any] | None:
+        """读取检查点：是否有待恢复的工作、是否停在中断上、记录在案的输入版本。"""
+        async with open_checkpointer(self._settings) as saver:
+            workflow = self._build_workflow(self._require(task_id), saver)
+            state = await workflow.snapshot(thread_id=task_id)
+        values = getattr(state, "values", None) or {}
+        next_nodes = list(getattr(state, "next", ()) or ())
+        if not values and not next_nodes:
+            return None  # 该线程没有检查点
+        pending_interrupt = any(
+            getattr(task, "interrupts", ()) for task in (getattr(state, "tasks", ()) or ())
+        )
+        return {
+            "next": next_nodes,
+            "interrupt": bool(pending_interrupt),
+            "input_version": str(values.get("input_version") or ""),
+        }
 
     def _require(self, task_id: str) -> dict[str, Any]:
         """按 ID 取记录，不校验归属。仅供已授权的内部路径使用。"""
@@ -653,18 +801,60 @@ class AgentService:
                 "revisions": int(record.get("revisions") or 0),
                 "error": record.get("error"),
                 "planned_at_missing": "planned_at" in (TaskSlots.model_validate(record.get("slots") or {}).missing()),
+                "awaiting_input": bool(record.get("awaiting_input")),
+                "resume_mode": record.get("resume_mode"),
+                "restart_policy": record.get("restart_policy"),
             }
         )
 
 
-def _merge_slots(slots: TaskSlots, request: ClarifyRequest) -> TaskSlots:
-    """只覆盖调用方实际提供的字段。"""
-    data = slots.model_dump()
-    for field in ("application", "environment", "database", "table", "query_sql", "planned_at", "planned_at_timezone"):
-        value = getattr(request, field, None)
-        if value is not None:
-            data[field] = value
-    return TaskSlots.model_validate(data)
+def _effective_requirement(record: dict[str, Any]) -> str:
+    """把用户后续提供的补充说明并入需求文本，并标注来源，避免与原始需求混为一谈。"""
+    notes = [str(item).strip() for item in (record.get("clarification_notes") or []) if str(item).strip()]
+    requirement = record.get("requirement", "")
+    if notes:
+        requirement = requirement + "\n\n补充说明（用户后续提供）：\n" + "\n".join(f"- {item}" for item in notes)
+    return requirement
+
+
+def _apply_input_version(record: dict[str, Any]) -> None:
+    """重算输入/材料版本；一旦变化，旧草案与旧检查结果即失效。"""
+    version = input_version(
+        requirement=_effective_requirement(record),
+        slots=record.get("slots") or {},
+        schema_snapshot=record.get("schema_snapshot") or "",
+    )
+    if version != record.get("input_version"):
+        record["draft"] = None
+        record["questions"] = []
+        record["input_version"] = version
+
+
+def _resume_value(record: dict[str, Any]) -> dict[str, Any]:
+    """交给 `interrupt()` 的恢复值：当前**完整**输入（而非增量），使重复恢复幂等。"""
+    return {
+        "slots": dict(record.get("slots") or {}),
+        "schema_snapshot": record.get("schema_snapshot") or "",
+        "requirement": _effective_requirement(record),
+        "input_version": record.get("input_version") or "",
+    }
+
+
+def _first_interrupt_value(interrupts: Any) -> dict[str, Any]:
+    """从 `__interrupt__` 里取出节点中断的 payload（只取第一个）。"""
+    try:
+        first = interrupts[0]
+    except (TypeError, IndexError, KeyError):
+        return {}
+    value = getattr(first, "value", None)
+    return value if isinstance(value, dict) else {}
+
+
+async def _delete_thread(saver: Any, thread_id: str) -> None:
+    """清掉某线程的检查点（全新执行前调用）。"""
+    delete = getattr(saver, "adelete_thread", None)
+    if delete is not None:
+        await delete(thread_id)
 
 
 __all__ = ["AgentService", "TaskNotFound", "TaskNotResumable", "DatabaseKind"]

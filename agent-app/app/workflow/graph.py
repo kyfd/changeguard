@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from app.config import Settings
 from app.guard import detect_injection
@@ -53,7 +54,7 @@ from app.workflow.investigate import (
     build_planner,
     evidence_from_tool_result,
 )
-from app.workflow.state import WorkflowState, build_questions, event, slots_from_state
+from app.workflow.state import WorkflowState, build_questions, event, merge_slot_data, slots_from_state
 
 # 允许模型提供的字段。其余字段一律拒绝，避免模型改写服务端已确认的信息。
 ALLOWED_MODEL_FIELDS = {
@@ -71,6 +72,10 @@ ALLOWED_MODEL_FIELDS = {
 ALLOWED_ASSUMPTION_FIELDS = {"statement", "needs_confirmation"}
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
+
+# 同一个节点内连续中断的次数上限：用户反复补充仍不完整时不再无限等待，
+# 而是返回 NEEDS_INFO 终态（由路由结束），避免图永远停在同一节点。
+_MAX_INFO_INTERRUPTS = 4
 
 
 class DraftParseError(Exception):
@@ -188,6 +193,8 @@ class WorkflowDeps:
     provider: DraftProvider
     trusted_context: TrustedContext
     toolbox_factory: Callable[[str], Toolbox]
+    # 持久化检查点。为 None 时图不可中断，`check_info` 退回"走到 END + NEEDS_INFO"的既有行为。
+    checkpointer: Any | None = None
 
 
 class DraftWorkflow:
@@ -229,10 +236,28 @@ class DraftWorkflow:
             {"revise": "generate_draft", "done": "finalize"},
         )
         builder.add_edge("finalize", END)
-        return builder.compile()
+        return builder.compile(checkpointer=self._deps.checkpointer)
 
-    async def run(self, state: WorkflowState) -> WorkflowState:
-        return await self._graph.ainvoke(state)
+    def _config(self, thread_id: str) -> dict[str, Any]:
+        """检查点按 `thread_id` 分区；这里用 task_id，使恢复指向同一条线程。"""
+        return {"configurable": {"thread_id": thread_id}}
+
+    async def run(self, state: WorkflowState, *, thread_id: str | None = None) -> WorkflowState:
+        # 没有检查点的调用方不需要 thread_id（config 会被忽略）；有检查点时由服务层显式传入。
+        resolved = thread_id or str(state.get("task_id") or "adhoc")
+        return await self._graph.ainvoke(state, self._config(resolved))
+
+    async def resume_interrupt(self, *, thread_id: str, value: Any) -> WorkflowState:
+        """从节点级中断恢复：`interrupt()` 返回 `value`，图从该节点继续。"""
+        return await self._graph.ainvoke(Command(resume=value), self._config(thread_id))
+
+    async def continue_pending(self, *, thread_id: str) -> WorkflowState:
+        """续跑最后未完成的节点（没有中断，只是上一个执行失败或进程中断）。"""
+        return await self._graph.ainvoke(None, self._config(thread_id))
+
+    async def snapshot(self, *, thread_id: str) -> Any:
+        """读取检查点状态（恢复前校验输入版本、判断是否有待恢复的工作）。"""
+        return await self._graph.aget_state(self._config(thread_id))
 
     # -- 路由 --------------------------------------------------------------
 
@@ -290,15 +315,51 @@ class DraftWorkflow:
 
     async def _check_info(self, state: WorkflowState) -> dict[str, Any]:
         slots = slots_from_state(state)
-        missing = slots.missing()
         events = list(state.get("events") or [])
-        if missing:
+        schema_snapshot = state.get("schema_snapshot", "")
+        requirement = state.get("requirement", "")
+        version = state.get("input_version", "")
+
+        # 有检查点时走**节点级中断**：图停在 check_info 并落检查点，用户补充后从本节点继续，
+        # 之前的节点（screen_input）不会重跑。没有检查点时无法 interrupt，
+        # 退回"走到 END + NEEDS_INFO"的既有行为（保持既有调用方与测试不变）。
+        for _ in range(_MAX_INFO_INTERRUPTS):
+            missing = slots.missing()
+            if not missing:
+                break
+            if self._deps.checkpointer is None:
+                events.append(event("check_info", f"缺少必要信息：{', '.join(missing)}"))
+                return {
+                    "status": TaskStatus.NEEDS_INFO.value,
+                    "questions": [item.model_dump(mode="json") for item in build_questions(missing)],
+                    "events": events,
+                }
+            questions = [item.model_dump(mode="json") for item in build_questions(missing)]
+            # 中断前追加的事件不会被提交（节点没有返回），因此不会重复记录。
             events.append(event("check_info", f"缺少必要信息：{', '.join(missing)}"))
+            provided = interrupt({"kind": "needs_info", "questions": questions})
+            provided = provided if isinstance(provided, dict) else {}
+            slots = merge_slot_data(slots, provided.get("slots") or {})
+            # 恢复值由服务端给出**完整**的当前输入（而非增量），因此重复恢复是幂等的：
+            # 需求、快照与输入版本直接覆盖，不会把同一条补充说明拼接两次。
+            if provided.get("schema_snapshot") is not None:
+                schema_snapshot = str(provided.get("schema_snapshot") or "")
+            if provided.get("requirement") is not None:
+                requirement = str(provided.get("requirement"))
+            if provided.get("input_version") is not None:
+                version = str(provided.get("input_version"))
+            events.append(event("resumed", "用户补充信息后从等待点继续"))
+        else:
+            # 反复补充仍不完整：不静默继续，也不无限等待。
+            missing = slots.missing()
+            events.append(event("check_info", f"补充后仍缺少必要信息：{', '.join(missing)}"))
             return {
                 "status": TaskStatus.NEEDS_INFO.value,
                 "questions": [item.model_dump(mode="json") for item in build_questions(missing)],
+                "slots": slots.model_dump(mode="json"),
                 "events": events,
             }
+
         # 支持范围必须显式声明，并在入口就停下。
         # 给 MySQL 输出 PostgreSQL 专属语法（CREATE INDEX CONCURRENTLY、SET lock_timeout）
         # 是比直接拒绝更糟的结果：它看起来像一份可用的草案，而实际执行不了。
@@ -315,7 +376,15 @@ class DraftWorkflow:
                 "events": events,
             }
         events.append(event("check_info", "必要信息完整，继续生成草案"))
-        return {"status": TaskStatus.RUNNING.value, "questions": [], "events": events}
+        return {
+            "status": TaskStatus.RUNNING.value,
+            "questions": [],
+            "slots": slots.model_dump(mode="json"),
+            "schema_snapshot": schema_snapshot,
+            "requirement": requirement,
+            "input_version": version,
+            "events": events,
+        }
 
     async def _retrieve_evidence(self, state: WorkflowState) -> dict[str, Any]:
         slots = slots_from_state(state)

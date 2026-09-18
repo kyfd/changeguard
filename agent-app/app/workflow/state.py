@@ -6,10 +6,46 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
-from typing import Any, TypedDict
+from typing import Any, Mapping, TypedDict
 
 from app.schemas.drafts import ClarificationQuestion, TaskSlots
+
+SLOT_FIELDS = (
+    "application",
+    "environment",
+    "database",
+    "table",
+    "query_sql",
+    "planned_at",
+    "planned_at_timezone",
+)
+
+
+def merge_slot_data(slots: TaskSlots, data: Mapping[str, Any]) -> TaskSlots:
+    """只覆盖实际提供的槽位字段，其余保持不变。"""
+    merged = slots.model_dump()
+    for field in SLOT_FIELDS:
+        if field in data and data[field] is not None:
+            merged[field] = data[field]
+    return TaskSlots.model_validate(merged)
+
+
+def input_version(*, requirement: str, slots: Mapping[str, Any], schema_snapshot: str) -> str:
+    """需求 + 槽位 + 表结构快照的稳定摘要。
+
+    这是"输入与材料版本"的判据：它一旦改变，旧的检查点结果与旧的人工确认就都不再适用，
+    不能带着陈旧上下文恢复（见 P2 §4/§5）。
+    """
+    payload = json.dumps(
+        {"requirement": requirement, "slots": dict(slots), "schema_snapshot": schema_snapshot or ""},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 # 追问文案：包含「为什么问」，避免用户不知道要补什么。
 QUESTION_TEMPLATES: dict[str, ClarificationQuestion] = {
@@ -74,6 +110,10 @@ class WorkflowState(TypedDict, total=False):
     requirement: str
     slots: dict[str, Any]
     schema_snapshot: str
+
+    # 输入与材料版本（需求 + 槽位 + 快照的摘要）。恢复前必须与任务记录当前值比对：
+    # 不一致说明用户改过输入/材料，旧检查点结果不再适用。随检查点一起保存。
+    input_version: str
 
     questions: list[dict[str, Any]]
     evidence: list[dict[str, Any]]

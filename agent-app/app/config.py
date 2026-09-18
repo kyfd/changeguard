@@ -63,6 +63,9 @@ class Settings:
     # 证据来源
     agent_demo_dir: str = ""
     task_store_path: str = "data/agent-tasks.json"
+    # LangGraph 检查点（SQLite 单实例）。任务记录仍存 JSON；这里只保存**节点级**图状态，
+    # 使中断后能从检查点继续，而不是从头重跑整条流程。
+    checkpoint_path: str = "data/agent-checkpoints.sqlite"
 
     # 执行模式：
     #   background（默认）—— 接口立即返回，执行交给后台任务，可取消；
@@ -116,6 +119,7 @@ class Settings:
             persist_retry_backoff_seconds=float(os.getenv("AGENT_PERSIST_RETRY_BACKOFF", "0.05")),
             agent_demo_dir=os.getenv("AGENT_DEMO_DIR", "").strip(),
             task_store_path=os.getenv("AGENT_TASK_STORE", defaults.task_store_path),
+            checkpoint_path=os.getenv("AGENT_CHECKPOINT_PATH", defaults.checkpoint_path),
             execution_mode=os.getenv("AGENT_EXECUTION_MODE", defaults.execution_mode).strip() or defaults.execution_mode,
             allow_header_identity=os.getenv("AGENT_ALLOW_HEADER_IDENTITY", "0").strip()
             in {"1", "true", "on", "yes"},

@@ -8,7 +8,10 @@ dependencies = [
     "uvicorn>=0.29",
     "pydantic>=2.9",
     "httpx>=0.27",
-    "langgraph>=0.2",
+    # 已解析并验证的版本：langgraph 1.2.11、langgraph-checkpoint 4.2.0。
+    # 检查点持久化（SQLite 单实例）必须匹配 1.x 的 LangGraph API。
+    "langgraph>=1.2,<2",
+    "langgraph-checkpoint-sqlite>=3.1,<4",
 ]
 
 [project.optional-dependencies]
