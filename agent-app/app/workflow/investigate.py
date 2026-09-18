@@ -25,8 +25,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping, Protocol
 
@@ -34,6 +36,10 @@ from app.schemas.drafts import EvidenceRef, TaskSlots, ToolResult
 
 # 引用片段里只保留这些前缀的文档作为"规范"，与检索层的作用域一致。
 NORM_PREFIX = "norms/"
+
+# 结构化观察的摘要长度上限。工具结果可能很大，但反馈给下一轮决策必须是**有界**的，
+# 同时保留可追溯标识（内容摘要哈希 + 版本/时间），不能只截断成无法核对的文本。
+OBSERVATION_SUMMARY_CHARS = 400
 
 
 class StopReason(str, Enum):
@@ -84,6 +90,7 @@ class InvestigationPlanner(Protocol):
         evidence: list[EvidenceRef],
         called_tools: list[str],
         round_index: int,
+        observations: list["ToolObservation"] | None = None,
     ) -> InvestigationAction:
         ...
 
@@ -92,13 +99,98 @@ class RequiredEvidence:
     """"什么算证据够用"的确定性判定。
 
     刻意不由模型回答"我觉得够了"：完成条件必须是可复核的代码。
+    判定覆盖三类，而不只是"有没有 norms/ 前缀"：
+
+    1. **规范证据**：至少一条**未被废弃**的规范片段。已废弃的规范能命中前缀，
+       但引用它就是引用失效条款——仅凭前缀判定会把这种情况判成"够了"。
+    2. **可核对身份**：规范片段必须带版本或来源，否则无法说明依据的是哪一版。
+    3. **目标材料**：指定了目标表却没有表结构快照时无法核对字段名，
+       此时生成草案就是在编造列名。
     """
 
-    def missing(self, evidence: list[EvidenceRef], slots: TaskSlots) -> list[str]:
+    def missing(
+        self,
+        evidence: list[EvidenceRef],
+        slots: TaskSlots,
+        schema_snapshot: str = "",
+    ) -> list[str]:
         missing: list[str] = []
-        if not any(item.doc_id.startswith(NORM_PREFIX) for item in evidence):
-            missing.append("至少一条规范片段（norms/）")
+        active_norms = [
+            item for item in evidence if item.doc_id.startswith(NORM_PREFIX) and item.status != "deprecated"
+        ]
+        if not active_norms:
+            if any(item.doc_id.startswith(NORM_PREFIX) for item in evidence):
+                missing.append("至少一条仍生效的规范片段（当前命中的规范已标记为废弃）")
+            else:
+                missing.append("至少一条规范片段（norms/）")
+        elif not any((item.version or item.source or "").strip() for item in active_norms):
+            missing.append("规范片段的版本或来源（用于说明依据的是哪一版）")
+        if (slots.table or "").strip() and not schema_snapshot.strip():
+            missing.append("目标表的结构快照（缺少它无法核对字段名）")
         return missing
+
+
+@dataclass
+class ToolObservation:
+    """一次工具调用的结构化观察。
+
+    只把搜索 hits 反馈给下一轮是不够的：表结构快照、变更上下文、扫描结果同样影响
+    下一步决策，丢掉它们等于让决策者"看不见"已经拿到的事实。
+
+    同时必须**有界可追溯**：摘要截断，但保留证据标识、数据版本/时间与内容摘要哈希，
+    这样截断不会让结果变得无法核对。
+    """
+
+    tool: str
+    ok: bool
+    args_digest: str
+    payload_digest: str = ""
+    summary: str = ""
+    error: str = ""
+    evidence_ids: list[str] = field(default_factory=list)
+    data_version: str = ""
+    observed_at: str = ""
+    kind: str = "generic"
+
+
+@dataclass
+class UsageBudget:
+    """token / 费用预算的已知性。
+
+    **usage 缺失时必须标 unknown，不得填 0**：0 是一个"确定没有消耗"的断言，
+    而缺失只是"不知道"。两者混同会让成本报告看起来精确，实际是编的。
+    """
+
+    known: bool = False
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cost_estimate: float | None = None
+    note: str = "usage 未由 provider 提供：token 与费用标记为未知，不做估算"
+
+    def record(self, *, prompt_tokens: int, completion_tokens: int) -> None:
+        self.known = True
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.note = "usage 由 provider 提供"
+
+
+def digest_payload(payload: Any) -> str:
+    """结构化结果的稳定性摘要，便于跨轮核对"是不是同一份内容"。"""
+    try:
+        canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        canonical = str(payload)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def summarize_payload(payload: Any) -> str:
+    """截断成有界摘要。截断的是展示，不是可追溯性——摘要哈希另行保留。"""
+    try:
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(payload)
+    text = " ".join(text.split())
+    return text if len(text) <= OBSERVATION_SUMMARY_CHARS else text[:OBSERVATION_SUMMARY_CHARS] + "…"
 
 
 @dataclass
@@ -114,12 +206,18 @@ class InvestigationReport:
     # 决策者要求用户补充信息的原文。必须结构化带出来，供工作流转成追问；
     # 塞进 notes 再靠解析字符串取回是不可靠的。
     clarification_requests: list[str] = field(default_factory=list)
+    # 每一次工具调用的结构化观察（含失败），用于反馈下一轮决策与事后复盘。
+    observations: list[ToolObservation] = field(default_factory=list)
+    usage: UsageBudget = field(default_factory=UsageBudget)
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = [f"planner={self.planner}", f"stop={self.stop_reason}", f"轮次={self.rounds}", f"工具调用={self.tool_calls}"]
         if self.missing_required:
             parts.append("缺证据：" + "、".join(self.missing_required))
+        if not self.usage.known:
+            # 预算报告里必须显式写出"未知"，而不是让读者以为消耗为 0。
+            parts.append("usage=unknown")
         return "；".join(parts)
 
 
@@ -183,6 +281,7 @@ class RulePlanner:
         evidence: list[EvidenceRef],
         called_tools: list[str],
         round_index: int,
+        observations: list[ToolObservation] | None = None,
     ) -> InvestigationAction:
         if round_index > len(self._steps):
             return Finish()
@@ -270,6 +369,7 @@ class BoundedInvestigation:
         evidence: list[EvidenceRef] = []
         called_tools: list[str] = []
         seen_signatures: set[str] = set()
+        observations: list[ToolObservation] = []
         notes: list[str] = []
         report = InvestigationReport(planner=self._planner.name, stop_reason=StopReason.ROUNDS_EXHAUSTED.value)
 
@@ -281,10 +381,13 @@ class BoundedInvestigation:
                 evidence=list(evidence),
                 called_tools=list(called_tools),
                 round_index=round_index,
+                # 把**全部**结构化观察反馈给下一轮：只给搜索 hits 会让决策者
+                # 看不见已经拿到的表结构、变更上下文与扫描结果。
+                observations=list(observations),
             )
 
             if isinstance(action, Finish):
-                missing = self._required.missing(evidence, slots)
+                missing = self._required.missing(evidence, slots, schema_snapshot)
                 # 关键：模型说"够了"不算数，由代码判定完成条件。
                 report.stop_reason = (
                     StopReason.EVIDENCE_SUFFICIENT.value if not missing else StopReason.INSUFFICIENT_EVIDENCE.value
@@ -302,6 +405,7 @@ class BoundedInvestigation:
                 break
 
             signature = f"{action.tool}::{json.dumps(action.args, sort_keys=True, ensure_ascii=False)}"
+            args_digest = digest_payload(action.args)
             if signature in seen_signatures:
                 # 相同工具 + 相同参数再调一次只会得到同样的结果，属于空转。
                 report.stop_reason = StopReason.NO_PROGRESS.value
@@ -315,15 +419,40 @@ class BoundedInvestigation:
                     timeout=self._tool_timeout,
                 )
             except asyncio.TimeoutError:
-                # 超时按失败处理，不让循环挂住；也不当成"没问题"。
+                # 超时按失败处理，不让循环挂住；也不当成"没问题"。失败同样要留下观察。
                 report.tool_calls += 1
                 called_tools.append(action.tool)
+                observations.append(
+                    ToolObservation(
+                        tool=action.tool,
+                        ok=False,
+                        args_digest=args_digest,
+                        error=f"超时（{self._tool_timeout:g} 秒未返回）",
+                        observed_at=datetime.now(timezone.utc).isoformat(),
+                        kind="timeout",
+                    )
+                )
                 report.stop_reason = StopReason.TOOL_FAILED.value
                 notes.append(f"{action.tool} 超过 {self._tool_timeout:g} 秒未返回，按失败处理")
                 break
 
             report.tool_calls += 1
             called_tools.append(action.tool)
+            observations.append(
+                ToolObservation(
+                    tool=str(getattr(result, "tool", "") or action.tool),
+                    ok=bool(result.ok),
+                    args_digest=args_digest,
+                    # 摘要截断，但保留内容摘要哈希与证据标识，截断不等于无法核对。
+                    payload_digest=digest_payload(result.data) if result.ok else "",
+                    summary=summarize_payload(result.data) if result.ok else "",
+                    error=result.error or "",
+                    evidence_ids=list(result.evidence_ids or []),
+                    data_version=str(result.data_version or ""),
+                    observed_at=(result.observed_at or datetime.now(timezone.utc)).isoformat(),
+                    kind="search" if isinstance((result.data or {}).get("hits"), list) else "material",
+                )
+            )
             if not result.ok:
                 notes.append(f"{action.tool} 失败：{result.error}")
                 continue
@@ -334,8 +463,16 @@ class BoundedInvestigation:
                 notes.append(f"{action.tool} 未返回可引用片段")
 
         report.called_tools = called_tools
-        report.missing_required = self._required.missing(evidence, slots)
+        report.observations = observations
+        report.missing_required = self._required.missing(evidence, slots, schema_snapshot)
         report.notes = notes
+        # 只有决策者**确实提供了** usage 时才记录；没有就是 unknown，绝不填 0。
+        last_usage = getattr(self._planner, "last_usage", None)
+        if isinstance(last_usage, Mapping) and {"prompt_tokens", "completion_tokens"} <= set(last_usage):
+            report.usage.record(
+                prompt_tokens=int(last_usage["prompt_tokens"]),
+                completion_tokens=int(last_usage["completion_tokens"]),
+            )
         # 预算用尽但必需证据已经齐了，就不是"证据不足"，如实改判。
         if (
             report.stop_reason in {StopReason.ROUNDS_EXHAUSTED.value, StopReason.TOOL_CALLS_EXHAUSTED.value}
