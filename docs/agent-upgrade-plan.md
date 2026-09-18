@@ -281,3 +281,29 @@ npm test                                            2 passed
 ```
 
 下一步：PR-C（评测 `--strategy`/`--provider` 真正生效、开发/保留集、评分与报告）、PR-D（工作台 + 浏览器验收）。
+
+### 2026-09-18：P3（PR-C）评测运行器完成
+
+`--provider {deterministic,scripted,live}` 现在**真正选择运行时 provider**；`--strategy` 写入
+`investigation_strategy`；`--split {dev,holdout,all}` 选择开发集 / 保留集。用例可声明适用范围，
+不适用记 `SKIPPED`；live 无凭据记 `NOT_RUN` 并用独立退出码 `2`，不计入通过。
+
+数据集拆为 `evals/datasets/dev.jsonl`（14 例）与 `holdout.jsonl`（4 例，不用于调参），
+记录版本与全量 SHA-256。作业覆盖新增**预算耗尽、取消、恢复**。评分：硬性安全断言确定性判定，
+另报 `completed` / `correct_refusal` / `incorrect` 与任务完成率（合理拒绝算对）。
+报告含数据集哈希、提交、provider、strategy、逐例结果、错误类型、模型请求数、端到端与模型耗时
+P50/P95、usage 与未知项；JSON + Markdown，不预填提升比例。
+
+验证（本机实测，详见 `docs/agent-upgrade-verification.md` §14）：
+
+```
+scripted + bounded_agent + dev        14/14
+scripted + bounded_agent + holdout     4/4
+scripted + fixed_workflow + dev       13/13（SKIPPED 1：预算用例只在 bounded_agent 下有意义）
+deterministic + bounded_agent + dev    9/9 （SKIPPED 5：需要脚本输出的用例）
+live + bounded_agent + dev            NOT_RUN 13，退出码 2（无凭据）
+pytest -q                             208 passed
+go test ./... -count=1                全部 ok
+```
+
+下一步：PR-D（工作台展示与操作、四态区分、真实浏览器验收）。

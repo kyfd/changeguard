@@ -653,11 +653,74 @@ Playwright e2e（CI `e2e`）——本机不满足运行条件；真实模型（l
 
 ---
 
-## 14. 剩余任务
+## 14. P3（PR-C）：评测运行器真正生效
+
+### 14.1 CLI 与执行路径
+
+| 参数 | 语义（**真正改变执行路径**，不是改报告名） |
+| --- | --- |
+| `--provider {deterministic,scripted,live}` | 选择运行时 provider。`deterministic` 一律用确定性生成器；`scripted` 用用例自带的脚本输出（没有则确定性）；`live` 用真实模型，未配置凭据时该用例记 `NOT_RUN` |
+| `--strategy {fixed_workflow,bounded_agent}` | 写入 `Settings.investigation_strategy`；`bounded_agent` 时按 provider 选择决策者（live→`provider`，其余→`rule`） |
+| `--split {dev,holdout,all}` | 选择开发集 / 保留集 / 两者 |
+| `--dataset PATH` | 显式指定数据集（优先于 `--split`） |
+
+用例可声明 `providers` / `strategies` 适用范围；不适用时记 **`SKIPPED`**（写明原因），
+既不算通过，也不假装失败。退出码：全部执行通过 `0`；有失败 `1`；**只有 NOT_RUN 没有失败 `2`**
+（避免 CI 把"未运行"当绿灯）。
+
+### 14.2 数据集拆分与版本
+
+`evals/datasets/dev.jsonl`（14 例，用于开发与回归）与 `evals/datasets/holdout.jsonl`
+（4 例，**不用于反复调参**）。报告记录数据集版本号（每文件 `sha256[:12]`）与**全量 SHA-256**，
+便于核对数据集未被改动。
+
+用例覆盖：正常、缺失材料、无效材料（被确定性检查阻断）、无效证据（编造引用被拒）、
+恶意输入（注入/越权），工具失败，**预算耗尽**、**取消**、**恢复**。
+
+### 14.3 评分口径
+
+- **硬性安全断言**（确定性，决定通过/失败）：状态、SQL/回滚关键字、引用数量、追问字段、
+  检查项与检查状态、错误信息、恢复模式、入口节点执行次数，以及全局断言
+  "草案不得包含被模型自封为已确认的假设"。
+- **结局类别**：`completed`（以产出草案为目标的用例真的产出草案）/ `correct_refusal`
+  （合理的拒绝或追问）/ `incorrect`。任务完成率 = `completed` / 目标为 `DRAFT_READY` 的用例数，
+  **合理拒绝算对**，不强迫所有用例都产出草案。
+- 报告**不预填任何提升比例**；失败用例原样保留。
+
+### 14.4 报告字段
+
+数据集版本与 SHA-256、提交 SHA、provider、strategy、配置、样本数（total/executed/passed/
+failed/not_run/skipped）、逐例结果与失败原因、错误类型、**实际模型请求次数**、端到端耗时与
+模型耗时、两者 P50/P95/min/max、usage 与**未知项**（未接入计费：能拿到 usage 就报，
+费用一律 `unknown`；缺失不填 0）。JSON 与 Markdown 同时写入 `evals/reports/`。
+
+### 14.5 本轮实测
+
+| 命令 | 结果 |
+| --- | --- |
+| `run_eval.py --provider scripted --strategy bounded_agent --split dev` | **14/14**，失败 0，SKIPPED 0 |
+| `run_eval.py --provider scripted --strategy bounded_agent --split holdout` | **4/4** |
+| `run_eval.py --provider scripted --strategy fixed_workflow --split dev` | 13/13，**SKIPPED 1**（预算用例只在 bounded_agent 下有意义） |
+| `run_eval.py --provider deterministic --strategy bounded_agent --split dev` | 9/9，**SKIPPED 5**（需要脚本输出的用例） |
+| `run_eval.py --provider live --strategy bounded_agent --split dev` | **NOT_RUN 13**，退出码 **2**（无凭据；唯一执行的是不依赖模型的取消场景） |
+| `pytest -q` | **208 passed**（PR-B 后 201 + 本轮新增 7） |
+| `go test ./... -count=1` / `go vet ./...` / `gofmt -l` | 全部 ok / clean / clean |
+| `npm test` / 递归 `node --check` | 2 passed / clean |
+
+`SKIPPED` 与 `NOT_RUN` 的数量随 provider/strategy 变化，正是"参数真正生效"的直接证据。
+
+### 14.6 未运行（不得当作通过）
+
+真实模型（live）评测 **`NOT_RUN`**：本机未配置专用凭据与预算，因此没有任何 live 质量数字。
+`go test -race`、PostgreSQL/Redis 集成、Playwright e2e 由 CI 提供证据。
+
+---
+
+## 15. 剩余任务
 
 | 阶段 | 状态 | 内容 |
 | --- | --- | --- |
 | P0 | ✅ 完成 | 授权、执行所有权与持久化诚实性、只读工具服务间认证；执行生命周期收尾 |
 | P1 | ✅ 完成 | 重试分层、草案契约、方言边界、补充字段；受约束调查循环；provider 原生动作决策 |
 | P2 | ✅ 完成 | PR-A：检查点持久化、节点级中断与恢复、恢复前重校验、独立进程验收（§12）；PR-B：材料确认记录（确认人/时间/版本+内容哈希、幂等、新修订失效）与 flaky 修复（§13）。任务书 §P2-8 迁移记为 N/A |
-| P3 | ⬜ 未开始 | 真正生效的评测 `--strategy`/`--provider`、开发/保留集拆分、评分与报告、`/agent/` 工作台与浏览器验收 |
+| P3 | ⏳ **进行中** | PR-C 已完成：评测 `--strategy`/`--provider` 真正生效、开发/保留集拆分、确定性评分与报告（§14）。**待做**：`/agent/` 工作台展示与操作、四态区分、真实浏览器验收（PR-D） |
