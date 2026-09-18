@@ -223,6 +223,14 @@ class ClarifyRequest(BaseModel):
     query_sql: str | None = None
     planned_at: datetime | None = None
     planned_at_timezone: str | None = None
+    # 表结构快照不是槽位而是任务级材料，但必须能在这里补齐——
+    # 否则"缺少快照"就成了一条无法通过补充信息走通的死路。
+    schema_snapshot: str | None = Field(
+        default=None,
+        description="补充或替换表结构快照。仍只使用导入的快照，不接生产库实时探索。",
+    )
+    # 自由文本说明。以前这个字段被接收后直接丢弃，用户看不到任何效果；
+    # 现在会写入任务记录，并在下一次执行时作为「补充说明」拼进需求文本。
     note: str | None = None
 
 

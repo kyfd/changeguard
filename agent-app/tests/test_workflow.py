@@ -102,13 +102,17 @@ def test_revision_is_bounded_by_max_revisions(settings, service: AgentService, c
 
 
 def test_invalid_json_fails_with_clear_error(settings) -> None:
+    # 内容层的重试由 draft_parse_attempts 决定，与 provider 的传输层重试是两个开关
+    # （以前两层共用 llm_max_attempts，实际调用次数被平方）。这里显式设成 2，
+    # 证明的是"有限次重试而不是无限循环"，而不是恰好等于某个默认值。
+    scoped = settings.__class__(**{**settings.__dict__, "draft_parse_attempts": 2})
     provider = StubProvider(["这不是 JSON", "仍然不是 JSON"])
     workflow = DraftWorkflow(
         WorkflowDeps(
-            settings=settings,
+            settings=scoped,
             provider=provider,
             trusted_context=TrustedContext(user_id="alice", organization_id="org_demo"),
-            toolbox_factory=lambda snapshot: Toolbox(settings=settings, retriever=_retriever(settings), schema_snapshot=snapshot),
+            toolbox_factory=lambda snapshot: Toolbox(settings=scoped, retriever=_retriever(scoped), schema_snapshot=snapshot),
         )
     )
     state = {
@@ -116,14 +120,14 @@ def test_invalid_json_fails_with_clear_error(settings) -> None:
         "requirement": "x",
         "slots": complete_slots().model_dump(mode="json"),
         "schema_snapshot": complete_request().schema_snapshot or "",
-        "max_revisions": settings.max_revisions,
+        "max_revisions": scoped.max_revisions,
         "events": [],
         "revisions": 0,
     }
     result = run(workflow.run(state))  # type: ignore[arg-type]
     assert result["status"] == TaskStatus.FAILED.value
     assert "JSON" in (result["error"] or "")
-    assert provider.calls == settings.llm_max_attempts, "应做有限次重试而不是无限循环"
+    assert provider.calls == scoped.draft_parse_attempts, "应做有限次重试而不是无限循环"
 
 
 def test_unknown_model_field_is_rejected() -> None:

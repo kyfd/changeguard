@@ -199,3 +199,17 @@ node --check / npm test      clean / 2 passed
 
 下一步：P1（受约束调查循环 + provider 决策契约 + 预算与上下文，
 含已发现的 C1 重试相乘、C2 模型自封"已确认"、C3 版本恒为 1、C4/C5 澄清字段、C6 方言）。
+
+### 2026-09-17：P1 前置修复完成，主体未开始
+
+C1 重试相乘、C2 模型自封"已确认"、C3 版本/修订说明、C4/C5 补充信息字段、C6 方言边界
+已修复并有改前/改后证据（改前分别为 4 failed 与 10 failed，全部为行为复现）。
+`pytest -q` 125 passed、离线评估 11/11。详见 `docs/agent-upgrade-verification.md` §11。
+
+**P1 主体已实现**：`app/workflow/investigate.py` 的受约束调查循环（轮次与累计工具调用双上限、
+单工具超时、空转检测、必需证据由代码判定、决策者能力必须显式声明），以
+`investigation_strategy` 开关接入，默认仍是 `fixed_workflow` 因而不改变既有行为。
+
+**仍未完成**：模型原生工具选择（provider 未实现 `decide()`，目前只做到"显式报告不可用"
+而不是"真让模型选"）、工具结果摘要哈希、usage 缺失策略、`fixed_workflow` 与
+`bounded_agent` 的同输入对照评测。
