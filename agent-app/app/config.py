@@ -37,6 +37,22 @@ class Settings:
     draft_parse_attempts: int = 1
     llm_max_tokens: int = 1200
 
+    # 任务级 token / 费用预算。0 = 不限制。
+    #   max_task_tokens             任务累计 token（prompt + completion）上限
+    #   max_task_prompt_tokens      任务累计 prompt token 上限
+    #   max_task_cost_estimate      任务费用上限；**没有定价数据时失败关闭**，不会假装已生效
+    #   unknown_usage_charge_tokens 未提供 usage 的响应在**预算判定**中按这个值保守计入
+    #                               （0 = 用 llm_max_tokens 作为单次响应的上界）
+    #
+    # 注意：这只在"能算出来"的前提下限制。显示 unknown 不等于实现了预算——
+    # 缺 usage 时按保守值计入判定，缺定价时费用上限直接失败关闭。
+    max_task_tokens: int = 0
+    max_task_prompt_tokens: int = 0
+    max_task_cost_estimate: float = 0.0
+    unknown_usage_charge_tokens: int = 0
+    llm_price_prompt_per_1k: float = 0.0
+    llm_price_completion_per_1k: float = 0.0
+
     # 工作流预算：有限循环，不允许无上限修订。
     max_revisions: int = 2
     task_timeout_seconds: float = 120.0
@@ -126,6 +142,12 @@ class Settings:
             llm_max_attempts=int(os.getenv("AGENT_LLM_MAX_ATTEMPTS", "2")),
             draft_parse_attempts=int(os.getenv("AGENT_DRAFT_PARSE_ATTEMPTS", "1")),
             llm_max_tokens=int(os.getenv("AGENT_LLM_MAX_TOKENS", "1200")),
+            max_task_tokens=int(os.getenv("AGENT_MAX_TASK_TOKENS", "0")),
+            max_task_prompt_tokens=int(os.getenv("AGENT_MAX_TASK_PROMPT_TOKENS", "0")),
+            max_task_cost_estimate=float(os.getenv("AGENT_MAX_TASK_COST", "0")),
+            unknown_usage_charge_tokens=int(os.getenv("AGENT_UNKNOWN_USAGE_CHARGE_TOKENS", "0")),
+            llm_price_prompt_per_1k=float(os.getenv("AGENT_LLM_PRICE_PROMPT_PER_1K", "0")),
+            llm_price_completion_per_1k=float(os.getenv("AGENT_LLM_PRICE_COMPLETION_PER_1K", "0")),
             max_revisions=int(os.getenv("AGENT_MAX_REVISIONS", "2")),
             task_timeout_seconds=float(os.getenv("AGENT_TASK_TIMEOUT", "120")),
             investigation_strategy=os.getenv("AGENT_INVESTIGATION_STRATEGY", "fixed_workflow").strip()

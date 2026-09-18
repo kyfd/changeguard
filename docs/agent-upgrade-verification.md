@@ -899,7 +899,86 @@ CI 的 Playwright e2e 由 CI 提供证据（CI e2e 栈不含 agent-app，因此�
 
 ---
 
-## 17. 剩余任务
+## 17. 收尾修复：恢复×取消竞态、usage 记账、任务级预算
+
+### 17.1 恢复与取消并发：已在 #23 修复（附改前/改后证据）
+
+报告的复现是 **`ed4c964`（发布提交）上的真实行为**。新增回归用例
+`test_cancel_during_checkpoint_read_is_not_overwritten_by_resume`：用事件屏障把"读取检查点"卡住，
+让取消完整跑完，再放行恢复，然后断言最终状态仍是 `CANCELLED` 且恢复被拒。
+
+| 代码版本 | 用例结果 |
+| --- | --- |
+| `ed4c964`（`git checkout ed4c964 -- app/service.py`） | **失败**：`{'resume_outcome': 'ACCEPTED status=DRAFT_READY', 'final_status': 'DRAFT_READY'}`——取消返回 CANCELLED 后，恢复仍被受理并再次派发 |
+| `4464285`（#23 之后） | **通过**：恢复得到 409，终态保持 `CANCELLED` |
+
+即：报告描述的"回来后没有重新校验执行代际，就保存旧记录并派发"已在 #23 修复——
+`resume` 现在会在读检查点前记下「代际 + 状态」，读完后在**同一段没有 await 的代码**里重新确认并占用执行。
+本 PR 补上了报告要求的"取消与并发恢复"回归用例（此前只有并发恢复重叠的用例）。
+
+### 17.2 usage：按请求累计、按任务隔离、缺失显式
+
+**缺陷（已复现）**：`UsageBudget` 从 `provider.last_usage` **一次性**取值，而 provider 只在
+`decide()` 路径写 `last_usage`、`generate()` 完全不记账，且响应缺失 usage 时**不清空**旧值。
+于是：三轮各 100+10 只报 100+10；上一次有 usage、下一次没有时，仍显示上一次的值（把未知说成已知）；
+provider 是跨任务共享的，累计量还会串到别的任务。
+
+**修复**：新增 `app/budget.py`：
+
+| 口径 | 实现 |
+| --- | --- |
+| 按请求 | `OpenAICompatibleProvider._post` 每次响应都调 `UsageLedger.add(...)`；缺失就记一笔"缺失"，并把 `last_usage` 置回 `None`（不复用旧值） |
+| 按任务 | 记账器由**服务层**创建，放在 `usage_scope`（`ContextVar`）里；provider 不再持有累计量，因此并发任务不串数 |
+| 调查部分 | 调查循环每轮再开一个记账器，与任务级记账器**嵌套**，同时收到同一批响应 |
+| 缺失不等于 0 | `prompt_tokens`/`completion_tokens` 只累加真的报了 usage 的响应；`missing_responses` 与 `known=False` 显式表示不完整 |
+
+用例（`tests/test_usage_budget.py`）：三轮累计 300+30；缺失不复用且 `known=False`；
+两个任务互不串数；`last_usage` 在响应无 usage 时被清空。
+
+### 17.3 任务级 token／费用预算
+
+此前只有轮次、工具次数、超时与单次输出上限，**没有任务级阈值**；`UsageBudget` 只用于记录与展示。
+现在：
+
+| 配置（0 = 不限制） | 行为 |
+| --- | --- |
+| `AGENT_MAX_TASK_TOKENS` | 任务累计 token（prompt+completion）超限即停止 |
+| `AGENT_MAX_TASK_PROMPT_TOKENS` | 任务累计 prompt token 超限即停止 |
+| `AGENT_MAX_TASK_COST` + `AGENT_LLM_PRICE_*_PER_1K` | 有单价才折算费用；**没有定价数据时失败关闭**，不假装已生效 |
+| `AGENT_UNKNOWN_USAGE_CHARGE_TOKENS` | 未提供 usage 的响应在**预算判定**中按此保守计入（0 = 用 `llm_max_tokens`） |
+
+- 检查点在**发请求之前**，因此超限后不会再打模型；超限是**主动停止**而不是故障：
+  调查循环以 `BUDGET_EXHAUSTED` 停止并阻断生成，生成阶段则以明确的"预算已用尽"失败。
+- **未知用量仍然有界**：缺 usage 时按保守值计入判定，同时真实 token 统计保持 `unknown`。
+  这正是"显示 unknown 不等于实现了预算"所要求的那条策略。
+- **费用未实现时不装作实现**：配了费用上限却没有单价 → 第一次调用前就失败关闭。
+
+用例：预算用尽后调用次数被硬性拦住（2 次而非 5 次）；缺 usage 时同样被拦住且真实 token 仍为 unknown；
+缺定价时 0 次调用即失败；有定价时按 0.22 折算并停止。
+
+### 17.4 本轮命令与结果（本机）
+
+| 命令 | 结果 |
+| --- | --- |
+| `pytest -q` | **223 passed**（214 + 恢复×取消 1 + usage/预算 8） |
+| `evals --provider scripted --strategy bounded_agent --split dev` | **14/14** |
+| `scripts/recovery_acceptance.py` | **13/13** |
+| `go test ./... -count=1` / `go vet ./...` / `gofmt -l` | ok / clean / clean |
+| `npm test` / 递归 `node --check` | 2 passed / clean |
+
+### 17.5 验证边界（如实记录，不计为通过）
+
+- 报告的本地结果"42 passed + 168 setup errors"在**本机未复现**。两点与它一致的解释已记录：
+  ① 缺 `langgraph-checkpoint-sqlite`（已在 `pyproject.toml` 声明，CI `quality-agent` 会安装）；
+  ② 临时目录权限。**本机既不能复现，因此不判定通过也不判定失败。**
+  本轮把缺依赖的失败改成**可执行提示**（明确告知 `pip install -e ".[dev]"`），减少这类难归因的批量错误。
+- **浏览器 19/19 是仓库中的历史执行记录**，本轮没有重新操作验证（UI 仅改了一行 usage 文案，已过 `node --check`）。
+- **真实模型（live）评测仍为 `NOT_RUN`**，不构成质量验收。
+- 本 PR 的结论仅限于：上述三个缺陷已复现并修复，且本机全量通过。
+
+---
+
+## 18. 剩余任务
 
 | 阶段 | 状态 | 内容 |
 | --- | --- | --- |

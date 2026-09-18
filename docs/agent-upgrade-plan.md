@@ -352,3 +352,23 @@ tests/manual/agent-workbench-acceptance.mjs        19/19（真实登录 + 真实
 
 验证：`pytest -q` **214 passed**（且 `agent-app/data/` 不再出现）；`evals` 14/14；跨进程恢复 13/13；
 `go test ./...` / `go vet` / `gofmt` / `npm test` 全部 clean。
+
+### 2026-09-18：收尾修复（恢复×取消竞态、usage 记账、任务级预算）
+
+- **恢复×取消竞态**：报告的场景在发布提交 `ed4c964` 上**已复现**
+  （取消返回 CANCELLED 后恢复仍被受理并再次派发），在 #23（`4464285`）上已修复；
+  本 PR 补上报告要求的"取消与并发恢复"回归用例，并用 `git checkout ed4c964 -- app/service.py`
+  跑出改前失败的对照证据。
+- **usage 记账**：新增 `app/budget.py`。按**请求**记账（缺失即记一笔缺失并清空 `last_usage`）、
+  按**任务**隔离（记账器放在 `usage_scope` 的 ContextVar 上，provider 不再持有累计量，
+  并发任务不串数）、缺失**显式**（`missing_responses` + `known=False`，真实 token 不填 0）。
+- **任务级预算**：`AGENT_MAX_TASK_TOKENS` / `AGENT_MAX_TASK_PROMPT_TOKENS` /
+  `AGENT_MAX_TASK_COST`（含单价，缺定价则**失败关闭**）/ `AGENT_UNKNOWN_USAGE_CHARGE_TOKENS`。
+  检查点在发请求之前，因此超限后不再打模型；调查循环以 `BUDGET_EXHAUSTED` 停止并阻断生成。
+  未知用量按保守值计入判定，真实 token 仍标 unknown。
+
+验证（本机）：`pytest -q` **223 passed**；`evals` 14/14；跨进程恢复 13/13；
+`go test ./...` / `go vet` / `gofmt` / `npm test` 全部 clean。
+
+**验证边界**：报告中的"42 passed + 168 setup errors"在本机未复现（未判定通过或失败）；
+浏览器 19/19 是历史记录、本轮未重新操作；真实模型评测仍为 `NOT_RUN`。

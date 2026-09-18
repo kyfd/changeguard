@@ -15,13 +15,14 @@ import asyncio
 import json
 import re
 import time
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 import httpx
 from pydantic import BaseModel, Field
 
 from app.config import Settings
 from app.schemas.drafts import Assumption, DatabaseKind, EvidenceRef, TaskSlots
+from app.budget import TaskBudgetExceeded, active_ledgers
 from app.tools.registry import InvalidToolArgs, validate_args
 from app.workflow.investigate import AskUser, CallTool, Finish
 
@@ -95,6 +96,8 @@ class ModelCallError(RuntimeError):
 # 只有这些状态码才值得重试：限流、超时与网关/服务端暂时不可用。
 # 其余的 4xx（401/403 权限、400/422 参数）重试不会改变结果。
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +290,7 @@ class OpenAICompatibleProvider:
         self.requests_sent = 0
         # 模型调用的累计墙钟耗时（秒）。评测报告需要区分"端到端耗时"与"模型耗时"。
         self.model_seconds = 0.0
-        # 最近一次 decide() 的 token 用量；provider 未提供时保持 None，
-        # 由循环标为 unknown，而不是填 0 冒充"确定没有消耗"。
+        # 最近一次响应的 usage 明细；**响应未提供时置回 None**，不复用上一次的值。
         self.last_usage: dict[str, int] | None = None
 
     def describe(self) -> dict[str, Any]:
@@ -405,13 +407,6 @@ class OpenAICompatibleProvider:
             raise ModelCallError("模型未返回任何候选结果", retryable=True, failure_type="no_choices")
         message = choices[0].get("message") or {}
 
-        usage = body.get("usage")
-        if isinstance(usage, dict) and usage.get("prompt_tokens") is not None and usage.get("completion_tokens") is not None:
-            self.last_usage = {
-                "prompt_tokens": int(usage["prompt_tokens"]),
-                "completion_tokens": int(usage["completion_tokens"]),
-            }
-
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
             # 模型没有选择任何工具，视为它认为调查可以结束。是否真的够由代码判定。
@@ -436,8 +431,38 @@ class OpenAICompatibleProvider:
         _validate_arguments(args, schemas.get(name) or {})
         return CallTool(tool=name, args=args)
 
+    def _guard_budget(self) -> None:
+        """发出下一次请求之前，先看任务预算是否已经用尽。"""
+        for ledger in active_ledgers():
+            reason = ledger.exceeded()
+            if reason:
+                raise TaskBudgetExceeded(reason)
+
+    def _record_usage(self, usage: Any) -> None:
+        """按**请求**记账：缺失时显式记一笔缺失，绝不复用上一次的值。
+
+        共享的 provider 实例不再持有"累计用量"——累计发生在调用方提供的记账器上，
+        这样并发任务不会互相串数。
+        """
+        parsed: dict[str, int] | None = None
+        if (
+            isinstance(usage, Mapping)
+            and usage.get("prompt_tokens") is not None
+            and usage.get("completion_tokens") is not None
+        ):
+            parsed = {
+                "prompt_tokens": int(usage["prompt_tokens"]),
+                "completion_tokens": int(usage["completion_tokens"]),
+            }
+        self.last_usage = parsed
+        for ledger in active_ledgers():
+            ledger.add(parsed)
+        self._guard_budget()
+
     async def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """发一次请求并返回解析后的响应体。供 generate 与 decide 共用。"""
+        # 预算检查在**发请求之前**：超出上限就不再打模型，而不是打完再报。
+        self._guard_budget()
         self.requests_sent += 1
         started = time.perf_counter()
         try:
@@ -468,6 +493,8 @@ class OpenAICompatibleProvider:
             raise ModelCallError("模型返回的不是合法 JSON", retryable=True, failure_type="malformed_body") from error
         if not isinstance(body, dict):
             raise ModelCallError("模型返回的不是 JSON 对象", retryable=True, failure_type="malformed_body")
+        # 每次响应都记一笔（含"没有 usage"这一事实）。
+        self._record_usage(body.get("usage"))
         return body
 
     async def _call_once(self, url: str, payload: dict[str, Any]) -> str:
