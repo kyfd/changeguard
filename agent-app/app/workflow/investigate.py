@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping, Protocol
 
-from app.budget import TaskBudgetExceeded, UsageLedger, usage_scope
+from app.budget import PHASE_INVESTIGATE, TaskBudgetExceeded, UsageLedger, usage_scope
 from app.schemas.drafts import EvidenceRef, TaskSlots, ToolResult
 
 # 引用片段里只保留这些前缀的文档作为"规范"，与检索层的作用域一致。
@@ -441,7 +441,7 @@ class BoundedInvestigation:
             report.rounds = round_index
             round_ledger = UsageLedger()
             try:
-                with usage_scope(round_ledger):
+                with usage_scope(round_ledger, phase=PHASE_INVESTIGATE):
                     action = await self._planner.plan(
                         requirement=requirement,
                         slots=slots,

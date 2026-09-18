@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.config import Settings
 from app.schemas.drafts import Assumption, DatabaseKind, EvidenceRef, TaskSlots
-from app.budget import TaskBudgetExceeded, active_ledgers
+from app.budget import TaskBudgetExceeded, active_ledgers, active_phase
 from app.tools.registry import InvalidToolArgs, validate_args
 from app.workflow.investigate import AskUser, CallTool, Finish
 
@@ -438,11 +438,13 @@ class OpenAICompatibleProvider:
             if reason:
                 raise TaskBudgetExceeded(reason)
 
-    def _record_usage(self, usage: Any) -> None:
-        """按**请求**记账：缺失时显式记一笔缺失，绝不复用上一次的值。
+    def _record_call(
+        self, *, outcome: str, duration_ms: int, usage: Any, failure_type: str | None = None
+    ) -> None:
+        """把**这一次请求**的结构化记录提交给当前账本。
 
-        共享的 provider 实例不再持有"累计用量"——累计发生在调用方提供的记账器上，
-        这样并发任务不会互相串数。
+        缺失 usage 时显式记一笔缺失，绝不复用上一次的值；共享的 provider 实例不持有累计量，
+        累计发生在调用方提供的账本上，因此并发任务不会互相串账。
         """
         parsed: dict[str, int] | None = None
         if (
@@ -456,7 +458,15 @@ class OpenAICompatibleProvider:
             }
         self.last_usage = parsed
         for ledger in active_ledgers():
-            ledger.add(parsed)
+            ledger.add_call(
+                phase=active_phase(),
+                outcome=outcome,
+                requests=1,
+                duration_ms=duration_ms,
+                usage=parsed,
+                model=self._settings.llm_model,
+                failure_type=failure_type,
+            )
         self._guard_budget()
 
     async def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -473,15 +483,26 @@ class OpenAICompatibleProvider:
                     headers={"Authorization": f"Bearer {self._settings.llm_api_key}"},
                 )
         except Exception as error:  # noqa: BLE001 - 网络抖动与超时值得重试
+            elapsed = int((time.perf_counter() - started) * 1000)
             self.model_seconds += time.perf_counter() - started
+            timed_out = isinstance(error, (httpx.TimeoutException, asyncio.TimeoutError))
+            # 失败的请求同样要入账（且 usage 未知）：否则"打出去但没回来的钱"会被漏掉。
+            self._record_call(
+                outcome="timeout" if timed_out else "error",
+                duration_ms=elapsed,
+                usage=None,
+                failure_type="timeout" if timed_out else "transport",
+            )
             raise ModelCallError(
                 f"模型调用失败（传输层）：{type(error).__name__}: {error}",
                 retryable=True,
                 failure_type="transport",
             ) from error
+        elapsed = int((time.perf_counter() - started) * 1000)
         self.model_seconds += time.perf_counter() - started
 
         if response.status_code != 200:
+            self._record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="status")
             raise ModelCallError(
                 f"模型返回状态码 {response.status_code}: {response.text[:200]}",
                 retryable=response.status_code in _RETRYABLE_STATUS,
@@ -490,11 +511,13 @@ class OpenAICompatibleProvider:
         try:
             body = response.json()
         except Exception as error:  # noqa: BLE001 - 网关返回非 JSON 可能是暂时性的
+            self._record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="malformed_body")
             raise ModelCallError("模型返回的不是合法 JSON", retryable=True, failure_type="malformed_body") from error
         if not isinstance(body, dict):
+            self._record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="malformed_body")
             raise ModelCallError("模型返回的不是 JSON 对象", retryable=True, failure_type="malformed_body")
         # 每次响应都记一笔（含"没有 usage"这一事实）。
-        self._record_usage(body.get("usage"))
+        self._record_call(outcome="ok", duration_ms=elapsed, usage=body.get("usage"))
         return body
 
     async def _call_once(self, url: str, payload: dict[str, Any]) -> str:

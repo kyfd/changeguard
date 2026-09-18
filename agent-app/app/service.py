@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from app.budget import UsageLedger, usage_scope
+from app.budget import PHASE_GENERATE, LedgerPersistError, UsageLedger, usage_scope
 from app.config import Settings
 from app.llm.provider import build_provider
 from app.retrieval.corpus import build_retriever
@@ -648,6 +648,20 @@ class AgentService:
         self._problems.pop(task_id, None)
         return execution_id
 
+    def _persist_ledger(self, task_id: str, execution_id: str, payload: dict[str, Any]) -> None:
+        """把调用账本落盘。
+
+        只覆盖 `usage` 字段，避免把并发写入的其它状态（例如取消）盖回去；
+        执行已被取代或取消时**直接抛错**，让调用停止——不允许产生没有账目的消耗。
+        """
+        record = self._repository.get(task_id)
+        if record is None:
+            raise LedgerPersistError(f"任务 {task_id} 不存在，调用账本无法落盘")
+        if (record.get("execution_id") or "") != execution_id:
+            raise LedgerPersistError("执行已被取消或被新执行接管：账本停止记录，不再继续调用模型")
+        record["usage"] = payload
+        self._repository.save(record)
+
     def _has_live_execution(self, task_id: str) -> bool:
         """该任务是否已有一次**尚未结束**的执行。"""
         execution = self._executions.get(task_id)
@@ -756,33 +770,44 @@ class AgentService:
             "max_revisions": self._settings.max_revisions,
         }
 
-        # 任务级记账器：provider 是共享的，用量必须记在**每个任务自己的**记账器上，
-        # 否则并发任务会互相串数；预算上限也在这一层生效。
+        # 任务级账本：provider 是共享的，消耗必须记在**每个任务自己的**账本上，
+        # 否则并发任务会互相串账；预算上限也在这一层生效。
+        execution_id = record.get("execution_id") or ""
         ledger = UsageLedger(
             max_total_tokens=int(getattr(self._settings, "max_task_tokens", 0) or 0),
             max_prompt_tokens=int(getattr(self._settings, "max_task_prompt_tokens", 0) or 0),
             max_cost_estimate=float(getattr(self._settings, "max_task_cost_estimate", 0.0) or 0.0),
             prompt_price_per_1k=float(getattr(self._settings, "llm_price_prompt_per_1k", 0.0) or 0.0),
             completion_price_per_1k=float(getattr(self._settings, "llm_price_completion_per_1k", 0.0) or 0.0),
-            # 未提供 usage 的响应按一个保守值计入预算判定；没配置就用单次输出上界。
+            max_requests=int(getattr(self._settings, "max_task_requests", 0) or 0),
+            # 未提供 usage 的请求按一个保守值计入预算判定；没配置就用单次输出上界。
             unknown_charge_tokens=int(getattr(self._settings, "unknown_usage_charge_tokens", 0) or 0)
             or int(self._settings.llm_max_tokens),
+            task_id=task_id,
+            execution_id=execution_id,
+            model=self._settings.llm_model,
         )
+        # 恢复、重试与重启都要**续算**：任务累计预算不得被清零。
+        ledger.seed_from_prior(record.get("usage"))
+        # 每次记账后落盘：恢复才有据可续，也确保不出现"没有账目的模型调用"。
+        ledger.on_update = lambda payload: self._persist_ledger(task_id, execution_id, payload)
 
-        async with open_checkpointer(self._settings) as saver:
-            workflow = self._build_workflow(record, saver)
-            with usage_scope(ledger):
-                if resume is None:
-                    await _delete_thread(saver, task_id)
-                    record["resume_mode"] = None
-                    result = await workflow.run(initial_state, thread_id=task_id)  # type: ignore[arg-type]
-                elif resume.get("mode") == RESUME_INTERRUPT:
-                    result = await workflow.resume_interrupt(thread_id=task_id, value=resume.get("value") or {})
-                else:
-                    result = await workflow.continue_pending(thread_id=task_id)
-
-        # 任务级用量：按请求累计；缺失即 unknown，不用上一次的值顶替。
-        record["usage"] = ledger.as_dict()
+        try:
+            async with open_checkpointer(self._settings) as saver:
+                workflow = self._build_workflow(record, saver)
+                with usage_scope(ledger, phase=PHASE_GENERATE):
+                    if resume is None:
+                        await _delete_thread(saver, task_id)
+                        record["resume_mode"] = None
+                        result = await workflow.run(initial_state, thread_id=task_id)  # type: ignore[arg-type]
+                    elif resume.get("mode") == RESUME_INTERRUPT:
+                        result = await workflow.resume_interrupt(thread_id=task_id, value=resume.get("value") or {})
+                    else:
+                        result = await workflow.continue_pending(thread_id=task_id)
+        finally:
+            # 成功、失败、被取消都要把账本落到本次执行的记录上：
+            # 失败的执行同样消耗了模型调用，不能因此丢失账目（否则恢复会重置预算）。
+            record["usage"] = ledger.as_dict()
 
         interrupts = result.get("__interrupt__") if isinstance(result, dict) else None
         if interrupts:

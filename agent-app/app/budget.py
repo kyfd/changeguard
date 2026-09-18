@@ -1,13 +1,15 @@
-"""模型用量记账与任务级预算。
+"""任务级调用账本与预算。
 
-三条口径，缺一条就会把"未知"说成"已知"：
+四条口径，缺一条就会把"未知"说成"已知"，或者让预算形同虚设：
 
-1. **按请求**：每一次模型响应都记一笔；响应没带 usage 就记一笔"缺失"，
-   绝不复用上一次的值（复用会让缺失显示成已知）。
-2. **按任务**：记账器由调用方创建并放进 `usage_scope`，用 `ContextVar` 承载，
-   因此并发任务各自独立——provider 是跨任务共享的，把累计量放在它上面会串数。
+1. **按请求**：每一次 HTTP 请求都记一条结构化记录（含重试、失败、超时）；
+   响应没带 usage 就记一笔"缺失"，绝不复用上一次的值。
+2. **按任务**：账本由调用方创建并放在 `usage_scope` 里，用 `ContextVar` 承载；
+   provider 是跨任务共享的，把累计量放在它上面会让并发任务互相串账。
 3. **缺失不等于 0**：真实 token 只累加真的报了 usage 的响应；未报的计入 `missing`，
-   `known` 为假。预算判定则对未报的响应按一个**保守值**计费，使预算在"未知"时仍然有界。
+   `known` 为假；预算判定则对未报的请求按**保守值**计费，使预算在"未知"时仍然有界。
+4. **必须可持久化**：账本支持从已落盘的累计值**续算**（恢复/重启不重置预算），
+   并在每次记账后回调持久化钩子；钩子失败必须上抛——不允许在无账本的情况下继续调用模型。
 
 本模块不依赖 `app.llm` 或 `app.workflow`，避免为了一个异常类型产生循环导入。
 """
@@ -16,21 +18,56 @@ from __future__ import annotations
 
 import contextvars
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any, Iterator, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterator, Mapping
+
+# 调用阶段：调查（决策）与生成（含修订）分开计费，便于回答"钱花在哪一步"。
+PHASE_INVESTIGATE = "investigate"
+PHASE_GENERATE = "generate"
+PHASE_OTHER = "other"
+
+# 账本里保留的调用记录条数上限：够复盘，又不会让任务记录无限膨胀。
+MAX_CALL_RECORDS = 60
 
 
 class TaskBudgetExceeded(RuntimeError):
-    """任务级 token 预算已用尽。
+    """任务级预算已用尽。
 
     必须与"模型调用失败"区分开：它不是故障，而是**按预算主动停止**。
     """
 
 
+class LedgerPersistError(RuntimeError):
+    """账本无法持久化。
+
+    此时必须**停止**继续调用模型：继续调用就会产生没有账目的消耗。
+    """
+
+
+@dataclass(frozen=True)
+class CallRecord:
+    """一次模型 HTTP 请求的结构化记录。
+
+    只记录可核对的元数据：不含凭据、不含完整提示词、不含隐式思维链。
+    """
+
+    sequence: int
+    phase: str
+    outcome: str  # ok / error / timeout / cancelled
+    requests: int
+    duration_ms: int
+    usage_known: bool
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    model: str
+    failure_type: str | None = None
+
+
 @dataclass
 class UsageLedger:
-    """按请求累计的 usage 记账器（同时承担任务级预算）。"""
+    """按请求累计的调用账本（同时承担任务级预算）。"""
 
+    # 预算（0 = 不限制）
     max_total_tokens: int = 0
     max_prompt_tokens: int = 0
     # 费用上限与单价。**没有定价数据时费用上限必须失败关闭**：
@@ -38,24 +75,77 @@ class UsageLedger:
     max_cost_estimate: float = 0.0
     prompt_price_per_1k: float = 0.0
     completion_price_per_1k: float = 0.0
+    max_requests: int = 0
     # 未提供 usage 的响应，按这个值计入**预算**（保守估计），但不计入真实 token 统计。
     unknown_charge_tokens: int = 0
 
+    # 身份：结构化记录要能按任务/执行复盘。
+    task_id: str = ""
+    execution_id: str = ""
+    model: str = ""
+
+    # 累计量
     requests: int = 0
     reported: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     charged_unknown_tokens: int = 0
+    calls: list[CallRecord] = field(default_factory=list)
 
-    def add(self, usage: Mapping[str, Any] | None) -> None:
+    # 每次记账后回调（服务层用它落盘）。抛错即代表"不能再继续调用"。
+    on_update: Callable[[dict[str, Any]], None] | None = None
+
+    # -- 累计 ---------------------------------------------------------------
+
+    def add_call(
+        self,
+        *,
+        phase: str,
+        outcome: str,
+        requests: int,
+        duration_ms: int,
+        usage: Mapping[str, Any] | None,
+        model: str = "",
+        failure_type: str | None = None,
+    ) -> CallRecord:
+        """登记一次模型请求；缺失 usage 时显式记为缺失。"""
         self.requests += 1
-        if not isinstance(usage, Mapping):
+        known = isinstance(usage, Mapping)
+        if known:
+            self.reported += 1
+            self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+            self.completion_tokens += int(usage.get("completion_tokens") or 0)
+        else:
             # 缺失：只为预算计一笔保守费用，真实统计保持"未知"。
             self.charged_unknown_tokens += max(0, int(self.unknown_charge_tokens))
-            return
-        self.reported += 1
-        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
-        self.completion_tokens += int(usage.get("completion_tokens") or 0)
+        record = CallRecord(
+            sequence=self.requests,
+            phase=phase or PHASE_OTHER,
+            outcome=outcome,
+            requests=max(0, int(requests)),
+            duration_ms=max(0, int(duration_ms)),
+            usage_known=known,
+            prompt_tokens=(int(usage["prompt_tokens"]) if known and usage.get("prompt_tokens") is not None else None),
+            completion_tokens=(
+                int(usage["completion_tokens"]) if known and usage.get("completion_tokens") is not None else None
+            ),
+            model=model or self.model,
+            failure_type=failure_type,
+        )
+        self.calls.append(record)
+        if len(self.calls) > MAX_CALL_RECORDS:
+            del self.calls[: len(self.calls) - MAX_CALL_RECORDS]
+        if self.on_update is not None:
+            # 落盘失败必须上抛：宁可停止任务，也不要继续产生没有账目的消耗。
+            try:
+                self.on_update(self.as_dict())
+            except LedgerPersistError:
+                raise
+            except Exception as error:  # noqa: BLE001 - 统一转成显式的账本故障
+                raise LedgerPersistError(f"调用账本未能落盘：{type(error).__name__}: {error}") from error
+        return record
+
+    # -- 汇总 ---------------------------------------------------------------
 
     @property
     def missing(self) -> int:
@@ -82,6 +172,8 @@ class UsageLedger:
         )
 
     def exceeded(self) -> str | None:
+        if self.max_requests > 0 and self.requests >= self.max_requests:
+            return f"任务模型请求次数已用尽：上限 {self.max_requests}，已发 {self.requests}"
         if self.max_total_tokens > 0 and self.counted_tokens > self.max_total_tokens:
             detail = ""
             if self.charged_unknown_tokens:
@@ -104,18 +196,22 @@ class UsageLedger:
                 return f"任务费用预算已用尽：上限 {self.max_cost_estimate}，已计 {cost}"
         return None
 
+    # -- 表示与续算 ---------------------------------------------------------
+
     def as_dict(self) -> dict[str, Any]:
         """对外表示。缺失项显式为 unknown，不填 0。"""
         if self.missing:
             note = (
-                f"{self.requests} 次模型响应中有 {self.missing} 次未提供 usage："
+                f"{self.requests} 次模型请求中有 {self.missing} 次未提供 usage："
                 "token 总量不完整、按未知处理，不填 0 冒充已知"
             )
         elif self.requests:
-            note = "usage 由 provider 按请求提供"
+            note = "usage 由 provider 按请求提供；估算费用不等于供应商账单"
         else:
             note = "本任务没有发生模型调用：无 usage 可报"
         return {
+            "task_id": self.task_id,
+            "execution_id": self.execution_id,
             "requests": self.requests,
             "reported_responses": self.reported,
             "missing_responses": self.missing,
@@ -126,28 +222,49 @@ class UsageLedger:
             "cost_estimate": self.cost_estimate,
             "cost_known": self.cost_estimate is not None,
             "note": note,
+            "calls": [record.__dict__ for record in self.calls],
         }
+
+    def seed_from_prior(self, prior: Mapping[str, Any] | None) -> None:
+        """从已落盘的累计值续算。
+
+        恢复、重试与进程重启都**不得清零**任务累计预算；只有真正新建任务才从零开始。
+        """
+        if not isinstance(prior, Mapping):
+            return
+        self.requests += int(prior.get("requests") or 0)
+        self.reported += int(prior.get("reported_responses") or 0)
+        self.prompt_tokens += int(prior.get("prompt_tokens") or 0)
+        self.completion_tokens += int(prior.get("completion_tokens") or 0)
+        self.charged_unknown_tokens += int(prior.get("charged_unknown_tokens") or 0)
 
 
 _ACTIVE_LEDGERS: contextvars.ContextVar[tuple[UsageLedger, ...]] = contextvars.ContextVar(
     "agent_usage_ledgers", default=()
 )
+_ACTIVE_PHASE: contextvars.ContextVar[str] = contextvars.ContextVar("agent_call_phase", default=PHASE_OTHER)
 
 
 def active_ledgers() -> tuple[UsageLedger, ...]:
     return _ACTIVE_LEDGERS.get()
 
 
-@contextmanager
-def usage_scope(ledger: UsageLedger) -> Iterator[UsageLedger]:
-    """在作用域内把每次模型响应的 usage 都记到这个记账器上。
+def active_phase() -> str:
+    return _ACTIVE_PHASE.get()
 
-    支持嵌套：服务层开任务级记账器，调查循环在其内部再开一个"调查部分"的记账器，
-    两者都会收到同一批响应，因此既能看到任务总量，也能看到调查部分的量。
+
+@contextmanager
+def usage_scope(ledger: UsageLedger, *, phase: str = PHASE_OTHER) -> Iterator[UsageLedger]:
+    """在作用域内把每次模型响应都记到这个账本上。
+
+    支持嵌套：服务层开任务级账本，调查循环在其内部再开一个"调查部分"的账本，
+    两者都会收到同一批响应，因此既有任务总量也能分阶段归因。
     作用域跟随 asyncio 任务，不会串到其他任务。
     """
-    token = _ACTIVE_LEDGERS.set(_ACTIVE_LEDGERS.get() + (ledger,))
+    ledger_token = _ACTIVE_LEDGERS.set(_ACTIVE_LEDGERS.get() + (ledger,))
+    phase_token = _ACTIVE_PHASE.set(phase)
     try:
         yield ledger
     finally:
-        _ACTIVE_LEDGERS.reset(token)
+        _ACTIVE_PHASE.reset(phase_token)
+        _ACTIVE_LEDGERS.reset(ledger_token)
