@@ -128,6 +128,15 @@ class FlakyRepository:
 # ---------------------------------------------------------------------------
 
 
+async def _wait_entered(provider: Any, timeout: float = 15.0) -> None:
+    """等待执行真正进入 provider。
+
+    **必须有界**：若任务在到达 provider 之前就结束了（例如超时先触发），
+    无界等待会让整个测试挂死，而不是失败。挂死比失败更难诊断。
+    """
+    await asyncio.wait_for(provider.entered.wait(), timeout=timeout)
+
+
 async def _settle(service: AgentService) -> None:
     """让已登记的后台执行跑完（不关心它抛什么），并让事件循环转几圈。"""
     pending = execution_handles(service)
@@ -164,7 +173,7 @@ async def blocked_background_task(
     """启动一个 background 任务并把它停在生成阶段。"""
     service, flaky = build_service(tmp_path, provider, execution_mode="background")
     view, _ = await service.create_task(complete_request(), CONTEXT)
-    await provider.entered.wait()
+    await _wait_entered(provider)
     return service, flaky, view.task_id
 
 
@@ -352,7 +361,7 @@ def test_cancel_stops_further_tool_scheduling(
         service, _flaky = build_service(tmp_path, provider, execution_mode=execution_mode)
 
         creator = asyncio.create_task(service.create_task(complete_request(), CONTEXT))
-        await provider.entered.wait()
+        await _wait_entered(provider)
         task_id = service._repository.list()[0]["task_id"]
         calls_at_cancel = len(tool_calls)
 
@@ -386,7 +395,7 @@ def test_cancelled_inline_request_does_not_orphan_the_workflow(
         service, _flaky = build_service(tmp_path, provider, execution_mode="inline")
 
         creator = asyncio.create_task(service.create_task(complete_request(), CONTEXT))
-        await provider.entered.wait()
+        await _wait_entered(provider)
         calls_at_abandon = len(tool_calls)
 
         creator.cancel()
@@ -480,10 +489,13 @@ def test_handle_and_health_after_normal_completion(tmp_path: Path) -> None:
 def test_handle_and_health_after_timeout(tmp_path: Path) -> None:
     async def scenario() -> None:
         provider = GatedProvider()  # 永不放行 → 由任务超时终止
-        service, _flaky = build_service(tmp_path, provider, timeout_seconds=0.05)
+        # 超时值必须**大于**"打开检查点 + 启动图 + 走到 provider"的耗时（实测全新检查点库约 0.5 秒）。
+        # 用 0.05 秒时任务会在到达 provider **之前**就超时，用例"停在 provider 调用上再被超时终止"
+        # 的前提不成立；再叠加无界等待就会挂死。
+        service, _flaky = build_service(tmp_path, provider, timeout_seconds=2.0)
         view, _ = await service.create_task(complete_request(), CONTEXT)
         task_id = view.task_id
-        await provider.entered.wait()
+        await _wait_entered(provider)
         await _settle(service)
 
         final = await service.get_task(task_id, CONTEXT)
@@ -500,7 +512,7 @@ def test_handle_and_health_after_workflow_exception(tmp_path: Path) -> None:
         provider = GatedProvider(outcome="raise")
         service, _flaky = build_service(tmp_path, provider)
         view, _ = await service.create_task(complete_request(), CONTEXT)
-        await provider.entered.wait()
+        await _wait_entered(provider)
         await _settle(service)
 
         final = await service.get_task(view.task_id, CONTEXT)

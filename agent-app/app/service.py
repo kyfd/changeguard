@@ -269,6 +269,9 @@ class AgentService:
         # 终态（取消、输入被拒等）不允许借恢复回到执行路径。
         if status not in RESUMABLE_STATUSES:
             raise TaskNotResumable(f"当前状态 {status} 不允许恢复")
+        # 已有执行在跑：直接拒绝，绝不在同一个 thread_id 上再起一次图。
+        if self._has_live_execution(task_id):
+            raise TaskNotResumable("该任务已有执行在进行中，本次恢复未生效，请等待或先取消")
         if request is not None:
             slots = TaskSlots.model_validate(record.get("slots") or {})
             record["slots"] = merge_slot_data(slots, request.model_dump()).model_dump(mode="json")
@@ -280,6 +283,11 @@ class AgentService:
                 notes.append(note)
                 record["clarification_notes"] = notes
         _apply_input_version(record)
+
+        # 下面读检查点是一个 await：期间可能有另一个请求抢先派发。记下此刻的"代际 + 状态"，
+        # 在真正占用执行之前**同步地**再确认一次（理由见下）。
+        expected_execution = record.get("execution_id") or ""
+        expected_status = record.get("status") or ""
 
         checkpoint = await self._inspect_checkpoint(task_id)
         if checkpoint is None:
@@ -299,6 +307,15 @@ class AgentService:
             value = None
         else:
             raise TaskNotResumable("检查点没有待继续的步骤；请重新发起任务")
+
+        # 重新确认 → 落盘 → 占用执行：这一段**不能有 await**。
+        # 否则并发的两次恢复都会看到"还没人占"，于是双双派发，在同一个 thread_id 上并发跑图——
+        # 检查点不是并发安全的共享状态，那不是"最后写入者胜"，而是互相交错写入。
+        latest = self._require(task_id)
+        if (latest.get("execution_id") or "") != expected_execution or (latest.get("status") or "") != expected_status:
+            raise TaskNotResumable("任务已被其他操作接管，本次恢复未生效，请重试")
+        if self._has_live_execution(task_id):
+            raise TaskNotResumable("该任务已有执行在进行中，本次恢复未生效，请等待或先取消")
 
         record["awaiting_input"] = False
         record["status"] = TaskStatus.RUNNING.value
@@ -629,6 +646,11 @@ class AgentService:
         # 新执行意味着重新开始：清掉上一个执行留下的降级记录。
         self._problems.pop(task_id, None)
         return execution_id
+
+    def _has_live_execution(self, task_id: str) -> bool:
+        """该任务是否已有一次**尚未结束**的执行。"""
+        execution = self._executions.get(task_id)
+        return execution is not None and not execution.finished.is_set()
 
     def _owns(self, task_id: str, execution_id: str) -> bool:
         record = self._repository.get(task_id)

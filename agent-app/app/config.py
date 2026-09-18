@@ -65,7 +65,11 @@ class Settings:
     task_store_path: str = "data/agent-tasks.json"
     # LangGraph 检查点（SQLite 单实例）。任务记录仍存 JSON；这里只保存**节点级**图状态，
     # 使中断后能从检查点继续，而不是从头重跑整条流程。
-    checkpoint_path: str = "data/agent-checkpoints.sqlite"
+    #
+    # 留空表示**与任务存储同目录**（默认即 data/agent-checkpoints.sqlite，与固定默认一致）。
+    # 这样"改了任务存储路径"的调用方（尤其是测试）不会继续共用仓库里那一个检查点文件——
+    # 共享同一个 SQLite 文件会在并发打开时产生锁冲突，也会让用例之间互相污染状态。
+    checkpoint_path: str = ""
 
     # 执行模式：
     #   background（默认）—— 接口立即返回，执行交给后台任务，可取消；
@@ -87,6 +91,21 @@ class Settings:
     @property
     def llm_configured(self) -> bool:
         return bool(self.llm_base_url.strip()) and bool(self.llm_api_key.strip())
+
+    @property
+    def checkpoint_file(self) -> str:
+        """解析检查点文件路径。
+
+        `checkpoint_path` 显式配置时以它为准；否则与任务存储放在同一目录，
+        避免"换了任务存储却仍共用默认检查点文件"这一类共享状态问题。
+        """
+        explicit = (self.checkpoint_path or "").strip()
+        if explicit:
+            return explicit
+        store = (self.task_store_path or "").strip()
+        if not store:
+            return ""
+        return str(Path(store).with_name("agent-checkpoints.sqlite"))
 
     @property
     def demo_dir(self) -> Path:

@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.config import Settings
@@ -19,7 +21,7 @@ from app.schemas.drafts import ClarifyRequest, TaskStatus
 from app.service import AgentService, TaskNotFound, TaskNotResumable
 from app.tools.registry import TrustedContext
 from app.workflow.graph import DraftWorkflow
-from tests.conftest import bare_request, complete_request, run
+from tests.conftest import DEMO_DIR, bare_request, complete_request, run
 
 CONTEXT = TrustedContext(user_id="alice", organization_id="org_demo")
 
@@ -215,3 +217,38 @@ def test_cancelled_task_cannot_be_resumed(settings: Settings) -> None:
 
     with pytest.raises(TaskNotResumable):
         run(service.resume(paused.task_id, CONTEXT))
+
+
+# ---------------------------------------------------------------------------
+# 检查点路径：不得共用仓库里的那一个文件
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_file_defaults_next_to_the_task_store(tmp_path: Path) -> None:
+    """未显式配置时检查点与任务存储同目录；显式配置优先。"""
+    derived = Settings(task_store_path=str(tmp_path / "agent-tasks.json"))
+    assert derived.checkpoint_file == str(tmp_path / "agent-checkpoints.sqlite")
+
+    explicit = Settings(
+        task_store_path=str(tmp_path / "agent-tasks.json"),
+        checkpoint_path=str(tmp_path / "custom.sqlite"),
+    )
+    assert explicit.checkpoint_file == str(tmp_path / "custom.sqlite")
+
+
+def test_service_writes_its_checkpoint_next_to_the_task_store(tmp_path: Path) -> None:
+    """换了任务存储路径，检查点也必须跟着走，不再共用默认路径上的同一个文件。
+
+    共用同一个 SQLite 文件会让用例之间互相污染状态，并在并发打开时产生锁冲突。
+    """
+    scoped = Settings(
+        agent_demo_dir=str(DEMO_DIR),
+        task_store_path=str(tmp_path / "tasks.json"),
+        execution_mode="inline",
+        max_revisions=0,
+    )
+    service = AgentService(scoped)
+
+    run(service.create_task(complete_request(), CONTEXT))
+
+    assert (tmp_path / "agent-checkpoints.sqlite").exists(), "检查点应写在任务存储旁边"

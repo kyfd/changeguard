@@ -205,7 +205,8 @@ async def _start_blocked_execution(
     settings = build_settings(tmp_path, execution_mode="background")
     service = AgentService(settings, provider=provider)
     view, _ = await service.create_task(complete_request(), CONTEXT)
-    await provider.entered.wait()
+    # 有界等待：若执行没能走到 provider，这里应当**失败**，而不是把测试挂死。
+    await asyncio.wait_for(provider.entered.wait(), timeout=15.0)
     return service, view.task_id
 
 
