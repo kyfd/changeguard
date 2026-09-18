@@ -158,3 +158,45 @@ def test_resume_endpoint_continues_from_the_interrupt(tmp_path: Path) -> None:
 
     # 不存在或不属于调用方：一律 404，不做存在性探测。
     assert client.post("/api/agent/tasks/task_missing/resume", headers=HEADERS).status_code == 404
+
+
+def test_confirm_endpoint_records_material_confirmation(tmp_path: Path) -> None:
+    """确认接口：记录确认人；重复确认幂等；没有材料时 409；不存在时 404。"""
+    client = build_client(tmp_path)
+    created = client.post(
+        "/api/agent/tasks",
+        headers=HEADERS,
+        json={
+            "requirement": REQUIREMENT,
+            "application": "order-service",
+            "environment": "生产",
+            "database": "postgresql",
+            "table": "orders",
+            "query_sql": SLOW_QUERY,
+            "planned_at": PLANNED_AT.isoformat(),
+            "planned_at_timezone": "Asia/Shanghai",
+            "schema_snapshot": SCHEMA_SNAPSHOT,
+        },
+    )
+    body = created.json()
+    assert body["status"] == "DRAFT_READY", body.get("error")
+    assert body["material_hash"], "存在材料时视图必须给出材料内容摘要"
+    task_id = body["task_id"]
+
+    confirmed = client.post(f"/api/agent/tasks/{task_id}/confirm", headers=HEADERS, json={"note": "已核对"})
+    assert confirmed.status_code == 200
+    records = confirmed.json()["confirmations"]
+    assert len(records) == 1
+    assert records[0]["confirmed_by"] == "alice"
+    assert records[0]["material_hash"] == body["material_hash"]
+    assert confirmed.json()["status"] == "DRAFT_READY", "确认不改变任务状态"
+
+    # 幂等：重复确认不新增记录。
+    again = client.post(f"/api/agent/tasks/{task_id}/confirm", headers=HEADERS)
+    assert again.status_code == 200
+    assert len(again.json()["confirmations"]) == 1
+
+    # 没有可确认材料：409。
+    bare = client.post("/api/agent/tasks", headers=HEADERS, json={"requirement": REQUIREMENT})
+    assert client.post(f"/api/agent/tasks/{bare.json()['task_id']}/confirm", headers=HEADERS).status_code == 409
+    assert client.post("/api/agent/tasks/task_missing/confirm", headers=HEADERS).status_code == 404

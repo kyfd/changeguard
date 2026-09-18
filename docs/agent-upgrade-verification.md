@@ -587,11 +587,77 @@ SQLite **只存 LangGraph 检查点**。因此不存在"从 JSON 迁 SQLite"的�
 
 ---
 
-## 13. 剩余任务
+## 13. P2（PR-B）：材料人工确认与 flaky 修复
+
+### 13.1 材料确认（P2-6）
+
+新增 `Confirmation` 记录与 `POST /api/agent/tasks/{id}/confirm`（仅创建者）。
+
+| 要求 | 实现 |
+| --- | --- |
+| 记录确认人 / 时间 / 材料版本或内容哈希 | `confirmed_by`、`confirmed_organization`、`confirmed_at`、`material_version`(=input_version)、`material_hash`(草案 SQL + 回滚 SQL 的 SHA-256) |
+| **幂等** | 同一人 + 同一版本 + 同一内容重复确认：直接返回，**不新增记录、不重复写事件** |
+| **新修订使旧确认失效** | 草案重新生成（内容哈希变化）或输入/材料版本变化 → 旧确认标 `invalidated_at` + 原因，**保留痕迹**（不物理删除） |
+| **确认 ≠ 审批 ≠ 执行许可** | 确认**不改变任务状态**、不产生任何放行判定；事件文案明示"不构成治理审批，也不代表可在生产执行"；审批与通行证仍只由 Go 治理服务负责 |
+
+`material_hash` 提取到 `app/workflow/state.py`，`graph._signature` 改为调用它（去掉重复实现）。
+
+### 13.2 flaky 修复：启动恢复用例不再依赖 1ms 墙钟
+
+**诊断（先诊断，未用"重跑通过"解释）**：`internal/service/service_test.go` 的
+`TestStartupRecoveryTakesOverExpiredApplyGeneration` 用 **1ms 租约** `ClaimOutbox` 后**立即**
+`CheckpointExperimentOutbox`；`validOutboxLease`（`internal/store/outbox.go:293`）要求
+`now.Before(LockedUntil)`。`-race` 下进程被插桩拖慢/被抢占，两次调用间隔常超过 1ms，
+checkpoint 便返回 `ErrConcurrentWrite`——这是**测试的墙钟假设**，不是被测行为。
+次要问题：断言单次读取 `OutboxCompleted`，而 `CompleteOutbox` 在 `FinalizeExperimentOutbox`
+之后执行（`service.go:1279` vs `:1373`），存在"状态已就绪、outbox 尚未完成"的窗口；
+`countingRunner.runs` 是普通 int。
+
+**修法（修根因）**：
+
+- `internal/store` 新增可注入时间源：`Store.now`（nil 时用 `time.Now`）+ `Store.clock()`；
+  `ClaimOutbox` / `CompleteOutbox` / `RenewOutbox` / `FailOutbox` / `CheckpointExperimentOutbox`
+  / `FinalizeExperimentOutbox` 的租约判定全部走它；新增 `NewMemoryWithClock` 供测试注入。
+- 两个租约用例（service 与 store 各一）改为：**长租约**下 checkpoint 必成功 → 用时间源把租约
+  **确定性地**推到过去 → 再启动恢复。不再有 1ms 租约与 `time.Sleep`。
+- 断言改为**有界轮询**至 `OutboxCompleted`；`countingRunner.runs` 改为 `atomic.Int64`。
+
+本机无法运行 `-race`（Windows 无 C 工具链），因此本机证据是 `-count=50` 的反复运行；
+`-race` 证据由 CI `quality-go`（1.25.x / 1.26.x）提供。
+
+### 13.3 顺带修复的既有缺陷（独立 PR #19）
+
+诊断集成失败时发现：`postgresBackend.usePassport` 的**同消费者重放**分支返回空 payload，
+`Store.UsePassport` 因此跳过 `installPostgresSnapshot`——并发消费中走重放分支的一方会一直把
+该通行证显示为 `ACTIVE`（`ConsumedAt` 为 nil），尽管消费已经成功并提交。已改为返回已提交快照，
+并让多实例用例断言**竞争双方**都看到 `CONSUMED`，使该缺陷不再被调度顺序掩盖。
+该修复为独立 PR（#19，合并 `802f59c`），证据来自 CI `integration` 作业。
+
+### 13.4 本轮命令与结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `python -m pytest -q` | **201 passed**（PR-A 后 193 + 本轮新增 8） |
+| `python evals/run_eval.py --provider deterministic` | **11/11** |
+| `go test ./... -count=1` | 全部包 **ok** |
+| `go test ./internal/service -run TestStartupRecoveryTakesOverExpiredApplyGeneration -count=50` | **ok**（原本偶发） |
+| `go test ./internal/store -run TestExpiredExperimentLeaseIsFencedAfterNewClaim -count=50` | **ok** |
+| `go vet ./...` / `gofmt -l ./internal ./cmd` | clean / clean |
+| `npm test` | 2 passed |
+| 递归 `node --check`（`internal/httpapi/web/**/*.js`） | clean |
+
+### 13.5 未运行（不得当作通过）
+
+`go test -race ./...`（CI `quality-go`）、PostgreSQL/Redis 集成（CI `integration`）、
+Playwright e2e（CI `e2e`）——本机不满足运行条件；真实模型（live）评测 `NOT_RUN`。
+
+---
+
+## 14. 剩余任务
 
 | 阶段 | 状态 | 内容 |
 | --- | --- | --- |
 | P0 | ✅ 完成 | 授权、执行所有权与持久化诚实性、只读工具服务间认证；执行生命周期收尾 |
 | P1 | ✅ 完成 | 重试分层、草案契约、方言边界、补充字段；受约束调查循环；provider 原生动作决策 |
-| P2 | ⏳ **进行中** | PR-A 已完成：检查点持久化、节点级中断与恢复、恢复前重校验、独立进程验收（本节）。**待做**：材料确认记录（确认人/时间/版本或哈希、幂等、新修订失效）、已知 flaky 的 Go 启动恢复测试 |
+| P2 | ✅ 完成 | PR-A：检查点持久化、节点级中断与恢复、恢复前重校验、独立进程验收（§12）；PR-B：材料确认记录（确认人/时间/版本+内容哈希、幂等、新修订失效）与 flaky 修复（§13）。任务书 §P2-8 迁移记为 N/A |
 | P3 | ⬜ 未开始 | 真正生效的评测 `--strategy`/`--provider`、开发/保留集拆分、评分与报告、`/agent/` 工作台与浏览器验收 |

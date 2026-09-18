@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,12 +16,12 @@ type fakeRunner struct{}
 
 type countingRunner struct {
 	targetID string
-	runs     int
+	runs     atomic.Int64
 }
 
 func (r *countingRunner) Run(ctx context.Context, change model.ChangeRequest) model.ExperimentReport {
 	if change.ID == r.targetID {
-		r.runs++
+		r.runs.Add(1)
 	}
 	return fakeRunner{}.Run(ctx, change)
 }
@@ -96,7 +97,11 @@ func TestZeroWorkersLeaveQueuedBusinessWorkUntouched(t *testing.T) {
 }
 
 func TestStartupRecoveryTakesOverExpiredApplyGeneration(t *testing.T) {
-	data := store.NewMemory()
+	// 可控时间源：租约过期必须**确定**发生。此前用 1ms 租约 + 立即 checkpoint，
+	// 在 -race 下进程被插桩拖慢、两次调用间隔超过 1ms，checkpoint 就会返回
+	// ErrConcurrentWrite——那是测试的墙钟假设，不是被测行为。
+	clock := time.Now()
+	data := store.NewMemoryWithClock(func() time.Time { return clock })
 	runner := &countingRunner{}
 	svc := New(data, runner, fakeAnalyzer{})
 	change, err := svc.Create(model.CreateChangeInput{
@@ -114,14 +119,18 @@ func TestStartupRecoveryTakesOverExpiredApplyGeneration(t *testing.T) {
 	if _, err = svc.QueueExperiment(change.ID, "usr_developer"); err != nil {
 		t.Fatal(err)
 	}
-	oldLease, err := data.ClaimOutbox("crashed-worker", time.Millisecond)
+	// NextAttemptAt 由存储以真实时间写入；让可控时钟追上它，避免事件被判成"未到时间"。
+	clock = time.Now()
+	// 长租约：checkpoint 必定在租约内成功，不再依赖 1ms 窗口。
+	oldLease, err := data.ClaimOutbox("crashed-worker", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := data.CheckpointExperimentOutbox(oldLease.ID, "crashed-worker", oldLease.LeaseGeneration, model.OutboxStageApply, oldLease.InputSHA256); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(3 * time.Millisecond)
+	// 确定性地让租约过期，等价于墙钟前进两小时。
+	clock = clock.Add(2 * time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	svc.Start(ctx, 1)
@@ -136,15 +145,23 @@ func TestStartupRecoveryTakesOverExpiredApplyGeneration(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if change.Status != model.StatusWaitingApproval || runner.runs != 1 {
-		t.Fatalf("startup takeover did not rerun one isolated APPLY: status=%s runs=%d", change.Status, runner.runs)
+	if change.Status != model.StatusWaitingApproval || runner.runs.Load() != 1 {
+		t.Fatalf("startup takeover did not rerun one isolated APPLY: status=%s runs=%d", change.Status, runner.runs.Load())
 	}
-	events := data.OutboxByOrganization(change.OrganizationID, true, 0)
+	// CompleteOutbox 发生在 Finalize 之后：单次读取会撞上"状态已就绪、outbox 尚未完成"的
+	// 中间窗口，因此有界轮询到已完成为止，而不是靠一次读取。
 	var recovered model.OutboxEvent
-	for _, event := range events {
-		if event.ID == oldLease.ID {
-			recovered = event
+	settle := time.Now().Add(2 * time.Second)
+	for {
+		for _, event := range data.OutboxByOrganization(change.OrganizationID, true, 0) {
+			if event.ID == oldLease.ID {
+				recovered = event
+			}
 		}
+		if recovered.Status == model.OutboxCompleted || time.Now().After(settle) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if recovered.Status != model.OutboxCompleted || recovered.LeaseGeneration <= oldLease.LeaseGeneration || recovered.AttemptID != oldLease.AttemptID || recovered.ResultDigest == "" {
 		t.Fatalf("unexpected recovered outbox: %+v", recovered)

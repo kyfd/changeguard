@@ -17,10 +17,11 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
-from app.schemas.drafts import ClarifyRequest, CreateTaskRequest, TaskView
+from app.schemas.drafts import ClarifyRequest, ConfirmRequest, CreateTaskRequest, TaskView
 from app.service import (
     AgentService,
     TaskCancelRejected,
+    TaskNotConfirmable,
     TaskNotFound,
     TaskNotResumable,
     TaskStateUnavailable,
@@ -154,3 +155,19 @@ async def resume(task_id: str, request: Request, payload: ClarifyRequest | None 
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except TaskStateUnavailable as error:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+
+
+@router.post("/tasks/{task_id}/confirm", response_model=TaskView)
+async def confirm(task_id: str, request: Request, payload: ConfirmRequest | None = None) -> TaskView:
+    """记录一次人工**材料确认**。
+
+    材料确认 ≠ 治理审批 ≠ 执行许可：这里只记录"谁在什么时候确认了哪一版材料"，
+    不改变放行判定，也不授予执行权利。重复确认同一版本是幂等的。
+    """
+    context = await resolve_context(request)
+    try:
+        return await _service(request).confirm(task_id, context, payload)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
+    except TaskNotConfirmable as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error

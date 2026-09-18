@@ -29,6 +29,7 @@ from app.llm.provider import build_provider
 from app.retrieval.corpus import build_retriever
 from app.schemas.drafts import (
     ClarifyRequest,
+    ConfirmRequest,
     CreateTaskRequest,
     DatabaseKind,
     TaskSlots,
@@ -40,7 +41,7 @@ from app.tools.business import Toolbox
 from app.tools.registry import TrustedContext
 from app.workflow.checkpoint import has_checkpoint, open_checkpointer
 from app.workflow.graph import DraftWorkflow, WorkflowDeps
-from app.workflow.state import event, input_version, merge_slot_data
+from app.workflow.state import event, input_version, material_hash, merge_slot_data
 
 RESUMABLE_STATUSES = {TaskStatus.NEEDS_INFO.value, TaskStatus.FAILED.value, TaskStatus.CHECK_BLOCKED.value}
 
@@ -82,6 +83,10 @@ class TaskStateUnavailable(Exception):
 
     存在的意义是：不能返回一个可能已经过期的视图来冒充"当前状态"。
     """
+
+
+class TaskNotConfirmable(Exception):
+    """当前没有可人工确认的材料（例如尚未生成草案）。"""
 
 
 @dataclass
@@ -304,6 +309,62 @@ class AgentService:
         self._repository.save(record)
         await self._dispatch_or_fail(task_id, resume={"mode": mode, "value": value})
         return self._view(self._require(task_id))
+
+    async def confirm(
+        self, task_id: str, context: TrustedContext, request: ConfirmRequest | None = None
+    ) -> TaskView:
+        """记录一次**人工材料确认**。
+
+        三条边界：
+
+        - 只有创建者能确认，且必须**已有材料**（草案）时才能确认；
+        - 同一人 + 同一材料版本 + 同一内容哈希的重复确认是**幂等**的，不新增记录、不重复写事件；
+        - 材料重新生成（内容哈希变化）或输入/材料版本变化时，旧确认**失效**并保留痕跡。
+
+        它**不是**治理审批，也**不是**执行许可：确认不改变任务状态，也不授予任何执行权利；
+        审批与通行证签发仍只由 Go 治理服务负责。
+        """
+        record = self._authorize(task_id, context)
+        status = record.get("status")
+        if status not in {TaskStatus.DRAFT_READY.value, TaskStatus.CHECK_BLOCKED.value}:
+            raise TaskNotConfirmable(f"当前状态 {status} 没有可确认的材料")
+        draft = record.get("draft") or {}
+        digest = material_hash(str(draft.get("sql") or ""), str(draft.get("rollback_sql") or ""))
+        if not draft or not digest:
+            raise TaskNotConfirmable("没有可确认的材料：草案为空")
+        version = str(record.get("input_version") or "")
+
+        # 幂等：同一人 + 同一版本 + 同一内容已经确认过，就直接返回，不新增记录。
+        for item in record.get("confirmations") or []:
+            if (
+                not item.get("invalidated_at")
+                and item.get("confirmed_by") == context.user_id
+                and item.get("material_version") == version
+                and item.get("material_hash") == digest
+            ):
+                return self._view(record)
+
+        _invalidate_stale_confirmations(record, "材料版本或内容已变化，旧确认失效")
+        confirmations = list(record.get("confirmations") or [])
+        confirmations.append(
+            {
+                "confirmation_id": f"confirm_{uuid.uuid4().hex[:12]}",
+                "confirmed_by": context.user_id,
+                "confirmed_organization": context.organization_id,
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                "material_version": version,
+                "material_hash": digest,
+                "note": ((request.note if request else None) or "").strip(),
+                "invalidated_at": None,
+                "invalidate_reason": None,
+            }
+        )
+        record["confirmations"] = confirmations
+        events = list(record.get("events") or [])
+        events.append(event("confirmed", "材料已由创建者人工确认（不构成治理审批，也不代表可在生产执行）"))
+        record["events"] = events
+        self._repository.save(record)
+        return self._view(record)
 
     async def get_task(self, task_id: str, context: TrustedContext) -> TaskView:
         return self._view(self._authorize(task_id, context))
@@ -706,6 +767,8 @@ class AgentService:
                 "evidence_note": result.get("evidence_note"),
             }
         )
+        # 草案重新生成后，与当前内容不一致的旧确认立即失效（保留痕跡）。
+        _invalidate_stale_confirmations(record, "草案已重新生成，旧确认失效")
         return record
 
     def _build_workflow(self, record: dict[str, Any], checkpointer: Any) -> DraftWorkflow:
@@ -804,6 +867,8 @@ class AgentService:
                 "awaiting_input": bool(record.get("awaiting_input")),
                 "resume_mode": record.get("resume_mode"),
                 "restart_policy": record.get("restart_policy"),
+                "material_hash": _current_material_hash(record) or None,
+                "confirmations": record.get("confirmations") or [],
             }
         )
 
@@ -818,7 +883,7 @@ def _effective_requirement(record: dict[str, Any]) -> str:
 
 
 def _apply_input_version(record: dict[str, Any]) -> None:
-    """重算输入/材料版本；一旦变化，旧草案与旧检查结果即失效。"""
+    """重算输入/材料版本；一旦变化，旧草案、旧检查结果与旧确认即失效。"""
     version = input_version(
         requirement=_effective_requirement(record),
         slots=record.get("slots") or {},
@@ -828,6 +893,31 @@ def _apply_input_version(record: dict[str, Any]) -> None:
         record["draft"] = None
         record["questions"] = []
         record["input_version"] = version
+        # 输入/材料已变：旧的人工确认不再适用于当前材料。
+        _invalidate_stale_confirmations(record, "输入或材料已变更，旧确认失效")
+
+
+def _current_material_hash(record: dict[str, Any]) -> str:
+    """当前材料（草案 SQL + 回滚）的内容摘要；没有草案时为空串。"""
+    draft = record.get("draft") or {}
+    if not draft:
+        return ""
+    return material_hash(str(draft.get("sql") or ""), str(draft.get("rollback_sql") or ""))
+
+
+def _invalidate_stale_confirmations(record: dict[str, Any], reason: str) -> bool:
+    """把与当前材料（版本 + 内容哈希）不一致的确认标记为失效（保留痕跡）。"""
+    version = str(record.get("input_version") or "")
+    digest = _current_material_hash(record)
+    changed = False
+    for item in record.get("confirmations") or []:
+        if item.get("invalidated_at"):
+            continue
+        if item.get("material_version") != version or item.get("material_hash") != digest:
+            item["invalidated_at"] = datetime.now(timezone.utc).isoformat()
+            item["invalidate_reason"] = reason
+            changed = True
+    return changed
 
 
 def _resume_value(record: dict[str, Any]) -> dict[str, Any]:
@@ -857,4 +947,4 @@ async def _delete_thread(saver: Any, thread_id: str) -> None:
         await delete(thread_id)
 
 
-__all__ = ["AgentService", "TaskNotFound", "TaskNotResumable", "DatabaseKind"]
+__all__ = ["AgentService", "TaskNotFound", "TaskNotResumable", "TaskNotConfirmable", "DatabaseKind"]

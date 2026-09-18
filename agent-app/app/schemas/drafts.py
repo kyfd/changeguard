@@ -181,6 +181,30 @@ class TaskEvent(BaseModel):
     detail: str = ""
 
 
+class Confirmation(BaseModel):
+    """材料的人工确认记录。
+
+    **材料确认 ≠ 治理审批 ≠ 执行许可**：它只表示"某个人看过这一版材料"，
+    不参与任何放行判定，也不授权在生产执行。确认人、时间与所确认的材料内容
+    （版本 + 内容哈希）都必须落库，便于事后复核；草案一旦重新生成且内容不同，
+    旧确认即失效（保留痕跡，不物理删除）。
+    """
+
+    confirmation_id: str
+    confirmed_by: str
+    confirmed_organization: str
+    confirmed_at: datetime
+    material_version: str
+    material_hash: str
+    note: str = ""
+    invalidated_at: datetime | None = None
+    invalidate_reason: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.invalidated_at is None
+
+
 class TaskView(BaseModel):
     """对外暴露的任务视图。"""
 
@@ -201,6 +225,9 @@ class TaskView(BaseModel):
     resume_mode: str | None = None
     # 进程重启时的处置策略，便于界面与验收复核。
     restart_policy: str | None = None
+    # 当前材料摘要与人工确认记录（确认 ≠ 审批 ≠ 执行许可）。
+    material_hash: str | None = None
+    confirmations: list[Confirmation] = Field(default_factory=list)
 
 
 class CreateTaskRequest(BaseModel):
@@ -239,6 +266,12 @@ class ClarifyRequest(BaseModel):
     # 自由文本说明。以前这个字段被接收后直接丢弃，用户看不到任何效果；
     # 现在会写入任务记录，并在下一次执行时作为「补充说明」拼进需求文本。
     note: str | None = None
+
+
+class ConfirmRequest(BaseModel):
+    """人工确认材料。只允许附加说明，不能改变材料或放行判定。"""
+
+    note: str | None = Field(default=None, max_length=2000)
 
 
 class ToolResult(BaseModel):

@@ -47,6 +47,17 @@ def input_version(*, requirement: str, slots: Mapping[str, Any], schema_snapshot
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+
+def material_hash(sql: str, rollback_sql: str) -> str:
+    """材料内容摘要（变更 SQL + 回滚 SQL）。
+
+    人工确认记录绑定的是**这份内容**，而不是"某个时间点之后的一切"：
+    草案一旦被重新生成且内容不同，旧确认就应当失效。
+    """
+    payload = f"{sql or ''}\x00{rollback_sql or ''}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 # 追问文案：包含「为什么问」，避免用户不知道要补什么。
 QUESTION_TEMPLATES: dict[str, ClarificationQuestion] = {
     "application": ClarificationQuestion(

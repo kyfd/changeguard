@@ -89,7 +89,9 @@ func TestOutboxLeaseCanBeRenewedOnlyByOwner(t *testing.T) {
 }
 
 func TestExpiredExperimentLeaseIsFencedAfterNewClaim(t *testing.T) {
-	data := NewMemory()
+	// 可控时间源：过期必须是确定的，不依赖 1ms 租约 + sleep 的墙钟窗口。
+	clock := time.Now()
+	data := NewMemoryWithClock(func() time.Time { return clock })
 	change := data.Changes()[0]
 	_, err := data.UpdateChangeWithOutbox(change.ID, func(item *model.ChangeRequest) error {
 		item.Status = model.StatusExperimentQueued
@@ -98,11 +100,13 @@ func TestExpiredExperimentLeaseIsFencedAfterNewClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldLease, err := data.ClaimOutbox("worker-old", time.Millisecond)
+	// NextAttemptAt 由存储以真实时间写入；让可控时钟追上它。
+	clock = time.Now()
+	oldLease, err := data.ClaimOutbox("worker-old", time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(3 * time.Millisecond)
+	clock = clock.Add(2 * time.Minute)
 	newLease, err := data.ClaimOutbox("worker-new", time.Minute)
 	if err != nil {
 		t.Fatal(err)

@@ -22,7 +22,6 @@ START → check_info ──缺失──▶ END（追问）
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -54,7 +53,14 @@ from app.workflow.investigate import (
     build_planner,
     evidence_from_tool_result,
 )
-from app.workflow.state import WorkflowState, build_questions, event, merge_slot_data, slots_from_state
+from app.workflow.state import (
+    WorkflowState,
+    build_questions,
+    event,
+    material_hash,
+    merge_slot_data,
+    slots_from_state,
+)
 
 # 允许模型提供的字段。其余字段一律拒绝，避免模型改写服务端已确认的信息。
 ALLOWED_MODEL_FIELDS = {
@@ -181,8 +187,7 @@ def parse_model_draft(
 
 
 def _signature(draft: Draft) -> str:
-    payload = f"{draft.sql}\x00{draft.rollback_sql}"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return material_hash(draft.sql, draft.rollback_sql)
 
 
 @dataclass
