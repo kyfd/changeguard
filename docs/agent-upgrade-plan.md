@@ -213,3 +213,23 @@ C1 重试相乘、C2 模型自封"已确认"、C3 版本/修订说明、C4/C5 �
 **仍未完成**：模型原生工具选择（provider 未实现 `decide()`，目前只做到"显式报告不可用"
 而不是"真让模型选"）、工具结果摘要哈希、usage 缺失策略、`fixed_workflow` 与
 `bounded_agent` 的同输入对照评测。
+
+### 2026-09-18：P1 模型原生动作决策完成
+
+`InvestigationPlanner.plan` 改为 **async**；`OpenAICompatibleProvider` 实现 `decide()`，
+用原生函数调用真正由模型选择只读工具。白名单 `MODEL_ACTION_TOOLS` 与 `tools/registry.py`
+分开声明，并有"白名单 == 注册表只读工具"的一致性断言兜底：注册表新增写工具不会自动让模型
+获得调用能力。参数必须过 schema 校验，身份字段由服务端注入、模型参数不得覆盖。
+
+验证（本机实测，详见 `docs/agent-upgrade-verification.md` §11.5–§11.6）：
+
+```
+pytest -q                                          183 passed（§11.3 后 161 + 新增 22）
+evals/run_eval.py --provider deterministic         11/11
+go test ./internal/agent ./internal/httpapi ./internal/service -count=1   三个包 ok
+```
+
+**NOT_RUN**：真实模型（live）动作决策与草案质量评测——未配置专用凭据与预算。
+新增 22 项用 `httpx.MockTransport` 模拟端点，验证的是契约与边界，**不是模型质量证明**。
+
+**P1 仍未完成**：`fixed_workflow` 与 `bounded_agent` 的同输入对照评测（属 P3 评测范围）。

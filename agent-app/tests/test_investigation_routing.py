@@ -69,7 +69,7 @@ def bounded(settings: Settings, provider: Any, **overrides: Any) -> AgentService
 
 def use_planner(monkeypatch: pytest.MonkeyPatch, planner: Any) -> None:
     """替换决策者的构造，其余流程保持真实。"""
-    monkeypatch.setattr(graph_module, "build_planner", lambda _settings, _provider: planner)
+    monkeypatch.setattr(graph_module, "build_planner", lambda *_args, **_kwargs: planner)
 
 
 # ---------------------------------------------------------------------------

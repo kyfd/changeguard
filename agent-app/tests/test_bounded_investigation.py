@@ -323,9 +323,9 @@ def test_all_tool_results_are_fed_back_not_only_search_hits() -> None:
     seen: list[list[Any]] = []
 
     class ObservingPlanner(ScriptedPlanner):
-        def plan(self, **kwargs: Any):
+        async def plan(self, **kwargs: Any):
             seen.append(list(kwargs.get("observations") or []))
-            return super().plan(**kwargs)
+            return await super().plan(**kwargs)
 
     loop = build(ObservingPlanner(list(planner._actions)), NonSearchRegistry())
     outcome = run(investigate(loop))
