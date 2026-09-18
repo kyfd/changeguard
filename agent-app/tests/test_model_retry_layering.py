@@ -12,6 +12,7 @@ provider 内部重试 N 次，工作流又用同一个 N 再套一层，于是�
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -49,15 +50,17 @@ VALID_DRAFT = json.dumps(
 class ModelStub:
     """记录调用次数的假模型端点。"""
 
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, content: str | None = None) -> None:
         self.status_code = status_code
+        self.content = content
         self.calls = 0
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
             self.calls += 1
             if self.status_code == 200:
-                return httpx.Response(200, json={"choices": [{"message": {"content": VALID_DRAFT}}]})
+                payload = self.content if self.content is not None else VALID_DRAFT
+                return httpx.Response(200, json={"choices": [{"message": {"content": payload}}]})
             return httpx.Response(self.status_code, json={"error": "stub"})
 
         transport = httpx.MockTransport(handler)
@@ -176,14 +179,14 @@ def test_workflow_does_not_multiply_a_non_retryable_failure(
     assert stub.calls == 1, f"不可重试的失败被重复发送了 {stub.calls} 次"
 
 
-@pytest.mark.parametrize(("llm_attempts", "parse_attempts"), [(2, 1), (3, 1)])
-def test_total_model_calls_stay_within_the_documented_bound(
+@pytest.mark.parametrize(("llm_attempts", "parse_attempts"), [(2, 1), (2, 3), (3, 2)])
+def test_transport_failure_consumes_only_transport_retries(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, llm_attempts: int, parse_attempts: int
 ) -> None:
-    """一次生成的总调用数不超过 `llm_max_attempts × draft_parse_attempts`。
+    """持续 503 时，HTTP 请求数只由**传输层**重试决定，不被解析重试再乘一遍。
 
-    改造前两层共用同一个值，实际是 `llm_max_attempts²`，因此这两个参数化用例
-    在改前会超出文档上限（2→4、3→9）。
+    上一版实测 `llm_max_attempts=2`、`draft_parse_attempts=3` 会发出 6 次请求：
+    可重试的 ModelCallError 被 `continue` 掉，又消耗了一次解析重试。
     """
     stub = ModelStub(503)
     stub.install(monkeypatch)
@@ -193,8 +196,29 @@ def test_total_model_calls_stay_within_the_documented_bound(
     result = run(workflow.run(workflow_state(scoped)))  # type: ignore[arg-type]
 
     assert result["status"] == "FAILED"
-    bound = llm_attempts * parse_attempts
-    assert stub.calls == bound, f"实际 {stub.calls} 次，文档上限 {bound} 次"
+    assert stub.calls == llm_attempts, (
+        f"传输失败只应消耗传输重试：期望 {llm_attempts} 次，实际 {stub.calls} 次"
+    )
+    # 失败类型与实际请求数必须被上报，而不是只能靠猜。
+    assert "类型=status" in (result["error"] or ""), result["error"]
+    assert f"已发出 {llm_attempts} 次请求" in (result["error"] or "")
+    assert parse_attempts >= 1  # 参数参与配置但不放大传输层消耗
+
+
+@pytest.mark.parametrize(("llm_attempts", "parse_attempts"), [(2, 3), (3, 2)])
+def test_unparseable_content_consumes_only_parse_retries(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, llm_attempts: int, parse_attempts: int
+) -> None:
+    """HTTP 成功但内容解析不了时，才消耗解析重试；请求数 = 解析重试次数。"""
+    stub = ModelStub(200, content="这不是 JSON")
+    stub.install(monkeypatch)
+    scoped = configured(settings, llm_max_attempts=llm_attempts, draft_parse_attempts=parse_attempts)
+    workflow = build_workflow(scoped, OpenAICompatibleProvider(scoped))
+
+    result = run(workflow.run(workflow_state(scoped)))  # type: ignore[arg-type]
+
+    assert result["status"] == "FAILED"
+    assert stub.calls == parse_attempts, f"解析重试应恰好用满：期望 {parse_attempts}，实际 {stub.calls}"
 
 
 def test_successful_generation_costs_one_call(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,3 +231,46 @@ def test_successful_generation_costs_one_call(settings: Settings, monkeypatch: p
 
     assert result["status"] == "DRAFT_READY", result.get("error")
     assert stub.calls == 1, "成功的生成不应该产生额外调用"
+
+
+def test_non_retryable_status_costs_one_call_even_with_both_budgets_above_one(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = ModelStub(401)
+    stub.install(monkeypatch)
+    scoped = configured(settings, llm_max_attempts=3, draft_parse_attempts=3)
+    workflow = build_workflow(scoped, OpenAICompatibleProvider(scoped))
+
+    result = run(workflow.run(workflow_state(scoped)))  # type: ignore[arg-type]
+
+    assert result["status"] == "FAILED"
+    assert stub.calls == 1, f"401 不该被任何一层重复发送，实际 {stub.calls} 次"
+
+
+def test_cancellation_stops_further_model_requests(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """取消后不得再发出模型请求。"""
+
+    async def scenario() -> tuple[int, int]:
+        stub = ModelStub(503)
+        stub.install(monkeypatch)
+        scoped = configured(settings, llm_max_attempts=2, draft_parse_attempts=2)
+        workflow = build_workflow(scoped, OpenAICompatibleProvider(scoped))
+        task = asyncio.create_task(workflow.run(workflow_state(scoped)))  # type: ignore[arg-type]
+
+        # 等第一次请求真的发出去。这里等的是**可观测条件**（stub.calls 变化），
+        # 不是固定次数地让出控制权——节点链需要的让步次数不是测试该关心的东西。
+        for _ in range(400):
+            if stub.calls:
+                break
+            await asyncio.sleep(0.005)
+        assert stub.calls >= 1, "取消前应当已经发出过请求"
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        at_cancel = stub.calls
+        for _ in range(20):
+            await asyncio.sleep(0)
+        return at_cancel, stub.calls
+
+    at_cancel, afterwards = run(scenario())
+    assert at_cancel >= 1, "用例本身没跑起来：取消前应当已经发出过请求"
+    assert afterwards == at_cancel, f"取消之后仍在继续发送模型请求：{at_cancel} → {afterwards}"

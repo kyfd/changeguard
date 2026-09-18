@@ -79,6 +79,10 @@ class WorkflowState(TypedDict, total=False):
     evidence: list[dict[str, Any]]
     evidence_note: str | None
 
+    # 调查结论的结构化状态（策略、决策者、停止原因、预算消耗、缺失的必需证据、
+    # 是否阻断）。路由依据它决定是继续生成草案还是终止，而不是只看事件日志。
+    investigation: dict[str, Any]
+
     draft_text: str | None
     draft: dict[str, Any] | None
     draft_signature: str | None

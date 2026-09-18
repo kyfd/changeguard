@@ -77,12 +77,16 @@ class ModelCallError(RuntimeError):
 
     `retryable` 把"值得重试的暂时故障"与"重试也不会变的失败"分开：
     权限拒绝、参数错误、请求体非法，重试多少次都是同一个结果，只会放大成本。
-    上层据此决定是否再试，而不是对所有异常一视同仁地重试。
+
+    `failure_type` 记录失败类型，`requests_sent` 记录该次调用实际发出的 HTTP 请求数，
+    两者都要能被上报——否则"预算消耗了多少"只能靠猜。
     """
 
-    def __init__(self, message: str, *, retryable: bool) -> None:
+    def __init__(self, message: str, *, retryable: bool, failure_type: str, requests_sent: int = 0) -> None:
         super().__init__(message)
         self.retryable = retryable
+        self.failure_type = failure_type
+        self.requests_sent = requests_sent
 
 
 # 只有这些状态码才值得重试：限流、超时与网关/服务端暂时不可用。
@@ -97,6 +101,8 @@ class OpenAICompatibleProvider:
         self._settings = settings
         self.name = "openai-compatible"
         self._semaphore = asyncio.Semaphore(4)  # 并发上限，避免打爆模型侧
+        # 实际发出的 HTTP 请求数。用于如实报告预算消耗，而不是估算。
+        self.requests_sent = 0
 
     def describe(self) -> dict[str, Any]:
         return {"provider": self.name, "model": self._settings.llm_model}
@@ -129,10 +135,13 @@ class OpenAICompatibleProvider:
                 if attempt + 1 < attempts:
                     await asyncio.sleep(0.3 * (attempt + 1))
         if last_error is None:  # pragma: no cover - attempts >= 1 保证不会走到
-            raise ModelCallError("模型调用失败：未发起调用", retryable=False)
+            raise ModelCallError("模型调用失败：未发起调用", retryable=False, failure_type="not_attempted")
+        # 把实际发出的请求数带上：上层需要据此报告真实消耗，而不是估算。
+        last_error.requests_sent = self.requests_sent
         raise last_error
 
     async def _call_once(self, url: str, payload: dict[str, Any]) -> str:
+        self.requests_sent += 1
         try:
             async with httpx.AsyncClient(timeout=self._settings.llm_timeout_seconds) as client:
                 response = await client.post(
@@ -142,24 +151,27 @@ class OpenAICompatibleProvider:
                 )
         except Exception as error:  # noqa: BLE001 - 网络抖动与超时值得重试
             raise ModelCallError(
-                f"模型调用失败（传输层）：{type(error).__name__}: {error}", retryable=True
+                f"模型调用失败（传输层）：{type(error).__name__}: {error}",
+                retryable=True,
+                failure_type="transport",
             ) from error
 
         if response.status_code != 200:
             raise ModelCallError(
                 f"模型返回状态码 {response.status_code}: {response.text[:200]}",
                 retryable=response.status_code in _RETRYABLE_STATUS,
+                failure_type="status",
             )
         try:
             body = response.json()
         except Exception as error:  # noqa: BLE001 - 网关返回非 JSON 可能是暂时性的
-            raise ModelCallError("模型返回的不是合法 JSON", retryable=True) from error
+            raise ModelCallError("模型返回的不是合法 JSON", retryable=True, failure_type="malformed_body") from error
         choices = body.get("choices") or []
         if not choices:
-            raise ModelCallError("模型未返回任何候选结果", retryable=True)
+            raise ModelCallError("模型未返回任何候选结果", retryable=True, failure_type="no_choices")
         content = (choices[0].get("message") or {}).get("content") or ""
         if not content.strip():
-            raise ModelCallError("模型返回了空内容", retryable=True)
+            raise ModelCallError("模型返回了空内容", retryable=True, failure_type="empty_content")
         return content
 
 

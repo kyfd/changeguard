@@ -49,6 +49,7 @@ from app.tools.scan import feedback_lines
 from app.workflow.investigate import (
     BoundedInvestigation,
     PlannerUnavailable,
+    StopReason,
     build_planner,
     evidence_from_tool_result,
 )
@@ -216,7 +217,11 @@ class DraftWorkflow:
             self._route_entry,
             {"needs_info": END, "unsupported": END, "continue": "retrieve_evidence"},
         )
-        builder.add_edge("retrieve_evidence", "generate_draft")
+        builder.add_conditional_edges(
+            "retrieve_evidence",
+            self._route_after_evidence,
+            {"blocked": END, "continue": "generate_draft"},
+        )
         builder.add_edge("generate_draft", "run_check")
         builder.add_conditional_edges(
             "run_check",
@@ -319,9 +324,10 @@ class DraftWorkflow:
 
         strategy = str(getattr(self._deps.settings, "investigation_strategy", "fixed_workflow") or "").lower()
         if strategy == "bounded_agent":
-            evidence, notes, trace = await self._investigate(state, slots, registry)
+            evidence, notes, investigation, trace = await self._investigate(state, slots, registry)
         else:
             evidence, notes = await self._fixed_retrieval(query, registry)
+            investigation = {"strategy": "fixed_workflow", "planner": "fixed", "blocked": False}
             trace = ""
 
         events = list(state.get("events") or [])
@@ -333,7 +339,24 @@ class DraftWorkflow:
         if not evidence:
             # 找不到依据必须明说，不能生成虚假引用。
             events.append(event("retrieve_evidence", "没有可引用的规范或案例片段，草案将标注依据不足"))
-        return {"evidence": [item.model_dump(mode="json") for item in evidence], "evidence_note": note, "events": events}
+
+        payload: dict[str, Any] = {
+            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "evidence_note": note,
+            "events": events,
+            "investigation": investigation,
+        }
+        if investigation.get("blocked"):
+            # 调查结论**真正控制工作流**：由条件路由把状态定成终态并跳过草稿生成，
+            # 而不是只写一句"循环停止了"然后照常产出草案。
+            payload["status"] = investigation["status"]
+            if investigation["status"] == TaskStatus.FAILED.value:
+                # NEEDS_INFO 是"等待用户补充"，不是错误；把 error 留空以免界面把它显示成失败。
+                payload["error"] = investigation.get("block_reason")
+            if investigation.get("questions"):
+                payload["questions"] = investigation["questions"]
+            events.append(event("retrieve_evidence", f"调查未通过：{investigation.get('block_reason')}"))
+        return payload
 
     async def _fixed_retrieval(self, query: str, registry: Any) -> tuple[list[EvidenceRef], list[str]]:
         """现有的固定检索顺序。保留为默认策略与回退路径。"""
@@ -351,13 +374,29 @@ class DraftWorkflow:
 
     async def _investigate(
         self, state: WorkflowState, slots: TaskSlots, registry: Any
-    ) -> tuple[list[EvidenceRef], list[str], str]:
-        """走受约束调查循环。预算、空转与完成条件都由代码强制。"""
+    ) -> tuple[list[EvidenceRef], list[str], dict[str, Any], str]:
+        """走受约束调查循环，并把结论整理成**结构化状态**供路由使用。"""
         try:
             planner = build_planner(self._deps.settings, self._deps.provider)
         except PlannerUnavailable as error:
-            # 显式报告不可用，而不是悄悄退回规则却仍把它说成"模型的选择"。
-            return [], [str(error)], f"调查循环未启动：{error}"
+            # 明确失败：既不能悄悄继续生成，也不能用规则顶替并说成"模型的选择"。
+            reason = f"调查循环未启动：{error}"
+            return (
+                [],
+                [str(error)],
+                {
+                    "strategy": "bounded_agent",
+                    "planner": "unavailable",
+                    "stop_reason": StopReason.PLANNER_UNAVAILABLE.value,
+                    "blocked": True,
+                    "status": TaskStatus.FAILED.value,
+                    "block_reason": reason,
+                    "questions": [],
+                },
+                # 决策者的身份要留在轨迹里：unavailable 就是 unavailable，不写成 rule。
+                f"调查循环：planner=unavailable；stop={StopReason.PLANNER_UNAVAILABLE.value}；{reason}",
+            )
+
         loop = BoundedInvestigation(
             planner=planner,
             registry=registry,
@@ -371,10 +410,49 @@ class DraftWorkflow:
             slots=slots,
             schema_snapshot=state.get("schema_snapshot", ""),
         )
-        notes = list(outcome.report.notes)
-        if outcome.report.missing_required:
-            notes.append("必需证据仍缺失：" + "、".join(outcome.report.missing_required))
-        return outcome.evidence, notes, f"调查循环：{outcome.report.summary()}"
+        report = outcome.report
+        notes = list(report.notes)
+        investigation: dict[str, Any] = {
+            "strategy": "bounded_agent",
+            "planner": report.planner,
+            "stop_reason": report.stop_reason,
+            "rounds": report.rounds,
+            "tool_calls": report.tool_calls,
+            "missing_required": list(report.missing_required),
+            "blocked": False,
+        }
+
+        if report.clarification_requests:
+            # 决策者要求补充信息 → 进入 NEEDS_INFO，用户补充后可继续推进。
+            investigation.update(
+                {
+                    "blocked": True,
+                    "status": TaskStatus.NEEDS_INFO.value,
+                    "block_reason": "调查需要补充信息：" + "；".join(report.clarification_requests),
+                    "questions": [
+                        item.model_dump(mode="json")
+                        for item in build_questions([], list(report.clarification_requests))
+                    ],
+                }
+            )
+        elif report.missing_required:
+            # 必需证据缺失不得进入草稿生成——那会产出一份看起来可用的草案。
+            investigation.update(
+                {
+                    "blocked": True,
+                    "status": TaskStatus.FAILED.value,
+                    "block_reason": "必需证据缺失，未生成草案：" + "、".join(report.missing_required),
+                    "questions": [],
+                }
+            )
+            notes.append("必需证据仍缺失：" + "、".join(report.missing_required))
+        return outcome.evidence, notes, investigation, f"调查循环：{report.summary()}"
+
+    def _route_after_evidence(self, state: WorkflowState) -> str:
+        investigation = state.get("investigation") or {}
+        if investigation.get("blocked"):
+            return "blocked"
+        return "continue"
 
     async def _generate_draft(self, state: WorkflowState) -> dict[str, Any]:
         slots = slots_from_state(state)
@@ -412,15 +490,21 @@ class DraftWorkflow:
                     revision_notes=list(request.check_feedback),
                 )
             except ModelCallError as error:
-                failures.append(f"第 {attempt + 1} 次尝试失败：{error}")
-                if not error.retryable:
-                    # 权限拒绝、参数错误这类失败，重试只会得到同样的结果，
-                    # 所以立刻停下，而不是把成本再乘一遍。
-                    break
+                # provider 已经用尽**它自己的**传输重试预算。工作流的解析重试只针对
+                # "拿到了文本但内容不合格"，因此这里立即结束本次生成，不再消耗解析次数。
+                # 之前这里写的是 continue，等于把传输重试又乘了一遍：
+                # llm_max_attempts=2、draft_parse_attempts=3 时实测发出 6 次 HTTP 请求。
+                failures.append(
+                    f"模型调用失败（类型={error.failure_type}，已发出 {error.requests_sent} 次请求）：{error}"
+                )
+                break
+            except DraftParseError as error:
+                # 只有这一种失败才消耗解析重试：确实拿到了文本，但解析不出合格草案。
+                failures.append(f"第 {attempt + 1} 次尝试失败（解析）：{error}")
                 continue
-            except Exception as error:  # noqa: BLE001 - 模型输出不可信，任何异常都要转成明确失败
-                failures.append(f"第 {attempt + 1} 次尝试失败：{error}")
-                continue
+            except Exception as error:  # noqa: BLE001 - 未知异常不做重试，避免掩盖真实原因并放大成本
+                failures.append(f"第 {attempt + 1} 次尝试失败（未知）：{type(error).__name__}: {error}")
+                break
 
             events.append(event("generate_draft", f"生成草案 v{revisions + 1}"))
             return {

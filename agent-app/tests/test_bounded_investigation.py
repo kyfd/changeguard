@@ -262,7 +262,12 @@ def test_bounded_agent_strategy_produces_a_draft_and_reports_its_trace(settings:
 def test_bounded_agent_reports_planner_unavailable_instead_of_faking_a_model_decision(
     settings: Settings,
 ) -> None:
-    """要求模型决策但 provider 不具备该能力时：明确报告未启动，且不说成是模型的选择。"""
+    """要求模型决策但 provider 不具备该能力时：明确失败，且不产出草案。
+
+    注意这条断言此前写的是"状态仍是 DRAFT_READY 且草案为空"——那等于把被审核的缺陷
+    当成了期望行为（决策者不可用却照常走完生成）。现在断言的是正确结果：
+    **明确失败、没有草案、没有进入生成**。
+    """
     scoped = replace(
         settings, investigation_strategy="bounded_agent", investigation_planner="provider", max_revisions=0
     )
@@ -270,9 +275,8 @@ def test_bounded_agent_reports_planner_unavailable_instead_of_faking_a_model_dec
 
     view, _ = run(service.create_task(complete_request(), CONTEXT))
 
+    assert view.status is TaskStatus.FAILED, f"决策者不可用必须明确失败，实际 {view.status}"
+    assert view.draft is None, "不得在决策者不可用时产出草案"
     details = " ".join(item.detail for item in view.events)
-    assert "调查循环未启动" in details
-    assert "decide" in details
-    # 没有可引用片段时必须如实标注，而不是装作调查过了。
-    assert view.status in {TaskStatus.DRAFT_READY, TaskStatus.CHECK_BLOCKED}
-    assert (view.draft is not None) and not view.draft.evidence
+    assert "planner=unavailable" in details, "必须标明决策者不可用，而不是写成规则或模型"
+    assert "decide" in (view.error or ""), view.error

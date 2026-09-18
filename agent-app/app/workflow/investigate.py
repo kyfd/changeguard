@@ -111,6 +111,9 @@ class InvestigationReport:
     tool_calls: int = 0
     called_tools: list[str] = field(default_factory=list)
     missing_required: list[str] = field(default_factory=list)
+    # 决策者要求用户补充信息的原文。必须结构化带出来，供工作流转成追问；
+    # 塞进 notes 再靠解析字符串取回是不可靠的。
+    clarification_requests: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -289,6 +292,7 @@ class BoundedInvestigation:
                 break
             if isinstance(action, AskUser):
                 report.stop_reason = StopReason.INSUFFICIENT_EVIDENCE.value
+                report.clarification_requests.append(action.reason)
                 notes.append(f"决策者要求补充信息：{action.reason}")
                 break
 
