@@ -187,6 +187,8 @@ class AgentService:
             ),
             "awaiting_input": False,
             "resume_count": 0,
+            # 实际执行策略：工作台要如实展示，而不是让用户以为永远是固定流程。
+            "strategy": self._settings.investigation_strategy,
         }
         self._repository.save(record)
         await self._dispatch_or_fail(record["task_id"])
@@ -756,6 +758,7 @@ class AgentService:
             return record
 
         record["awaiting_input"] = False
+        investigation = result.get("investigation") or {}
         record.update(
             {
                 "status": result.get("status", TaskStatus.FAILED.value),
@@ -765,6 +768,10 @@ class AgentService:
                 "revisions": int(result.get("revisions") or 0),
                 "error": result.get("error"),
                 "evidence_note": result.get("evidence_note"),
+                # 调查轨迹与预算原样落库，供工作台展示"实际执行了什么、为什么停下"。
+                "investigation": investigation or record.get("investigation"),
+                "strategy": investigation.get("strategy") or record.get("strategy"),
+                "usage": investigation.get("usage") or record.get("usage"),
             }
         )
         # 草案重新生成后，与当前内容不一致的旧确认立即失效（保留痕跡）。
@@ -850,8 +857,7 @@ class AgentService:
             planned_at_timezone=request.planned_at_timezone,
         )
 
-    @staticmethod
-    def _view(record: dict[str, Any]) -> TaskView:
+    def _view(self, record: dict[str, Any]) -> TaskView:
         return TaskView.model_validate(
             {
                 "task_id": record["task_id"],
@@ -869,6 +875,9 @@ class AgentService:
                 "restart_policy": record.get("restart_policy"),
                 "material_hash": _current_material_hash(record) or None,
                 "confirmations": record.get("confirmations") or [],
+                "strategy": record.get("strategy") or self._settings.investigation_strategy,
+                "investigation": record.get("investigation"),
+                "usage": record.get("usage"),
             }
         )
 

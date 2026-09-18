@@ -18,7 +18,8 @@ const STATUS_META = {
   RECEIVED: { label: "已接收 · 排队中", tone: "info" },
   NEEDS_INFO: { label: "需要补充信息", tone: "warn" },
   RUNNING: { label: "生成中", tone: "info" },
-  DRAFT_READY: { label: "草案已生成 · 待人工确认", tone: "neutral" },
+  // "待人工确认"必须和"排队中/生成中"在视觉上区分开：它是本轮唯一需要人做决定的时刻。
+  DRAFT_READY: { label: "草案已生成 · 待人工确认", tone: "confirm" },
   CHECK_BLOCKED: { label: "确定性检查未通过或未完成 · 已停止", tone: "danger" },
   INPUT_REJECTED: { label: "输入被拒绝", tone: "danger" },
   FAILED: { label: "失败", tone: "danger" },
@@ -32,6 +33,25 @@ const CHECK_META = {
   FAILED: { label: "检查失败 —— 不得视为通过", badge: "badge-danger", note: "扫描未成功完成，结论不可用。失败不等于没有问题。" },
 };
 
+// 停止原因用可读文案展示：它回答"为什么停下"，不该只留一个枚举值。
+const STOP_REASON_LABELS = {
+  EVIDENCE_SUFFICIENT: "证据足够",
+  INSUFFICIENT_EVIDENCE: "证据不足",
+  ROUNDS_EXHAUSTED: "轮次用尽",
+  TOOL_CALLS_EXHAUSTED: "工具调用用尽",
+  NO_PROGRESS: "无进展（重复调用）",
+  PLANNER_UNAVAILABLE: "决策者不可用",
+  PLANNER_FAILED: "决策者未能给出可执行动作",
+  TOOL_FAILED: "工具失败",
+};
+
+const TOOL_KIND_LABELS = {
+  search: "检索",
+  material: "材料",
+  timeout: "超时",
+  generic: "其他",
+};
+
 const CLARIFY_FIELDS = [
   { name: "application", label: "应用", type: "text", placeholder: "order-service" },
   { name: "environment", label: "环境", type: "text", placeholder: "生产" },
@@ -42,12 +62,18 @@ const CLARIFY_FIELDS = [
   { name: "table", label: "表名", type: "text", placeholder: "orders" },
   { name: "query_sql", label: "触发查询 SQL", type: "textarea", placeholder: "慢查询原文" },
   { name: "planned_at", label: "计划时间", type: "datetime-local" },
+  { name: "planned_at_timezone", label: "时区", type: "text", placeholder: "Asia/Shanghai" },
+  {
+    name: "schema_snapshot", label: "表结构快照", type: "textarea",
+    placeholder: "粘贴字段列表或 CREATE TABLE。只使用导入的快照，不接生产库实时探索。",
+  },
 ];
 
 const state = {
   authStatus: null,
   session: null,
   agentEnabled: true,
+  health: null,
   task: null,
   timer: null,
   busy: false,
@@ -86,6 +112,7 @@ function badgeClass(tone) {
   if (tone === "ok") return "ok";
   if (tone === "warn") return "warn";
   if (tone === "danger") return "danger";
+  if (tone === "confirm") return "confirm";
   if (tone === "info" || tone === "neutral") return "info";
   return "muted";
 }
@@ -207,28 +234,45 @@ async function refreshHealth() {
   const text = $("healthText");
   try {
     const health = await api("/api/agent/healthz");
+    state.health = health;
     // 健康检查里的键是 provider.provider（见 agent-app/app/llm/provider.py 的 describe()）。
     const provider = health.provider || {};
     const realModel = Boolean(provider.llm_configured);
-    dot.className = "dot " + (realModel ? "ok" : "bad");
-    text.textContent = realModel
-      ? `${provider.model || "已配置模型"} · 语料 ${health.knowledge_chunks} 片`
-      : "确定性生成器（未配置模型）";
+    const degraded = health.status === "degraded";
+    dot.className = "dot " + (degraded || !realModel ? "bad" : "ok");
+    if (degraded) {
+      text.textContent = "存储降级";
+    } else {
+      text.textContent = realModel
+        ? `${provider.model || "已配置模型"} · 语料 ${health.knowledge_chunks} 片`
+        : "确定性生成器（未配置模型）";
+    }
     $("healthChip").title = [
       `provider: ${provider.provider || "unknown"}`,
       `模型: ${provider.model || "unknown"}`,
       `模型已配置: ${realModel ? "是" : "否"}`,
+      `服务状态: ${health.status || "unknown"}`,
       `检索: ${health.retriever || "unknown"}`,
       `语料片段: ${health.knowledge_chunks}`,
       `运行中任务: ${health.running_tasks}`,
+      `未落盘任务: ${(health.unpersisted_tasks || []).length}`,
+      health.degraded_reason ? `降级原因: ${health.degraded_reason}` : "降级原因: 无",
       "未配置模型时使用确定性生成器：这是可运行状态，不是残缺状态，但也不是真实模型的起草质量。",
     ].join("\n");
   } catch (error) {
     dot.className = "dot bad";
-    text.textContent = error.status === 503 ? "未启用" : "服务不可达";
-    if (error.status === 503) {
+    // 503 有两种含义，必须靠**错误码**区分，不能只看状态码：
+    //   - 治理代理在下游未配置时返回 SERVICE_UNAVAILABLE：功能没开，需要配置后重启；
+    //   - 应用层 503 表示"本次操作未生效、可重试"（例如状态未能落盘）。
+    // 把后者当成前者，一次存储抖动就会被误诊为"功能没启用"并禁用整个面板。
+    if (error.status === 503 && error.code === "SERVICE_UNAVAILABLE") {
+      text.textContent = "未启用";
       markAgentDisabled(error.message);
+    } else if (error.status === 503) {
+      text.textContent = "服务暂时不可用";
+      showError("变更准备服务暂时不可用：" + error.message, "该操作未生效，可稍后重试；这不代表功能未启用。");
     } else {
+      text.textContent = "服务不可达";
       showError("无法连接变更准备服务：" + error.message);
     }
   }
@@ -326,6 +370,37 @@ async function cancelTask() {
 /** 重试：对可恢复状态重新执行一次（服务端会重置为 RECEIVED 并重新调度）。 */
 async function retryTask() {
   await clarify({});
+}
+
+/** 从检查点恢复：由服务端重新校验归属与输入版本后，从中断点继续。 */
+async function resumeTask() {
+  if (!state.task || state.busy) return;
+  state.busy = true;
+  clearError();
+  try {
+    const task = await api(`/api/agent/tasks/${state.task.task_id}/resume`, { method: "POST" });
+    resetEdits();
+    adoptTask(task);
+  } catch (error) {
+    handleActionError(error);
+  } finally {
+    state.busy = false;
+  }
+}
+
+/** 人工确认材料：只记录"谁确认了哪一版材料"，不构成审批，也不授予执行许可。 */
+async function confirmMaterial() {
+  if (!state.task || state.busy) return;
+  state.busy = true;
+  clearError();
+  try {
+    const task = await api(`/api/agent/tasks/${state.task.task_id}/confirm`, { method: "POST", body: {} });
+    adoptTask(task);
+  } catch (error) {
+    handleActionError(error);
+  } finally {
+    state.busy = false;
+  }
 }
 
 function handleActionError(error) {
@@ -471,13 +546,21 @@ function renderConversation() {
 
   blocks.push(renderTimeline(task));
 
+  const checkpointResumable = Boolean(task.awaiting_input) || task.restart_policy === "checkpoint_available";
+  const actions = [];
   if (ACTIVE.has(task.status)) {
-    blocks.push(`<div class="sql-actions"><button class="button button-small button-danger" type="button" id="cancelButton">停止</button></div>`);
+    actions.push('<button class="button button-small button-danger" type="button" id="cancelButton">停止</button>');
   }
-
   if (RESUMABLE.has(task.status)) {
-    blocks.push(`<div class="sql-actions"><button class="button button-small" type="button" id="retryButton">重新执行一次</button></div>`);
+    // 有检查点时是"从检查点恢复"（从等待点续跑），没有时才是"重新执行一次"。
+    // 两者不能混为一谈：把重跑说成续跑是不诚实的。
+    actions.push(
+      checkpointResumable
+        ? '<button class="button button-small" type="button" id="resumeButton">从检查点恢复</button>'
+        : '<button class="button button-small" type="button" id="retryButton">重新执行一次</button>'
+    );
   }
+  if (actions.length) blocks.push(`<div class="sql-actions">${actions.join("")}</div>`);
 
   host.innerHTML = blocks.join("");
 
@@ -486,6 +569,9 @@ function renderConversation() {
 
   const retryButton = $("retryButton");
   if (retryButton) retryButton.addEventListener("click", retryTask);
+
+  const resumeButton = $("resumeButton");
+  if (resumeButton) resumeButton.addEventListener("click", resumeTask);
 
   wireQuestionForm();
 }
@@ -508,11 +594,13 @@ function renderQuestions(task) {
     } else {
       control = `<input data-field="${esc(question.field)}" id="${inputName}" type="text" placeholder="${esc((field && field.placeholder) || "")}">`;
     }
+    const examples = question.examples || [];
     return `
       <label class="field">
-        <span>${esc(label)}</span>
+        <span>${esc(question.question || label)}</span>
         ${control}
         <span class="note-inline">${esc(question.reason || "")}</span>
+        ${examples.length ? `<span class="note-inline">例如：${esc(examples.join("、"))}</span>` : ""}
       </label>
     `;
   }).join("");
@@ -672,6 +760,7 @@ function renderDraft() {
 
   parts.push(renderAssumptions(draft));
   parts.push(renderAdvice(draft));
+  parts.push(renderConfirmation(task));
 
   if ((draft.revision_notes || []).length) {
     parts.push(`
@@ -722,6 +811,9 @@ function renderDraft() {
       renderEvidence();
     });
   }
+
+  const confirmButtonEl = $("confirmButton");
+  if (confirmButtonEl) confirmButtonEl.addEventListener("click", confirmMaterial);
 }
 
 /** SQL 一改，旧检查结果必须立刻标为失效，而不是继续显示为当前结论。 */
@@ -770,6 +862,141 @@ function renderAdvice(draft) {
   `;
 }
 
+/** 材料确认：与"模型建议""确定性检查""治理审批"三者必须一眼可区分。 */
+function renderConfirmation(task) {
+  if (!task.draft) return "";
+  const records = task.confirmations || [];
+  const currentHash = task.material_hash || "";
+  const confirmedCurrent = records.some((item) => !item.invalidated_at && item.material_hash === currentHash);
+
+  const list = records.length
+    ? `<div class="stack">${records.map((item) => {
+        const invalidated = Boolean(item.invalidated_at);
+        return `
+          <div class="confirm-item${invalidated ? " confirm-stale" : ""}">
+            <div class="confirm-head">
+              <span class="badge ${invalidated ? "badge-muted" : "badge-confirm"}">${invalidated ? "已失效" : "有效"}</span>
+              <span class="note-inline">${esc(formatDate(item.confirmed_at))} · ${esc(item.confirmed_by)}</span>
+            </div>
+            ${item.note ? `<p>${esc(item.note)}</p>` : ""}
+            <div class="evidence-meta">
+              <span>材料版本 ${esc((item.material_version || "").slice(0, 12))}</span>
+              <span>内容哈希 ${esc((item.material_hash || "").slice(0, 12))}</span>
+            </div>
+            ${invalidated ? `<p class="note-inline">失效原因：${esc(item.invalidate_reason || "材料已变化")}</p>` : ""}
+          </div>
+        `;
+      }).join("")}</div>`
+    : `<p class="note-inline">还没有人工确认记录。确认只表示"有人看过这一版材料"，不构成审批。</p>`;
+
+  const button = confirmedCurrent
+    ? '<button class="button button-small" type="button" id="confirmButton" disabled>当前材料已确认</button>'
+    : '<button class="button button-small button-primary" type="button" id="confirmButton">确认这一版材料</button>';
+
+  return `
+    <article class="card">
+      <div class="card-title">
+        <span>材料确认</span>
+        <span class="badge badge-confirm">人工确认 ≠ 治理审批 ≠ 执行许可</span>
+      </div>
+      <p class="note-inline">这里只记录"谁在什么时候确认了哪一版材料（含内容哈希）"。
+      它<strong>不改变放行判定</strong>，也<strong>不授予任何执行权限</strong>；审批与通行证签发由 ChangeGuard 治理服务完成。
+      草案一旦重新生成且内容不同，旧确认会失效并保留痕迹。</p>
+      ${list}
+      <div class="sql-actions">${button}</div>
+    </article>
+  `;
+}
+
+/** 执行轨迹与预算：实际用了什么策略、为什么停下、花了多少。 */
+function renderTrajectory(task) {
+  const investigation = task.investigation || null;
+  const strategy = task.strategy || (investigation && investigation.strategy) || "unknown";
+  const usage = task.usage || (investigation && investigation.usage) || null;
+  const observations = (investigation && investigation.tool_observations) || [];
+
+  const usageText = !usage
+    ? "未知（provider 未提供）"
+    : usage.known
+      ? `prompt ${usage.prompt_tokens} · completion ${usage.completion_tokens}`
+      : "unknown（provider 未提供 token 用量；缺失不填 0）";
+
+  const items = observations.length
+    ? observations.map((item) => `
+        <div class="check-item">
+          <span class="check-code">${esc(item.tool)}</span>
+          <span class="check-body">
+            <span>
+              ${item.ok ? '<span class="badge badge-ok">成功</span>' : '<span class="badge badge-danger">失败</span>'}
+              <span class="note-inline">${esc(TOOL_KIND_LABELS[item.kind] || item.kind || "其他")}${item.data_version ? " · v" + esc(item.data_version) : ""}</span>
+            </span>
+            ${(item.summary || item.error) ? `<span class="check-suggestion">${esc(item.summary || item.error)}</span>` : ""}
+          </span>
+        </div>
+      `).join("")
+    : `<p class="note-inline">本轮没有工具调用观察。</p>`;
+
+  return `
+    <article class="card card-flat">
+      <div class="card-title">
+        <span>执行轨迹与预算</span>
+        <span class="badge badge-muted">策略 ${esc(strategy)}</span>
+      </div>
+      <dl class="kv">
+        <dt>决策者</dt><dd>${esc((investigation && investigation.planner) || "fixed")}</dd>
+        <dt>停止原因</dt><dd>${esc(STOP_REASON_LABELS[(investigation && investigation.stop_reason)] || (investigation && investigation.stop_reason) || "-")}</dd>
+        <dt>轮次 / 工具调用</dt><dd>${esc((investigation && investigation.rounds) || 0)} / ${esc((investigation && investigation.tool_calls) || 0)}</dd>
+        <dt>预算（token）</dt><dd>${esc(usageText)}</dd>
+      </dl>
+      ${investigation && (investigation.missing_required || []).length
+        ? `<p class="tone-danger"><strong>仍缺的必需证据：</strong>${esc(investigation.missing_required.join("；"))}</p>`
+        : ""}
+      <div class="stack">${items}</div>
+      <p class="note-inline">工具结果是<strong>不可信数据</strong>，这里只展示有界摘要，不会被执行；也不记录模型思维链。</p>
+    </article>
+  `;
+}
+
+/** 把"治理审批"作为独立一栏显式说明：工作台不做审批，也不产生执行许可。 */
+function renderGovernanceBoundary() {
+  return `
+    <article class="card card-flat">
+      <div class="card-title"><span>治理审批</span><span class="badge badge-muted">不在此处</span></div>
+      <p class="note-inline">审批、制品摘要、通行证签发与原子消费都由 <strong>ChangeGuard 治理服务</strong>完成。
+      这个工作台只准备材料，<strong>不产生审批结论，也不产生执行许可</strong>。材料确认只是"有人看过这份材料"。</p>
+    </article>
+  `;
+}
+
+/** 存储降级与模型不可用必须可见，且不能与"功能未启用"混为一谈。 */
+function renderServiceStatus() {
+  const health = state.health;
+  if (!health) return "";
+  const blocks = [];
+  const provider = health.provider || {};
+
+  if (health.status === "degraded") {
+    const tasks = health.unpersisted_tasks || [];
+    blocks.push(`
+      <article class="card card-danger">
+        <div class="card-title"><span>存储降级</span><span class="badge badge-danger">degraded</span></div>
+        <p>${esc(health.degraded_reason || "存在未能落盘的执行结果，存储可能不可用。")}</p>
+        ${tasks.length ? `<p class="note-inline">未落盘任务：${esc(tasks.join("、"))}</p>` : ""}
+        <p class="note-inline">这不是"功能未启用"：服务仍在运行，只是结果暂时未能落盘，请稍后重试该操作。</p>
+      </article>
+    `);
+  }
+  if (!provider.llm_configured) {
+    blocks.push(`
+      <article class="card card-warn">
+        <div class="card-title"><span>模型不可用</span><span class="badge badge-warn">确定性生成器</span></div>
+        <p>当前使用确定性生成器：这是可运行状态，不是残缺状态，但不代表真实模型的起草质量。</p>
+      </article>
+    `);
+  }
+  return blocks.join("");
+}
+
 /* ---------- 右栏：证据与检查 ---------- */
 
 function renderEvidence() {
@@ -784,6 +1011,8 @@ function renderEvidence() {
   const draft = task.draft;
   const parts = [];
 
+  parts.push(renderServiceStatus());
+  parts.push(renderTrajectory(task));
   if (draft) {
     parts.push(renderCheck(draft));
     parts.push(renderEvidenceList(draft));
@@ -792,6 +1021,7 @@ function renderEvidence() {
   }
 
   parts.push(renderShadowNotice());
+  parts.push(renderGovernanceBoundary());
   parts.push(renderProvenance());
 
   host.innerHTML = parts.join("");

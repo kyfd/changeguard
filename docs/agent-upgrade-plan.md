@@ -307,3 +307,30 @@ go test ./... -count=1                全部 ok
 ```
 
 下一步：PR-D（工作台展示与操作、四态区分、真实浏览器验收）。
+
+### 2026-09-18：P3（PR-D）工作台与浏览器验收完成
+
+`TaskView` 新增 `strategy` / `investigation` / `usage`；调查结果把决策者、停止原因、轮次与工具调用、
+缺失必需证据、usage 与**工具结果摘要**一并带出。工作台新增「执行轨迹与预算」卡与「材料确认」卡，
+追问表单显示问题原文与示例并补齐时区/快照字段；恢复按钮在有检查点时是「从检查点恢复」，
+否则才是「重新执行一次」——不把重跑说成续跑。
+
+**四态一眼可分**：模型建议（灰·不参与放行判定）/ 确定性检查（绿红·仅本地静态扫描）/
+材料确认（专属紫色·人工确认 ≠ 治理审批 ≠ 执行许可）/ 治理审批（独立一栏·不在此处）。
+`DRAFT_READY`「待人工确认」改为专属色，不再与排队中同为蓝色。存储降级与模型不可用现在会显示，
+并修正 `refreshHealth` 的 503 判别（先看 `error.code`，不再把落盘抖动误诊为"功能未开"）。
+
+验证（本机实测，详见 `docs/agent-upgrade-verification.md` §15）：
+
+```
+pytest -q                                          210 passed
+run_eval.py --provider scripted --strategy bounded_agent --split dev   14/14
+go test ./... -count=1 / go vet / gofmt            ok / clean / clean
+npm test / 递归 node --check                        2 passed / clean
+tests/manual/agent-workbench-acceptance.mjs        19/19（真实登录 + 真实前后端）
+```
+
+截图随仓库保留：`docs/assets/agent-workbench-desktop.png`、`docs/assets/agent-workbench-narrow.png`。
+验收后已停止后台进程，未占用端口。
+
+**P2 与 P3 全部完成**；真实模型（live）评测仍为 `NOT_RUN`（无凭据/预算）。

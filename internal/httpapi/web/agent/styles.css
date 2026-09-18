@@ -19,6 +19,10 @@
   --danger: #c02d2d;
   --danger-soft: #fdecec;
   --muted-soft: #eef1f6;
+  /* "待人工确认 / 材料确认"专用色：必须与 info(蓝) / ok(绿) / warn(琥珀) / danger(红) 都不同，
+     否则最需要人做决定的那个状态会和其他状态混在一起。 */
+  --confirm: #6b46c1;
+  --confirm-soft: #f1ebfd;
   --radius: 10px;
   --radius-sm: 7px;
   --shadow: 0 1px 2px rgba(20, 34, 61, .05), 0 6px 18px rgba(20, 34, 61, .05);
@@ -136,6 +140,18 @@ ul, ol { margin: 0; padding-left: 18px; }
 .badge-danger { background: var(--danger-soft); color: var(--danger); border-color: #eec4c4; }
 .badge-info { background: var(--accent-soft); color: var(--accent); border-color: #c8dbff; }
 .badge-muted { background: var(--muted-soft); color: var(--text-muted); border-color: var(--border); }
+.badge-confirm { background: var(--confirm-soft); color: var(--confirm); border-color: #d9c9f5; }
+
+/* ---------- 材料确认 ---------- */
+
+.confirm-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: var(--surface);
+}
+.confirm-item.confirm-stale { opacity: .72; border-style: dashed; }
+.confirm-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
 
 /* ---------- 提示条 ---------- */
 
