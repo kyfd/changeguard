@@ -57,6 +57,17 @@ type Store struct {
 	migrationWitnessMarkerPath string
 	migrationWitness           migrationWitnessSnapshot
 	migrationWitnessStatus     MigrationWitnessStatus
+	// now 是租约等时间敏感逻辑的时间源。为 nil 时用 time.Now；
+	// 测试可用 NewMemoryWithClock 注入可控时钟，使"租约过期"确定发生，
+	// 而不是依赖 1ms 墙钟窗口（那正是启动恢复用例在 -race 下偶发失败的原因）。
+	now func() time.Time
+}
+
+func (s *Store) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func New(path string) (*Store, error) {
@@ -136,6 +147,14 @@ func NewMemory() *Store {
 	data := seedState()
 	normalizeState(&data)
 	return &Store{data: data}
+}
+
+// NewMemoryWithClock 返回一个由给定时间源驱动的内存存储。
+// 仅供需要确定性时间（例如租约过期）的测试使用。
+func NewMemoryWithClock(clock func() time.Time) *Store {
+	s := NewMemory()
+	s.now = clock
+	return s
 }
 
 func materializeExpiredPassports(data *state, now time.Time) bool {

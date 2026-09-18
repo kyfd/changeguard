@@ -257,3 +257,27 @@ scripts/recovery_acceptance.py                     13/13（独立进程：中断
 ```
 
 下一步：PR-B（材料确认 + 失效 + flaky 修复）、PR-C（评测）、PR-D（工作台 + 浏览器验收）。
+
+### 2026-09-18：P2（PR-B）材料确认与 flaky 修复完成
+
+- **材料确认**：新增 `Confirmation` 与 `POST /tasks/{id}/confirm`（仅创建者）。记录确认人、时间、
+  材料版本与内容哈希；同一材料重复确认**幂等**；草案重新生成或输入/材料版本变化时旧确认**失效**
+  并保留痕迹。**确认 ≠ 治理审批 ≠ 执行许可**：确认不改变任务状态，也不授予执行权利。
+- **flaky 修复（先诊断）**：启动恢复用例的 1ms 租约 + 立即 checkpoint 在 `-race` 下必然偶发
+  `ErrConcurrentWrite`。为 `internal/store` 引入可注入时间源（`Store.clock` / `NewMemoryWithClock`），
+  两个租约用例改为确定性过期；断言改为有界轮询，`countingRunner.runs` 改为原子计数。
+- **顺带修复既有缺陷**（独立 PR #19）：Postgres 通行证重放分支返回空 payload，导致并发消费中
+  走重放的一方一直显示 `ACTIVE`；已返回已提交快照，并让多实例用例断言竞争双方都看到 `CONSUMED`。
+
+验证（本机实测，详见 `docs/agent-upgrade-verification.md` §13）：
+
+```
+pytest -q                                          201 passed
+evals/run_eval.py --provider deterministic         11/11
+go test ./... -count=1                             全部包 ok
+go test ./internal/service -run TestStartupRecovery… -count=50    ok
+go vet ./... / gofmt -l                             clean
+npm test                                            2 passed
+```
+
+下一步：PR-C（评测 `--strategy`/`--provider` 真正生效、开发/保留集、评分与报告）、PR-D（工作台 + 浏览器验收）。

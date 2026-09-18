@@ -97,7 +97,7 @@ func (s *Store) ClaimOutbox(workerID string, lease time.Duration) (model.OutboxE
 		}
 		return event, nil
 	}
-	now := time.Now()
+	now := s.clock()
 	selected := -1
 	for index := range s.data.Outbox {
 		event := s.data.Outbox[index]
@@ -145,7 +145,7 @@ func (s *Store) ClaimOutbox(workerID string, lease time.Duration) (model.OutboxE
 func (s *Store) CompleteOutbox(id, workerID string, generation uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
+	now := s.clock()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]
 		if event.ID != id {
@@ -168,7 +168,7 @@ func (s *Store) CompleteOutbox(id, workerID string, generation uint64) error {
 func (s *Store) RenewOutbox(id, workerID string, generation uint64, lease time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
+	now := s.clock()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]
 		if event.ID != id {
@@ -188,7 +188,7 @@ func (s *Store) RenewOutbox(id, workerID string, generation uint64, lease time.D
 func (s *Store) FailOutbox(id, workerID string, generation uint64, cause error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
+	now := s.clock()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]
 		if event.ID != id {
@@ -223,7 +223,7 @@ func (s *Store) FailOutbox(id, workerID string, generation uint64, cause error) 
 func (s *Store) CheckpointExperimentOutbox(id, workerID string, generation uint64, stage model.OutboxStage, inputSHA256 string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
+	now := s.clock()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]
 		if event.ID != id {
@@ -248,7 +248,7 @@ func (s *Store) CheckpointExperimentOutbox(id, workerID string, generation uint6
 func (s *Store) FinalizeExperimentOutbox(id, workerID string, generation uint64, attemptID, inputSHA256, resultDigest string, update func(*model.ChangeRequest) error, audits ...model.AuditEvent) (model.ChangeRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
+	now := s.clock()
 	for eventIndex := range s.data.Outbox {
 		event := &s.data.Outbox[eventIndex]
 		if event.ID != id {
