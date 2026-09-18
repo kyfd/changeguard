@@ -233,3 +233,27 @@ go test ./internal/agent ./internal/httpapi ./internal/service -count=1   三个
 新增 22 项用 `httpx.MockTransport` 模拟端点，验证的是契约与边界，**不是模型质量证明**。
 
 **P1 仍未完成**：`fixed_workflow` 与 `bounded_agent` 的同输入对照评测（属 P3 评测范围）。
+
+### 2026-09-18：P2 主体（PR-A）节点级中断与恢复完成
+
+依赖按实际解析版本收紧：`langgraph>=1.2,<2`、新增 `langgraph-checkpoint-sqlite>=3.1,<4`
+（实测 langgraph 1.2.11 / checkpoint 4.2.0 / checkpoint-sqlite 3.1.1 / aiosqlite 0.22.1）。
+检查点落在磁盘 SQLite（`AsyncSqliteSaver`），非 `InMemorySaver`。
+
+`_check_info` 缺信息时用 `interrupt()` **把图停在节点上**；用户补充后从该节点继续，
+中断前的节点不重跑。恢复前重新校验归属（组织 + 创建者）、状态、检查点待办与输入/材料版本；
+校验不过返回 409，不做"尽力继续"。启动扫描改为检查点感知（`checkpoint_available` vs
+`interrupted_without_resume`），**不自动续跑**。
+
+**任务书 §P2-8（JSON→SQLite 迁移）记为 N/A**：任务仍存 JSON，SQLite 只存检查点。
+
+验证（本机实测，详见 `docs/agent-upgrade-verification.md` §12）：
+
+```
+pytest -q                                          193 passed
+evals/run_eval.py --provider deterministic         11/11
+go test ./internal/agent ./internal/httpapi ./internal/service -count=1   三个包 ok
+scripts/recovery_acceptance.py                     13/13（独立进程：中断 → 终止 → 重启 → 恢复 → 完成）
+```
+
+下一步：PR-B（材料确认 + 失效 + flaky 修复）、PR-C（评测）、PR-D（工作台 + 浏览器验收）。

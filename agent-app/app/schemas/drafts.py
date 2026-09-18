@@ -194,6 +194,13 @@ class TaskView(BaseModel):
     revisions: int = 0
     error: str | None = None
     planned_at_missing: bool = False
+    # 图是否停在节点级中断上等待用户补充（区别于"走到 END 的 NEEDS_INFO"）。
+    awaiting_input: bool = False
+    # 本次执行是恢复还是全新执行：interrupt（从中断点续跑）/ checkpoint（续跑未完成节点）/
+    # restart_from_scratch（受支持的重跑，明确不是续跑）/ None（首次执行）。
+    resume_mode: str | None = None
+    # 进程重启时的处置策略，便于界面与验收复核。
+    restart_policy: str | None = None
 
 
 class CreateTaskRequest(BaseModel):

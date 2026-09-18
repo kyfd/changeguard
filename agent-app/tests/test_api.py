@@ -27,6 +27,7 @@ def build_client(tmp_path: Path, *, allow_identity: bool = True) -> TestClient:
     settings = Settings(
         agent_demo_dir=str(DEMO_DIR),
         task_store_path=str(tmp_path / "agent-tasks.json"),
+        checkpoint_path=str(tmp_path / "agent-checkpoints.sqlite"),
         execution_mode="inline",
         allow_header_identity=allow_identity,
     )
@@ -116,3 +117,44 @@ def test_clarify_on_finished_task_conflicts(tmp_path: Path) -> None:
     client.post(f"/api/agent/tasks/{task_id}/cancel", headers=HEADERS)
     conflicted = client.post(f"/api/agent/tasks/{task_id}/clarify", headers=HEADERS, json={"table": "orders"})
     assert conflicted.status_code == 409
+
+
+def test_resume_endpoint_continues_from_the_interrupt(tmp_path: Path) -> None:
+    """恢复接口从节点级中断继续，且不从头重跑。"""
+    client = build_client(tmp_path)
+    created = client.post(
+        "/api/agent/tasks",
+        headers=HEADERS,
+        json={"requirement": REQUIREMENT, "schema_snapshot": SCHEMA_SNAPSHOT},
+    )
+    body = created.json()
+    assert body["status"] == "NEEDS_INFO"
+    assert body["awaiting_input"] is True
+    task_id = body["task_id"]
+
+    resumed = client.post(
+        f"/api/agent/tasks/{task_id}/resume",
+        headers=HEADERS,
+        json={
+            "application": "order-service",
+            "environment": "生产",
+            "database": "postgresql",
+            "table": "orders",
+            "query_sql": SLOW_QUERY,
+            "planned_at": PLANNED_AT.isoformat(),
+            "planned_at_timezone": "Asia/Shanghai",
+        },
+    )
+    assert resumed.status_code == 200
+    final = resumed.json()
+    assert final["status"] == "DRAFT_READY", final.get("error")
+    assert final["resume_mode"] == "interrupt"
+    kinds = [item["kind"] for item in final["events"]]
+    assert kinds.count("screen_input") == 1, "恢复不得从头重跑"
+
+    # 已到终态、没有待继续步骤：拒绝恢复。
+    again = client.post(f"/api/agent/tasks/{task_id}/resume", headers=HEADERS)
+    assert again.status_code == 409
+
+    # 不存在或不属于调用方：一律 404，不做存在性探测。
+    assert client.post("/api/agent/tasks/task_missing/resume", headers=HEADERS).status_code == 404

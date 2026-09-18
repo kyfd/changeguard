@@ -490,15 +490,108 @@ OpenAI 兼容端点，覆盖：多轮动作、非法参数（类型/缺必填/�
 
 ---
 
-## 12. 剩余任务
+## 12. P2（PR-A）：节点级中断与从检查点恢复
+
+### 12.1 依赖与解析版本（已收紧）
+
+`pyproject.toml` 从 `langgraph>=0.2` 收紧为 `langgraph>=1.2,<2`，并新增
+`langgraph-checkpoint-sqlite>=3.1,<4`。本机实测解析到：
+
+```
+langgraph 1.2.11 · langgraph-checkpoint 4.2.0 · langgraph-checkpoint-sqlite 3.1.1 · aiosqlite 0.22.1
+```
+
+检查点是**磁盘上的 SQLite**（`AsyncSqliteSaver`），不是 `InMemorySaver`——后者不能用来宣称支持进程重启。
+连接是**短生命周期**的：每次图调用开一条连接、用完即关，避免跨事件循环复用同一条连接。
+
+### 12.2 节点级中断（不是走到 END）
+
+`WorkflowDeps` 新增 `checkpointer`；`compile(checkpointer=…)`，`thread_id=task_id`。
+缺信息时 `_check_info` 调用 `interrupt({...})`，图**停在节点上**并落检查点。
+`_route_entry` 的"走到 END + NEEDS_INFO"分支保留：**没有检查点的调用方**（部分既有测试、评测的
+workflow harness）行为不变，因为 `interrupt()` 在没有检查点时会报错。
+
+恢复值由服务端给出**完整**输入（slots + 快照 + 需求 + 输入版本），因此重复恢复是幂等的，
+不会把同一条补充说明拼接两次。
+
+### 12.3 恢复前的重新校验（不做"尽力继续"）
+
+| 校验项 | 不通过时 |
+| --- | --- |
+| 归属：组织 + 创建者 | `TaskNotFound`（404，与"不存在"不可区分） |
+| 状态：终态（`CANCELLED`/`INPUT_REJECTED`/…）不允许恢复 | `TaskNotResumable`（409） |
+| 检查点存在且有待继续步骤 | 409 |
+| **续跑未完成节点**（mode=checkpoint）时输入/材料版本必须与检查点一致；核对不出（无记录版本）**失败关闭** | 409 |
+
+恢复模式如实区分并写入任务记录与视图：`interrupt`（从中断点续跑）、`checkpoint`（续跑未完成节点）。
+`restart_from_scratch` 只在真正重跑时使用，**不把重跑说成续跑**。
+
+### 12.4 进程重启时的处置
+
+启动扫描改为**检查点感知**：在途任务（`RECEIVED`/`RUNNING`）若有检查点 →
+`restart_policy=checkpoint_available`（需创建者显式恢复）；无检查点 → `interrupted_without_resume`。
+判定用标准库 `sqlite3` 同步读同一份检查点文件（启动发生在事件循环之外），任何异常按"没有检查点"处理（保守）。
+**不自动续跑**：留在在途状态会让健康检查与界面看起来还有任务在推进，因此仍显式落一个终态。
+
+### 12.5 独立进程恢复验收（真实进程，非 mock）
+
+`agent-app/scripts/recovery_acceptance.py`：起独立 uvicorn → 跑到中断 → **终止进程** → 重启 → 授权恢复 → 完成。
+
+```
+第一次启动 pid=33812  第二次启动 pid=4824
+[PASS] 创建后在节点级中断上等待补充（status=NEEDS_INFO）
+[PASS] 标记为 awaiting_input
+[PASS] 追问包含缺失项
+[PASS] 入口节点只执行过一次（screen_input=1）
+[PASS] 进程已终止（PID 不再存活）
+[PASS] 磁盘上存在检查点文件
+[PASS] 确实是新进程（PID 不同）33812 -> 4824
+[PASS] 重启后任务仍可查询且等待补充
+[PASS] 授权恢复后完成到 DRAFT_READY
+[PASS] 恢复模式标注为 interrupt
+[PASS] 入口节点仍未重复执行（未从头重跑）screen_input=1
+[PASS] 留下了 resumed 事件
+[PASS] 产出了草案
+结果：13/13 通过
+```
+
+判据是持久化事实：重启前后 **PID 不同**、检查点文件在磁盘上、且 `screen_input` 事件在整条
+生命周期里**只出现一次**（若从头重跑会出现两次）。
+
+### 12.6 本轮命令与结果
+
+| 命令 | 结果 |
+| --- | --- |
+| `python -m pytest -q` | **193 passed**（§11 后 183 + 本轮新增 10） |
+| `python evals/run_eval.py --provider deterministic` | **11/11** |
+| `go test ./internal/agent ./internal/httpapi ./internal/service -count=1` | 三个包 **ok** |
+| `go vet ./...` / `gofmt -l ./internal ./cmd` | clean / clean |
+| `npm test` | 2 passed |
+| 递归 `node --check`（`internal/httpapi/web/**/*.js`） | clean |
+| `scripts/recovery_acceptance.py` | **13/13** |
+
+新增用例：`tests/test_checkpoint_resume.py`（9 项：节点级中断、中断后继续不重跑、受支持失败续跑、
+归属重校验、无待恢复步骤拒绝、陈旧输入版本拒绝、重启可恢复/不可恢复标注、取消不可恢复）
+与 `tests/test_api.py::test_resume_endpoint_continues_from_the_interrupt`（路由层）。
+
+### 12.7 任务书 §P2-8（JSON→SQLite 迁移）**不适用（N/A）**
+
+已按决策采用：**任务记录仍存 JSON**（`app/store/tasks.py` 原样保留，既有持久化诚实性测试与语义不变），
+SQLite **只存 LangGraph 检查点**。因此不存在"从 JSON 迁 SQLite"的迁移、也不需要对任务记录做版本化迁移。
+检查点库由 `AsyncSqliteSaver.setup()`（`CREATE TABLE IF NOT EXISTS`）创建，本身可重入。
+
+### 12.8 未运行（不得当作通过）
+
+`go test -race ./...`、PostgreSQL/Redis 集成、Playwright e2e 仍由 CI 提供证据（本机不满足运行条件）；
+真实模型（live）评测无凭据 → `NOT_RUN`。
+
+---
+
+## 13. 剩余任务
 
 | 阶段 | 状态 | 内容 |
 | --- | --- | --- |
-| P0 | ✅ 完成（含 §9 的收尾） | 授权、执行所有权与持久化诚实性、只读工具服务间认证；收尾补齐执行生命周期：取消竞态、落盘故障语义、inline 取消、执行监督与降级上报 |
-| P1 | ⏳ **进行中** | 已完成重试分层、草案契约、方言边界、补充信息字段（§11.1）；**受约束调查循环及其预算、决策契约、必需证据仍未开始**（§11.3） |
-| P1 | ⬜ 未开始 | 受约束调查循环、provider 决策契约、预算与上下文（含已发现的 C1 重试相乘、C2 模型自封"已确认"、C3 版本恒为 1、C4/C5 澄清字段、C6 方言） |
-| P2 | ⬜ 未开始 | LangGraph checkpointer、进程重启恢复、材料确认记录。**注意**：本机 `langgraph` 为 1.2.11，checkpointer 包版本必须匹配 1.x，开始前需先收紧依赖并重新记录解析版本 |
-| P3 | ⬜ 未开始 | 真正可选的评测模式、开发/保留集拆分、可观测性与 `/agent/` 工作台 |
-
-未开始的原因不是阻碍，而是按规格"P0 → P1 → P2 → P3，每阶段新增回归并复跑测试"推进：
-P0 的授权与所有权是调查循环的前置条件，先做它可以让后续阶段的影响面可控。
+| P0 | ✅ 完成 | 授权、执行所有权与持久化诚实性、只读工具服务间认证；执行生命周期收尾 |
+| P1 | ✅ 完成 | 重试分层、草案契约、方言边界、补充字段；受约束调查循环；provider 原生动作决策 |
+| P2 | ⏳ **进行中** | PR-A 已完成：检查点持久化、节点级中断与恢复、恢复前重校验、独立进程验收（本节）。**待做**：材料确认记录（确认人/时间/版本或哈希、幂等、新修订失效）、已知 flaky 的 Go 启动恢复测试 |
+| P3 | ⬜ 未开始 | 真正生效的评测 `--strategy`/`--provider`、开发/保留集拆分、评分与报告、`/agent/` 工作台与浏览器验收 |

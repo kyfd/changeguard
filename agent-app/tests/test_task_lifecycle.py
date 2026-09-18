@@ -327,7 +327,7 @@ def test_health_reports_no_running_task_after_cancel(tmp_path: Path) -> None:
 def test_dispatch_failure_does_not_leave_a_received_orphan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = AgentService(build_settings(tmp_path))
 
-    async def boom(_task_id: str) -> None:
+    async def boom(_task_id: str, _resume: Any = None) -> None:
         raise RuntimeError("队列不可用")
 
     monkeypatch.setattr(service, "_dispatch", boom)
