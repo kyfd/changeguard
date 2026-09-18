@@ -52,6 +52,8 @@ class Settings:
     unknown_usage_charge_tokens: int = 0
     llm_price_prompt_per_1k: float = 0.0
     llm_price_completion_per_1k: float = 0.0
+    # 任务累计模型请求次数上限（含重试）。0 = 不限制。
+    max_task_requests: int = 0
 
     # 工作流预算：有限循环，不允许无上限修订。
     max_revisions: int = 2
@@ -148,6 +150,7 @@ class Settings:
             unknown_usage_charge_tokens=int(os.getenv("AGENT_UNKNOWN_USAGE_CHARGE_TOKENS", "0")),
             llm_price_prompt_per_1k=float(os.getenv("AGENT_LLM_PRICE_PROMPT_PER_1K", "0")),
             llm_price_completion_per_1k=float(os.getenv("AGENT_LLM_PRICE_COMPLETION_PER_1K", "0")),
+            max_task_requests=int(os.getenv("AGENT_MAX_TASK_REQUESTS", "0")),
             max_revisions=int(os.getenv("AGENT_MAX_REVISIONS", "2")),
             task_timeout_seconds=float(os.getenv("AGENT_TASK_TIMEOUT", "120")),
             investigation_strategy=os.getenv("AGENT_INVESTIGATION_STRATEGY", "fixed_workflow").strip()

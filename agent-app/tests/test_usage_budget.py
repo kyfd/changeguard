@@ -249,6 +249,130 @@ def test_cost_limit_with_pricing_stops_further_calls(
     assert usage_of(view)["cost_estimate"] == pytest.approx(0.22, abs=0.001)
 
 
+# ---------------------------------------------------------------------------
+# 账本持久化、续算与结构化记录
+# ---------------------------------------------------------------------------
+
+
+def test_failed_execution_still_persists_its_accounting(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """执行失败也要留下账目：失败的调用同样花了钱。"""
+    stub = ModelStub([(json.dumps(_draft()), {"prompt_tokens": 100, "completion_tokens": 10})])
+    stub.install(monkeypatch)
+    scoped = configured(settings)
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    from app.workflow.graph import DraftWorkflow
+
+    original = DraftWorkflow._run_check
+
+    async def boom(self: DraftWorkflow, state: Any):
+        raise RuntimeError("模拟执行中中断")
+
+    monkeypatch.setattr(DraftWorkflow, "_run_check", boom)
+    try:
+        view, _ = run(service.create_task(complete_request(), CONTEXT))
+    finally:
+        monkeypatch.setattr(DraftWorkflow, "_run_check", original)
+
+    assert view.status is TaskStatus.FAILED
+    reported = usage_of(view)
+    assert reported["requests"] == 1, "失败的执行也必须留下账目"
+    assert reported["prompt_tokens"] == 100
+    assert reported["calls"], "必须有结构化的逐请求记录"
+
+
+def test_resume_continues_the_task_budget(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """恢复不得清零任务累计预算：续算后总请求数包含此前执行。"""
+    stub = ModelStub(
+        [
+            (json.dumps(_draft()), {"prompt_tokens": 100, "completion_tokens": 10}),
+            (json.dumps(_draft()), {"prompt_tokens": 100, "completion_tokens": 10}),
+        ]
+    )
+    stub.install(monkeypatch)
+    scoped = configured(settings)
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    from app.workflow.graph import DraftWorkflow
+
+    original = DraftWorkflow._run_check
+    first_boom = {"done": False}
+
+    async def boom_once(self: DraftWorkflow, state: Any):
+        if not first_boom["done"]:
+            first_boom["done"] = True
+            raise RuntimeError("模拟执行中中断")
+        return await original(self, state)
+
+    monkeypatch.setattr(DraftWorkflow, "_run_check", boom_once)
+    failed, _ = run(service.create_task(complete_request(), CONTEXT))
+    assert usage_of(failed)["requests"] == 1
+
+    monkeypatch.setattr(DraftWorkflow, "_run_check", original)
+    resumed = run(service.resume(failed.task_id, CONTEXT))
+
+    assert usage_of(resumed)["requests"] >= 1
+    assert usage_of(resumed)["prompt_tokens"] >= 100, "恢复后累计预算被清零了"
+
+
+def test_call_records_carry_phase_outcome_and_retries(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """结构化记录要能回答"哪一步、成没成、重试了几次"。"""
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:  # 第一次 503，触发传输层重试
+            return httpx.Response(503, json={"error": "busy"})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "content": json.dumps(_draft())}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    original_client = httpx.AsyncClient
+
+    def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    scoped = configured(settings, llm_max_attempts=2)
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    reported = usage_of(view)
+    assert calls["n"] == 2, "503 应触发一次重试"
+    assert reported["requests"] == 2, f"503 重试必须计入请求数：{reported}"
+    assert reported["missing_responses"] == 1, "失败的那次请求没有 usage，应记为缺失"
+    assert reported["known"] is False, "有缺失时总量不能算已知"
+    outcomes = [item["outcome"] for item in reported["calls"]]
+    phases = {item["phase"] for item in reported["calls"]}
+    assert "error" in outcomes and "ok" in outcomes, outcomes
+    assert phases <= {"generate", "investigate", "other"}, phases
+
+
+def test_model_request_cap_is_enforced(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务累计请求次数是硬上限，含重试。"""
+    stub = ModelStub([(NOT_JSON, {"prompt_tokens": 1, "completion_tokens": 1})])
+    stub.install(monkeypatch)
+    scoped = configured(settings, draft_parse_attempts=5, max_task_requests=2)
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    assert stub.calls == 2, f"请求次数上限是硬边界，实际 {stub.calls}"
+    assert view.status is TaskStatus.FAILED
+    assert "请求次数" in (view.error or ""), view.error
+
+
 def _draft() -> dict[str, Any]:
     return {
         "sql": (

@@ -978,7 +978,55 @@ provider 是跨任务共享的，累计量还会串到别的任务。
 
 ---
 
-## 18. 剩余任务
+## 18. 任务级调用账本：逐请求记录、持久化与预算续算
+
+**已复现的缺陷**（探针脚本，`max_task_tokens=150`、每次响应 110 token）：
+
+```
+first run: status=FAILED usage=None calls=2          ← 失败的执行丢失全部账目
+resumed:   usage={'requests': 0, ...}                ← 恢复从零开始，预算被重置
+```
+
+即：① 执行抛错时账目完全不落盘，尽管已经打出去 2 次请求、消耗 220 token；
+② 恢复会新建账本，此前的累计消耗被遗忘，预算形同虚设；③ 没有任何逐请求的结构化记录。
+
+**修复**：
+
+| 要求 | 实现 |
+| --- | --- |
+| 结构化调用记录 | `CallRecord`：`sequence` / `phase`（investigate / generate） / `outcome`（ok / error / timeout） / `requests` / `duration_ms` / `usage_known` / `prompt_tokens` / `completion_tokens` / `model` / `failure_type`；不含凭据、完整提示词或隐式思维链 |
+| 不依赖共享可变字段 | 账本由服务层创建并经 `usage_scope`（`ContextVar`）传递；provider 每发一次请求就提交一条记录，自身只保留"最近一次响应"的 `last_usage`（缺失即清空） |
+| 聚合正确 | 每一次 HTTP 请求都计数（含 429/503 重试与失败/超时）；有 usage 累计、缺失记一笔缺失；区分"已知部分 / 缺失请求数 / 整体是否完整"（`known`） |
+| 服务端硬上限 | 新增 `AGENT_MAX_TASK_REQUESTS`（含重试的累计请求数），与既有的轮次、工具调用、修订、总时限、token／prompt／费用阈值共同生效 |
+| 预算续算 | `UsageLedger.seed_from_prior(record["usage"])`：恢复、重试、进程重启都**续算**，只有新建任务才从零开始 |
+| 账本必须落盘 | 每次记账后回调 `_persist_ledger`；落盘失败或执行已被取代/取消时抛 `LedgerPersistError`，**停止**继续调用模型，不产生无账目消耗 |
+| 失败也要留账 | `_run_workflow` 用 `try/finally` 把账本写到本次执行的记录上（成功、失败、取消都算） |
+
+修复后同一探针：`first run usage={'requests': 2, 'prompt_tokens': 200, 'calls': [...2 条记录...]}`，
+恢复后 `requests: 2`（续算而非重置）。
+
+新增用例（`tests/test_usage_budget.py`）：失败执行仍留账目、恢复续算不清零、
+逐请求记录的阶段/结果/重试计数（503 → 2 次请求，其中 1 次记为缺失）、请求次数上限是硬边界。
+
+### 18.1 本轮命令与结果（本机）
+
+| 命令 | 结果 |
+| --- | --- |
+| `pytest -q` | **227 passed**（223 + 4） |
+| `evals --provider scripted --strategy bounded_agent --split dev` | **14/14** |
+| `scripts/recovery_acceptance.py` | **13/13** |
+| `go test ./... -count=1` / `go vet ./...` / `gofmt -l` | 无失败 / clean / clean |
+| `npm test` | 2 passed |
+
+### 18.2 本轮**未完成**（不得当作已交付）
+
+用户本轮清单中的第三～八节（恢复与输入变更的安全边界、证据充分性与适用性、
+fixed_workflow 与 bounded_agent 对照评测、工作台一致性、部署边界、面试交付文档）
+**本轮未实施**，因此本轮**不宣称"改造完成"**。已核实的缺口见 §19。
+
+---
+
+## 19. 剩余任务
 
 | 阶段 | 状态 | 内容 |
 | --- | --- | --- |
