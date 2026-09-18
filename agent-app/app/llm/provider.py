@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, Protocol
 
 import httpx
@@ -284,6 +285,8 @@ class OpenAICompatibleProvider:
         self._semaphore = asyncio.Semaphore(4)  # 并发上限，避免打爆模型侧
         # 实际发出的 HTTP 请求数。用于如实报告预算消耗，而不是估算。
         self.requests_sent = 0
+        # 模型调用的累计墙钟耗时（秒）。评测报告需要区分"端到端耗时"与"模型耗时"。
+        self.model_seconds = 0.0
         # 最近一次 decide() 的 token 用量；provider 未提供时保持 None，
         # 由循环标为 unknown，而不是填 0 冒充"确定没有消耗"。
         self.last_usage: dict[str, int] | None = None
@@ -436,6 +439,7 @@ class OpenAICompatibleProvider:
     async def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """发一次请求并返回解析后的响应体。供 generate 与 decide 共用。"""
         self.requests_sent += 1
+        started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=self._settings.llm_timeout_seconds) as client:
                 response = await client.post(
@@ -444,11 +448,13 @@ class OpenAICompatibleProvider:
                     headers={"Authorization": f"Bearer {self._settings.llm_api_key}"},
                 )
         except Exception as error:  # noqa: BLE001 - 网络抖动与超时值得重试
+            self.model_seconds += time.perf_counter() - started
             raise ModelCallError(
                 f"模型调用失败（传输层）：{type(error).__name__}: {error}",
                 retryable=True,
                 failure_type="transport",
             ) from error
+        self.model_seconds += time.perf_counter() - started
 
         if response.status_code != 200:
             raise ModelCallError(
