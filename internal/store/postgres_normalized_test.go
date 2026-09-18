@@ -192,9 +192,13 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 	if consumed != 2 || unexpected != 0 {
 		t.Fatalf("two stores must replay one logical consume: consumed=%d unexpected=%d", consumed, unexpected)
 	}
-	replayed, err := first.Passport(passport.ID)
-	if err != nil || replayed.Status != model.PassportConsumed || replayed.ConsumedBy != "ci" {
-		t.Fatalf("postgres consume snapshot: %+v err=%v", replayed, err)
+	// 两个实例都必须看到已消费：走重放分支的那一方若只返回成功而不刷新内存快照，
+	// 它随后读取到的仍是 ACTIVE。这里覆盖竞争双方，使该缺陷无法被调度顺序掩盖。
+	for name, s := range map[string]*Store{"first": first, "second": second} {
+		snapshot, err := s.Passport(passport.ID)
+		if err != nil || snapshot.Status != model.PassportConsumed || snapshot.ConsumedBy != "ci" {
+			t.Fatalf("%s postgres consume snapshot: %+v err=%v", name, snapshot, err)
+		}
 	}
 	if _, err := first.UsePassport(passport.ID, "token-hash", "other-ci", time.Now().UTC(), true, model.AuditEvent{OrganizationID: change.OrganizationID, ChangeID: change.ID, ActorID: "other-ci", Action: "CONSUME"}); !errors.Is(err, ErrPassportReplay) {
 		t.Fatalf("different consumer must conflict across stores, got %v", err)
