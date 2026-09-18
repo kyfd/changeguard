@@ -31,7 +31,7 @@ from app.llm.provider import (
     action_tools_for_model,
 )
 from app.retrieval.corpus import build_retriever
-from app.schemas.drafts import TaskSlots, ToolResult
+from app.schemas.drafts import DatabaseKind, TaskSlots, ToolResult
 from app.tools.business import Toolbox
 from app.tools.registry import TrustedContext
 from app.workflow.investigate import (
@@ -43,7 +43,7 @@ from app.workflow.investigate import (
 from tests.conftest import SCHEMA_SNAPSHOT, run
 
 CONTEXT = TrustedContext(user_id="alice", organization_id="org_demo")
-SLOTS = TaskSlots(application="order-service", environment="生产", table="orders")
+SLOTS = TaskSlots(application="order-service", environment="生产", database=DatabaseKind.POSTGRESQL, table="orders")
 SNAPSHOT = SCHEMA_SNAPSHOT
 
 
@@ -76,6 +76,7 @@ def hit(evidence_id: str, doc_id: str = "norms/sql-change-standards") -> dict[st
         "version": "v1.0",
         "status": "active",
         "score": 1.0,
+        "applicability": "PostgreSQL 生产库",
     }
 
 

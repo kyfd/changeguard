@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -105,6 +106,38 @@ class InvestigationPlanner(Protocol):
         ...
 
 
+# 目标库 → 适用范围文本里可能出现的写法。刻意保守：只认明确写出的库名。
+_DATABASE_ALIASES: dict[str, tuple[str, ...]] = {
+    "postgresql": ("postgresql", "postgres", "pg"),
+    "mysql": ("mysql", "mariadb"),
+}
+
+# 只认 CREATE TABLE：这是**保守**解析。解析不出任何表时，调用方必须显式判为"无法核对"，
+# 而不是用脆弱的字符串匹配宣称已经完成 SQL 语义校验。
+_TABLE_DEF = re.compile(r"create\s+table\s+(?:if\s+not\s+exists\s+)?[\"`\[]?([a-zA-Z_][\w.]*)", re.IGNORECASE)
+
+
+def _applicable_to(applicability: str, target_database: str) -> bool:
+    """规范的适用范围是否覆盖目标数据库。
+
+    **没写适用范围 = 无法核对 = 不算适用**（失败关闭）：把"没写"当成"通用"，
+    正是"unknown 默认等于有效"的那种错误。
+    """
+    text = (applicability or "").strip().lower()
+    target = (target_database or "").strip().lower()
+    if not text or not target:
+        return False
+    return any(alias in text for alias in _DATABASE_ALIASES.get(target, (target,)))
+
+
+def _snapshot_tables(snapshot: str) -> set[str]:
+    """从快照里解析出的表名（小写、去掉 schema 限定）。"""
+    return {
+        match.group(1).split(".")[-1].strip("\"`[]").lower()
+        for match in _TABLE_DEF.finditer(snapshot or "")
+    }
+
+
 class RequiredEvidence:
     """"什么算证据够用"的确定性判定。
 
@@ -125,18 +158,44 @@ class RequiredEvidence:
         schema_snapshot: str = "",
     ) -> list[str]:
         missing: list[str] = []
-        active_norms = [
-            item for item in evidence if item.doc_id.startswith(NORM_PREFIX) and item.status != "deprecated"
-        ]
+        norm_evidence = [item for item in evidence if item.doc_id.startswith(NORM_PREFIX)]
+        active_norms = [item for item in norm_evidence if item.status == "active"]
+
         if not active_norms:
-            if any(item.doc_id.startswith(NORM_PREFIX) for item in evidence):
+            if any(item.status == "deprecated" for item in norm_evidence):
                 missing.append("至少一条仍生效的规范片段（当前命中的规范已标记为废弃）")
+            elif any(item.status == "unknown" for item in norm_evidence):
+                # 状态未知**不等于**有效：必须显式说清，不能默默当成可用证据。
+                missing.append("至少一条状态可确认生效的规范片段（命中的规范状态未知，未知不等于有效）")
             else:
                 missing.append("至少一条规范片段（norms/）")
-        elif not any((item.version or item.source or "").strip() for item in active_norms):
-            missing.append("规范片段的版本或来源（用于说明依据的是哪一版）")
-        if (slots.table or "").strip() and not schema_snapshot.strip():
-            missing.append("目标表的结构快照（缺少它无法核对字段名）")
+        else:
+            # 可核对身份。
+            identified = [item for item in active_norms if (item.version or item.source or "").strip()]
+            if not identified:
+                missing.append("规范片段的版本或来源（用于说明依据的是哪一版）")
+            else:
+                # 适用性：规范的适用范围必须覆盖目标数据库；没写适用范围就是无法核对。
+                target = (slots.database.value if slots.database else "") or ""
+                if not any(_applicable_to(item.applicability, target) for item in identified):
+                    missing.append(
+                        "适用当前目标数据库的规范片段：命中的规范适用范围不匹配或未标注适用范围"
+                        + (f"（当前目标：{target}）" if target else "（当前目标数据库未指定）")
+                    )
+
+        # 目标材料：不能只看"快照非空"，要核对快照里确实有目标表。
+        table = (slots.table or "").strip()
+        if table:
+            if not schema_snapshot.strip():
+                missing.append("目标表的结构快照（缺少它无法核对字段名）")
+            else:
+                tables = _snapshot_tables(schema_snapshot)
+                if not tables:
+                    missing.append("表结构快照中未能识别出任何表定义，无法核对目标表")
+                elif table.lower() not in tables:
+                    missing.append(
+                        f"表结构快照中未找到目标表 {table!r}（快照中的表：{', '.join(sorted(tables))}）"
+                    )
         return missing
 
 
@@ -395,6 +454,7 @@ def evidence_from_tool_result(result: ToolResult) -> list[EvidenceRef]:
                 source=str(hit.get("source") or ""),
                 status=str(hit.get("status") or "unknown"),
                 score=float(hit.get("score") or 0.0),
+                applicability=str(hit.get("applicability") or ""),
             )
         )
     return collected
