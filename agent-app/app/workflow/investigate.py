@@ -51,6 +51,9 @@ class StopReason(str, Enum):
     TOOL_CALLS_EXHAUSTED = "TOOL_CALLS_EXHAUSTED"
     NO_PROGRESS = "NO_PROGRESS"
     PLANNER_UNAVAILABLE = "PLANNER_UNAVAILABLE"
+    # 决策者存在且具备动作能力，但这一次没能给出可执行的动作（未知工具、参数非法、
+    # 试图改写身份、模型调用失败等）。与 PLANNER_UNAVAILABLE（根本没有动作能力）区分开。
+    PLANNER_FAILED = "PLANNER_FAILED"
     TOOL_FAILED = "TOOL_FAILED"
 
 
@@ -78,11 +81,15 @@ InvestigationAction = CallTool | Finish | AskUser
 
 
 class InvestigationPlanner(Protocol):
-    """决策契约。实现方必须能说明自己是谁——不要把规则包装成模型。"""
+    """决策契约。实现方必须能说明自己是谁——不要把规则包装成模型。
+
+    `plan` 是**异步**的：模型驱动的决策者需要发起网络调用，规则与脚本决策者则立即返回。
+    循环只 `await` 它，不关心背后是模型还是规则。
+    """
 
     name: str
 
-    def plan(
+    async def plan(
         self,
         *,
         requirement: str,
@@ -236,26 +243,45 @@ class PlannerUnavailable(Exception):
     """决策者不具备所需能力。必须显式失败，不能用规则顶替并宣称是模型决策。"""
 
 
+class PlannerDecisionError(Exception):
+    """决策者具备动作能力，但这次没有给出可执行的动作。
+
+    典型来源：模型选了白名单之外的工具、参数不符合 schema、参数里夹带身份字段，
+    或模型调用本身失败。这些都不允许被悄悄降级成"跳过这一步继续生成草案"，
+    必须变成可见的停止原因。
+    """
+
+
 class ProviderPlanner:
     """把模型的原生动作能力接进循环。
 
-    关键约束：provider 必须**明确声明**支持动作决策。当前 OpenAI 兼容 provider
-    只实现了 `generate`（返回草案文本），因此这里会显式报告不可用，
-    而不是拿规则去冒充"模型的选择"。
+    关键约束：provider 必须**明确声明**支持动作决策（实现 `decide()`）。
+    不具备时这里显式报告不可用，而不是拿规则去冒充"模型的选择"。
+
+    `tools` 是**服务端**给出的只读工具规格（来自工具注册表）。它只用于两件事：
+    告诉模型哪些只读工具可用、以及校验模型给出的参数。模型无从新增工具或改写身份。
     """
 
     name = "provider"
 
-    def __init__(self, provider: Any) -> None:
+    def __init__(self, provider: Any, tools: list[dict[str, Any]] | None = None) -> None:
         if not hasattr(provider, "decide"):
             raise PlannerUnavailable(
                 f"provider {getattr(provider, 'name', type(provider).__name__)} 未实现 decide()，"
                 "无法进行模型驱动的工具选择；请显式选择 RulePlanner，或为该 provider 实现动作契约。"
             )
         self._provider = provider
+        self._tools = list(tools or [])
+        # 由 provider 报告的 token 用量；缺失时保持 None，循环据此标为 unknown 而不是 0。
+        self.last_usage: Any = None
 
-    def plan(self, **kwargs: Any) -> InvestigationAction:
-        return self._provider.decide(**kwargs)
+    async def plan(self, **kwargs: Any) -> InvestigationAction:
+        try:
+            action = await self._provider.decide(tools=list(self._tools), **kwargs)
+        except Exception as error:  # noqa: BLE001 - 决策失败必须变成可见的停止原因，不能让循环崩掉
+            raise PlannerDecisionError(f"{type(error).__name__}: {error}") from error
+        self.last_usage = getattr(self._provider, "last_usage", None)
+        return action
 
 
 class RulePlanner:
@@ -273,7 +299,7 @@ class RulePlanner:
             ("search_historical_changes", {"query": "{requirement}", "limit": 2}),
         ]
 
-    def plan(
+    async def plan(
         self,
         *,
         requirement: str,
@@ -306,7 +332,7 @@ class ScriptedPlanner:
         self._actions = list(actions)
         self.seen_rounds: list[int] = []
 
-    def plan(self, *, round_index: int, **_kwargs: Any) -> InvestigationAction:
+    async def plan(self, *, round_index: int, **_kwargs: Any) -> InvestigationAction:
         self.seen_rounds.append(round_index)
         if round_index > len(self._actions):
             return Finish()
@@ -375,16 +401,23 @@ class BoundedInvestigation:
 
         for round_index in range(1, self._max_rounds + 1):
             report.rounds = round_index
-            action = self._planner.plan(
-                requirement=requirement,
-                slots=slots,
-                evidence=list(evidence),
-                called_tools=list(called_tools),
-                round_index=round_index,
-                # 把**全部**结构化观察反馈给下一轮：只给搜索 hits 会让决策者
-                # 看不见已经拿到的表结构、变更上下文与扫描结果。
-                observations=list(observations),
-            )
+            try:
+                action = await self._planner.plan(
+                    requirement=requirement,
+                    slots=slots,
+                    evidence=list(evidence),
+                    called_tools=list(called_tools),
+                    round_index=round_index,
+                    # 把**全部**结构化观察反馈给下一轮：只给搜索 hits 会让决策者
+                    # 看不见已经拿到的表结构、变更上下文与扫描结果。
+                    observations=list(observations),
+                )
+            except PlannerDecisionError as error:
+                # 决策者没能给出可执行的动作。此时**没有任何工具被执行**，
+                # 因此不能算作"调用失败"，也不能继续生成草案。
+                report.stop_reason = StopReason.PLANNER_FAILED.value
+                notes.append(f"决策者未能给出可执行的动作：{error}")
+                break
 
             if isinstance(action, Finish):
                 missing = self._required.missing(evidence, slots, schema_snapshot)
@@ -482,15 +515,19 @@ class BoundedInvestigation:
         return InvestigationOutcome(evidence=evidence, report=report)
 
 
-def build_planner(settings: Any, provider: Any) -> InvestigationPlanner:
+def build_planner(
+    settings: Any, provider: Any, tools: list[dict[str, Any]] | None = None
+) -> InvestigationPlanner:
     """按配置选择决策者。
 
     默认是规则决策者：它明确叫 "rule"，不冒充模型。想让模型参与工具选择，
     必须显式要求 provider 决策，而 provider 不具备该能力时会**显式失败**。
+
+    `tools` 是服务端给出的只读工具规格，只有模型决策者会用到：模型只能在这些工具里选。
     """
     requested = str(getattr(settings, "investigation_planner", "rule") or "rule").lower()
     if requested == "provider":
-        return ProviderPlanner(provider)
+        return ProviderPlanner(provider, tools=tools)
     if requested != "rule":  # pragma: no cover - 配置校验在 Settings 层
         raise PlannerUnavailable(f"未知的决策者：{requested}")
     return RulePlanner()

@@ -413,8 +413,8 @@ P1 的目标是"受约束调查 Agent"。本轮先做**前置修复**：调查�
 决策者的能力必须显式声明，不允许把规则包装成模型：
 
 - `RulePlanner`：**确定性规则**决策者，名字就是 `rule`，报告里也写 `planner=rule`；
-- `ProviderPlanner`：要求 provider 具备原生动作契约（`decide()`）。当前 OpenAI 兼容
-  provider 只实现了 `generate`（返回草案文本），因此会**显式报告不可用**，
+- `ProviderPlanner`：要求 provider 具备原生动作契约（`decide()`）。OpenAI 兼容 provider
+  自 §11.5 起实现了该契约；不具备 `decide()` 的 provider 会**显式报告不可用**，
   事件里留下「调查循环未启动」+ 原因，而不是用规则顶替并宣称是模型的选择；
 - `ScriptedPlanner`：供测试构造确定动作序列。
 
@@ -429,19 +429,64 @@ P1 的目标是"受约束调查 Agent"。本轮先做**前置修复**：调查�
 > **这不是"已复现的缺陷"，是新能力**：循环此前不存在，因此没有"改前失败"的证据，
 > 这 15 项用例是**新行为的规格**，不是缺陷复现。不要混为一谈。
 
-### 11.4 P1 仍未完成的部分
+### 11.4 P1 剩余部分
 
 | 项 | 状态 |
 | --- | --- |
-| C1 重试分层 / C2 自封确认 / C3 版本 / C4·C5 补充字段 / C6 方言 | ✅ 完成 |
-| 受约束调查循环（预算、空转、必需证据、策略开关、决策者能力声明） | ✅ 完成（本节） |
-| **模型原生工具选择**（provider 实现 `decide()`，用真实函数调用驱动动作） | ⬜ 未实现——当前只到"显式报告不可用"这一步，需要一个真实模型才能验证 |
-| 工具结果的结构化截断与证据标识/版本/**摘要哈希** | ⬜ 未实现（当前只做片段级引用） |
-| usage 缺失时的预算策略（不得把未知 token/费用填 0） | ⬜ 未实现 |
+| C1 重试分层 / C2 自封确认 / C3 版本 / C4·C5 补充字段 / C6 方言 | ✅ 完成（§11.1） |
+| 受约束调查循环（预算、空转、必需证据、策略开关、决策者能力声明） | ✅ 完成（§11.3） |
+| **模型原生工具选择**（provider 实现 `decide()`，用原生函数调用驱动动作） | ✅ 完成（§11.5） |
+| 工具结果的结构化截断与证据标识/版本/摘要哈希 | ✅ 完成（`ToolObservation.payload_digest`，用例 `test_all_tool_results_are_fed_back_not_only_search_hits`） |
+| usage 缺失时的预算策略（不得把未知 token/费用填 0） | ✅ 完成（`UsageBudget.known`，用例 `test_usage_is_unknown_rather_than_zero`） |
 | `fixed_workflow` 与 `bounded_agent` 的**同输入对照评测** | ⬜ 未实现（属 P3 评测范围） |
 
-**不得把 §11.3 读成"P1 全部完成"。** 模型驱动的动作选择尚未实现——这是受约束调查
-与"固定脚本"的分界线，目前只做到了"不冒充"这一步，还没做到"真让模型选"。
+**受约束调查循环与"固定脚本"的分界线已经跨过**：模型现在真的能选择只读工具（§11.5）。
+但"模型能选"不等于"模型质量已证明"——真实模型评测仍为 `NOT_RUN`（§11.6）。
+
+### 11.5 模型原生动作决策（P1 主体）
+
+`InvestigationPlanner.plan` 改为 **async**：三个实现（`ProviderPlanner` / `RulePlanner` /
+`ScriptedPlanner`）、循环里的调用、以及直接调用 `plan` 的测试辅助类都随之改。
+`OpenAICompatibleProvider` 新增 `decide()`：用 OpenAI 兼容的**原生函数调用**让模型自己选择
+只读工具，返回 `CallTool` / `Finish` / `AskUser`。
+
+边界依旧由代码强制，不由提示词强制：
+
+| 边界 | 实现 |
+| --- | --- |
+| 工具白名单 | `MODEL_ACTION_TOOLS` 在 `app/llm/provider.py` **单独声明**，不从注册表推导；下发时还要求 `read_only=True`。注册表新增写工具不会自动进入模型可见集合 |
+| 一致性断言 | `test_model_action_whitelist_matches_registry_read_only_tools` 断言白名单**恰好等于**注册表只读工具集合：新增只读工具会使它失败，迫使作者显式登记；新增写工具不影响它 |
+| 参数校验 | 复用注册表同一套 `validate_args`：未知字段、类型不符、缺必填一律拒绝，且该动作**不会被执行** |
+| 身份与授权 | 只能来自服务端：`decide()` 在 schema 校验**之前**显式拒绝 `organization_id` / `X-Actor-Id` 等身份字段；工具执行用的是循环持有的 `TrustedContext`，模型参数无法覆盖 |
+| 决策失败 | 未知工具、非法参数、伪造身份、模型调用失败 → `PlannerDecisionError` → 循环以 `PLANNER_FAILED` 停下；**不把失败当成"跳过"**，也不会继续生成草案 |
+| 完成条件 | 模型调用 `finish_investigation` 只表示"查完了"；证据是否足够仍由 `RequiredEvidence` 判定 |
+
+`ProviderPlanner` 接收**服务端**给出的只读工具规格（`build_planner(settings, provider, registry.specs())`），
+只用于告诉模型有哪些工具、以及校验参数——模型无从新增工具。
+
+新增 `tests/test_provider_action_decisions.py`（22 项），全部用 `httpx.MockTransport` 模拟
+OpenAI 兼容端点，覆盖：多轮动作、非法参数（类型/缺必填/未知字段）、未知工具、伪造身份、
+模型请求超时、模型所选工具超时、取消、工具调用预算耗尽、模型自封完成不改变证据判定、usage 上报。
+
+> **这不是真实模型质量证明。** MockTransport 验证的是**契约与边界**，不是模型决策质量；
+> 用例本身也不产生任何"准确率/延迟"数字。
+
+### 11.6 本轮验证与未运行项
+
+| 命令 | 结果 |
+| --- | --- |
+| `pytest -q` | **183 passed**（§11.3 后 161 + 本轮新增 22） |
+| `evals/run_eval.py --provider deterministic` | **11/11** → `evals/reports/20260918-014314-deterministic.json` |
+| `go test ./internal/agent ./internal/httpapi ./internal/service -count=1` | 三个包 **ok**（0.540s / 0.792s / 0.679s） |
+
+**NOT_RUN（不得当作通过）**：
+
+| 项 | 原因 |
+| --- | --- |
+| 真实模型（live）动作决策评测 | 未配置专用测试凭据与预算；不把 MockTransport 结果当模型质量 |
+| 真实模型（live）草案质量评测 | 同上 |
+| `go test -race ./...`、PostgreSQL/Redis 集成、Playwright e2e | 本机不满足运行条件，仅 Linux CI 覆盖 |
+
 
 ---
 

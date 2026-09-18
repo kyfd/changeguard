@@ -377,7 +377,8 @@ class DraftWorkflow:
     ) -> tuple[list[EvidenceRef], list[str], dict[str, Any], str]:
         """走受约束调查循环，并把结论整理成**结构化状态**供路由使用。"""
         try:
-            planner = build_planner(self._deps.settings, self._deps.provider)
+            # 只把**服务端**的只读工具规格交给决策者：模型能选的工具集合不来自模型本身。
+            planner = build_planner(self._deps.settings, self._deps.provider, registry.specs())
         except PlannerUnavailable as error:
             # 明确失败：既不能悄悄继续生成，也不能用规则顶替并说成"模型的选择"。
             reason = f"调查循环未启动：{error}"
