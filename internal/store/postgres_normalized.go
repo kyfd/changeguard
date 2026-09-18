@@ -628,7 +628,14 @@ func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, cons
 	}
 	if consume && rowStatus == string(model.PassportConsumed) {
 		if sameConsumerReplay(*item, rowToken, consumer) {
-			return publicPassport(*item, false), nil, version, nil
+			// 同一消费者的重放是"一次逻辑消费"。必须把**已提交**的快照回传给调用方：
+			// 少了它，并发竞争里走重放分支的那一方只会返回成功，却一直保留 ACTIVE 的
+			// 陈旧内存快照——随后的本地读取仍会显示通行证可用。
+			payload, err := json.Marshal(data)
+			if err != nil {
+				return model.Passport{}, nil, 0, err
+			}
+			return publicPassport(*item, false), payload, version, nil
 		}
 		return model.Passport{}, nil, 0, ErrPassportReplay
 	}
@@ -679,7 +686,12 @@ func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, cons
 		return model.Passport{}, nil, 0, ErrPassportChangeInvalid
 	}
 	if !consume {
-		return publicPassport(*item, false), nil, version, nil
+		// 同样的道理：校验调用也不应留下陈旧快照。
+		payload, err := json.Marshal(data)
+		if err != nil {
+			return model.Passport{}, nil, 0, err
+		}
+		return publicPassport(*item, false), payload, version, nil
 	}
 	item.Status = model.PassportConsumed
 	item.ConsumedAt = &at
