@@ -201,6 +201,7 @@ class Toolbox:
                         "section": item.chunk.section,
                         "version": item.chunk.version,
                         "status": item.chunk.status,
+                        "applicability": item.chunk.applicability,
                         "snippet": item.chunk.as_snippet(),
                         "source": item.chunk.source,
                         "score": item.score,

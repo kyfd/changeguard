@@ -23,6 +23,10 @@ MIN_CHUNK_CHARS = 80
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _VERSION = re.compile(r"文档版本[：:]\s*([^\s　]+)")
+# **适用范围**（适用数据库/环境/场景）。这与 P0 修掉的 `_SCOPE` 用途不同：
+# 那个是把正文里的"适用范围"误当成**租户身份**；这里把它当作**适用性元数据**，
+# 用来判断一条规范是否适用于当前目标（数据库/环境），不参与任何组织隔离。
+_APPLICABILITY = re.compile(r"适用范围[：:]\s*([^\n　]+)")
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,8 @@ class Chunk:
     version: str = ""
     status: str = "unknown"  # active / deprecated / unknown
     organization_id: str = ""
+    # 适用性原文（例如"PostgreSQL 生产库"）。空串表示**文档没写**，即无法核对适用性。
+    applicability: str = ""
 
     def as_snippet(self, limit: int = 160) -> str:
         text = " ".join(self.content.split())
@@ -99,6 +105,8 @@ def chunk_markdown(text: str, doc_id: str, title: str, source: str, organization
     """把一份 Markdown 文档切成带章节路径的片段。"""
     version_match = _VERSION.search(text)
     version = version_match.group(1) if version_match else ""
+    applicability_match = _APPLICABILITY.search(text[:600])
+    applicability = applicability_match.group(1).strip() if applicability_match else ""
     status = "deprecated" if re.search(r"(已废弃|已失效|deprecated)", text[:400], re.IGNORECASE) else "active"
 
     sections: list[tuple[str, list[str]]] = []
@@ -143,6 +151,7 @@ def chunk_markdown(text: str, doc_id: str, title: str, source: str, organization
                     version=previous.version,
                     status=previous.status,
                     organization_id=previous.organization_id,
+                    applicability=previous.applicability,
                 )
                 continue
             index += 1
@@ -157,6 +166,7 @@ def chunk_markdown(text: str, doc_id: str, title: str, source: str, organization
                     version=version,
                     status=status,
                     organization_id=organization_id,
+                    applicability=applicability,
                 )
             )
     return chunks

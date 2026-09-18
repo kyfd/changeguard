@@ -20,7 +20,7 @@ import pytest
 
 from app.config import Settings
 from app.llm.provider import DeterministicProvider
-from app.schemas.drafts import TaskSlots, TaskStatus, ToolResult
+from app.schemas.drafts import DatabaseKind, TaskSlots, TaskStatus, ToolResult
 from app.service import AgentService
 from app.tools.registry import TrustedContext
 from app.workflow.investigate import (
@@ -37,7 +37,7 @@ from app.workflow.investigate import (
 from tests.conftest import complete_request, run
 
 CONTEXT = TrustedContext(user_id="alice", organization_id="org_demo")
-SLOTS = TaskSlots(application="order-service", environment="生产", table="orders")
+SLOTS = TaskSlots(application="order-service", environment="生产", database=DatabaseKind.POSTGRESQL, table="orders")
 
 
 def hit(evidence_id: str, doc_id: str = "norms/sql-change-standards") -> dict[str, Any]:
@@ -52,6 +52,8 @@ def hit(evidence_id: str, doc_id: str = "norms/sql-change-standards") -> dict[st
         "version": "v1.0",
         "status": "active",
         "score": 1.0,
+        # 适用范围必须标注且覆盖目标数据库，否则不能作为必需证据（unknown 不等于有效）。
+        "applicability": "PostgreSQL 生产库",
     }
 
 
@@ -290,6 +292,74 @@ def test_targeted_table_without_snapshot_is_insufficient() -> None:
 
     assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
     assert any("结构快照" in item for item in outcome.report.missing_required)
+
+
+# ---------------------------------------------------------------------------
+# 证据的**适用性**：不是"命中 norms/ 且快照非空"就算够
+# ---------------------------------------------------------------------------
+
+
+def _sufficient_outcome(hit_payload: dict[str, Any], *, snapshot: str = SNAPSHOT):
+    planner = ScriptedPlanner([CallTool("search_norms", {"query": "索引"}), Finish()])
+    registry = FakeRegistry({"search_norms": [hit_payload]})
+    loop = build(planner, registry)
+    return run(loop.run(requirement="订单索引", slots=SLOTS, schema_snapshot=snapshot))
+
+
+def test_snapshot_without_the_target_table_is_insufficient() -> None:
+    """快照非空但里面没有目标表 → 不能据此生成草案。"""
+    other = "CREATE TABLE audit_log (id bigint);"
+    outcome = _sufficient_outcome(hit("norms/x#1"), snapshot=other)
+
+    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert any("未找到目标表" in item for item in outcome.report.missing_required), outcome.report.missing_required
+
+
+def test_unparseable_snapshot_is_insufficient() -> None:
+    """解析不出任何表定义时，必须显式判为"无法核对"，不能当成已核对。"""
+    outcome = _sufficient_outcome(hit("norms/x#1"), snapshot="字段：id, user_id, created_at")
+
+    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert any("未能识别出任何表定义" in item for item in outcome.report.missing_required), outcome.report.missing_required
+
+
+def test_norm_with_mismatched_applicability_is_insufficient() -> None:
+    """规范适用范围是 MySQL，而目标是 PostgreSQL → 不能作为必需证据。"""
+    payload = hit("norms/x#1")
+    payload["applicability"] = "MySQL 生产库"
+    outcome = _sufficient_outcome(payload)
+
+    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert any("适用范围" in item for item in outcome.report.missing_required), outcome.report.missing_required
+
+
+def test_norm_without_applicability_is_insufficient() -> None:
+    """文档没写适用范围 = 无法核对 = 不算适用（unknown 不等于有效）。"""
+    payload = hit("norms/x#1")
+    payload["applicability"] = ""
+    outcome = _sufficient_outcome(payload)
+
+    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert any("适用范围" in item for item in outcome.report.missing_required), outcome.report.missing_required
+
+
+def test_unknown_status_norm_is_not_treated_as_valid() -> None:
+    """状态未知的规范不算有效证据。"""
+    payload = hit("norms/x#1")
+    payload["status"] = "unknown"
+    outcome = _sufficient_outcome(payload)
+
+    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert any("未知" in item for item in outcome.report.missing_required), outcome.report.missing_required
+
+
+def test_applicability_is_scoped_per_database() -> None:
+    """同一个适用范围文本对不同目标库的判定必须一致且可解释。"""
+    from app.workflow.investigate import _applicable_to
+
+    assert _applicable_to("PostgreSQL 生产库", "postgresql") is True
+    assert _applicable_to("MySQL 生产库", "postgresql") is False
+    assert _applicable_to("", "postgresql") is False
 
 
 # ---------------------------------------------------------------------------

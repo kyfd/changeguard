@@ -95,6 +95,8 @@ class EvidenceRef(BaseModel):
     source: str
     status: Literal["active", "deprecated", "unknown"] = "unknown"
     score: float = 0.0
+    # 适用范围原文（例如"PostgreSQL 生产库"）。缺失表示文档没写，即**无法核对适用性**。
+    applicability: str = ""
 
 
 class Assumption(BaseModel):
