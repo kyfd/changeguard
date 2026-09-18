@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping, Protocol
 
+from app.budget import TaskBudgetExceeded, UsageLedger, usage_scope
 from app.schemas.drafts import EvidenceRef, TaskSlots, ToolResult
 
 # 引用片段里只保留这些前缀的文档作为"规范"，与检索层的作用域一致。
@@ -55,6 +56,8 @@ class StopReason(str, Enum):
     # 试图改写身份、模型调用失败等）。与 PLANNER_UNAVAILABLE（根本没有动作能力）区分开。
     PLANNER_FAILED = "PLANNER_FAILED"
     TOOL_FAILED = "TOOL_FAILED"
+    # 任务级 token 预算用尽：不是故障，是按预算主动停止。
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
 
 
 @dataclass(frozen=True)
@@ -162,23 +165,53 @@ class ToolObservation:
 
 @dataclass
 class UsageBudget:
-    """token / 费用预算的已知性。
+    """调查部分的 token 用量：**按请求累计**，缺失即显式未知。
 
     **usage 缺失时必须标 unknown，不得填 0**：0 是一个"确定没有消耗"的断言，
     而缺失只是"不知道"。两者混同会让成本报告看起来精确，实际是编的。
     """
 
-    known: bool = False
+    requests: int = 0
+    reported: int = 0
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     cost_estimate: float | None = None
     note: str = "usage 未由 provider 提供：token 与费用标记为未知，不做估算"
 
-    def record(self, *, prompt_tokens: int, completion_tokens: int) -> None:
-        self.known = True
-        self.prompt_tokens = prompt_tokens
-        self.completion_tokens = completion_tokens
-        self.note = "usage 由 provider 提供"
+    @property
+    def known(self) -> bool:
+        """只有**每一次**响应都提供了 usage，总量才算已知。"""
+        return self.requests > 0 and self.reported == self.requests
+
+    @property
+    def missing(self) -> int:
+        return self.requests - self.reported
+
+    def add_usage(self, usage: Mapping[str, Any] | None) -> None:
+        self.requests += 1
+        if not isinstance(usage, Mapping):
+            self.note = f"{self.missing} 次模型响应未提供 usage：总量不完整，不填 0 冒充已知"
+            return
+        self.reported += 1
+        self.prompt_tokens = int(self.prompt_tokens or 0) + int(usage.get("prompt_tokens") or 0)
+        self.completion_tokens = int(self.completion_tokens or 0) + int(usage.get("completion_tokens") or 0)
+        self.note = (
+            "usage 由 provider 按请求累计"
+            if self.known
+            else f"{self.missing} 次模型响应未提供 usage：总量不完整，不填 0 冒充已知"
+        )
+
+    def merge(self, ledger: UsageLedger) -> None:
+        """把一段（例如某一轮）的记账并入本预算。"""
+        self.requests += ledger.requests
+        self.reported += ledger.reported
+        if ledger.reported:
+            self.prompt_tokens = int(self.prompt_tokens or 0) + ledger.prompt_tokens
+            self.completion_tokens = int(self.completion_tokens or 0) + ledger.completion_tokens
+        if self.known:
+            self.note = "usage 由 provider 按请求累计"
+        elif self.requests:
+            self.note = f"{self.missing} 次模型响应未提供 usage：总量不完整，不填 0 冒充已知"
 
 
 def digest_payload(payload: Any) -> str:
@@ -278,6 +311,9 @@ class ProviderPlanner:
     async def plan(self, **kwargs: Any) -> InvestigationAction:
         try:
             action = await self._provider.decide(tools=list(self._tools), **kwargs)
+        except TaskBudgetExceeded:
+            # 预算用尽必须原样上抛：它是"按预算停止"，不是决策者坏了。
+            raise
         except Exception as error:  # noqa: BLE001 - 决策失败必须变成可见的停止原因，不能让循环崩掉
             raise PlannerDecisionError(f"{type(error).__name__}: {error}") from error
         self.last_usage = getattr(self._provider, "last_usage", None)
@@ -397,27 +433,39 @@ class BoundedInvestigation:
         seen_signatures: set[str] = set()
         observations: list[ToolObservation] = []
         notes: list[str] = []
+        # 调查部分的用量：按轮记账、按请求累计；缺失即未知，不用上一次的值顶替。
+        usage = UsageBudget()
         report = InvestigationReport(planner=self._planner.name, stop_reason=StopReason.ROUNDS_EXHAUSTED.value)
 
         for round_index in range(1, self._max_rounds + 1):
             report.rounds = round_index
+            round_ledger = UsageLedger()
             try:
-                action = await self._planner.plan(
-                    requirement=requirement,
-                    slots=slots,
-                    evidence=list(evidence),
-                    called_tools=list(called_tools),
-                    round_index=round_index,
-                    # 把**全部**结构化观察反馈给下一轮：只给搜索 hits 会让决策者
-                    # 看不见已经拿到的表结构、变更上下文与扫描结果。
-                    observations=list(observations),
-                )
+                with usage_scope(round_ledger):
+                    action = await self._planner.plan(
+                        requirement=requirement,
+                        slots=slots,
+                        evidence=list(evidence),
+                        called_tools=list(called_tools),
+                        round_index=round_index,
+                        # 把**全部**结构化观察反馈给下一轮：只给搜索 hits 会让决策者
+                        # 看不见已经拿到的表结构、变更上下文与扫描结果。
+                        observations=list(observations),
+                    )
+            except TaskBudgetExceeded as error:
+                # 任务级 token 预算用尽：按预算主动停止，并如实标注原因。
+                report.stop_reason = StopReason.BUDGET_EXHAUSTED.value
+                notes.append(f"任务预算用尽，调查提前停止：{error}")
+                usage.merge(round_ledger)
+                break
             except PlannerDecisionError as error:
                 # 决策者没能给出可执行的动作。此时**没有任何工具被执行**，
                 # 因此不能算作"调用失败"，也不能继续生成草案。
                 report.stop_reason = StopReason.PLANNER_FAILED.value
                 notes.append(f"决策者未能给出可执行的动作：{error}")
+                usage.merge(round_ledger)
                 break
+            usage.merge(round_ledger)
 
             if isinstance(action, Finish):
                 missing = self._required.missing(evidence, slots, schema_snapshot)
@@ -499,13 +547,13 @@ class BoundedInvestigation:
         report.observations = observations
         report.missing_required = self._required.missing(evidence, slots, schema_snapshot)
         report.notes = notes
-        # 只有决策者**确实提供了** usage 时才记录；没有就是 unknown，绝不填 0。
-        last_usage = getattr(self._planner, "last_usage", None)
-        if isinstance(last_usage, Mapping) and {"prompt_tokens", "completion_tokens"} <= set(last_usage):
-            report.usage.record(
-                prompt_tokens=int(last_usage["prompt_tokens"]),
-                completion_tokens=int(last_usage["completion_tokens"]),
-            )
+        # 规则/脚本决策者没有逐次响应可记账，但可以声明一个总量；只有在整轮都没经过
+        # provider 记账时才用它，避免把同一份用量重复计入。
+        if usage.requests == 0:
+            last_usage = getattr(self._planner, "last_usage", None)
+            if isinstance(last_usage, Mapping) and {"prompt_tokens", "completion_tokens"} <= set(last_usage):
+                usage.add_usage(last_usage)
+        report.usage = usage
         # 预算用尽但必需证据已经齐了，就不是"证据不足"，如实改判。
         if (
             report.stop_reason in {StopReason.ROUNDS_EXHAUSTED.value, StopReason.TOOL_CALLS_EXHAUSTED.value}

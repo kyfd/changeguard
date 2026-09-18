@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from app.budget import UsageLedger, usage_scope
 from app.config import Settings
 from app.llm.provider import build_provider
 from app.retrieval.corpus import build_retriever
@@ -755,16 +756,33 @@ class AgentService:
             "max_revisions": self._settings.max_revisions,
         }
 
+        # 任务级记账器：provider 是共享的，用量必须记在**每个任务自己的**记账器上，
+        # 否则并发任务会互相串数；预算上限也在这一层生效。
+        ledger = UsageLedger(
+            max_total_tokens=int(getattr(self._settings, "max_task_tokens", 0) or 0),
+            max_prompt_tokens=int(getattr(self._settings, "max_task_prompt_tokens", 0) or 0),
+            max_cost_estimate=float(getattr(self._settings, "max_task_cost_estimate", 0.0) or 0.0),
+            prompt_price_per_1k=float(getattr(self._settings, "llm_price_prompt_per_1k", 0.0) or 0.0),
+            completion_price_per_1k=float(getattr(self._settings, "llm_price_completion_per_1k", 0.0) or 0.0),
+            # 未提供 usage 的响应按一个保守值计入预算判定；没配置就用单次输出上界。
+            unknown_charge_tokens=int(getattr(self._settings, "unknown_usage_charge_tokens", 0) or 0)
+            or int(self._settings.llm_max_tokens),
+        )
+
         async with open_checkpointer(self._settings) as saver:
             workflow = self._build_workflow(record, saver)
-            if resume is None:
-                await _delete_thread(saver, task_id)
-                record["resume_mode"] = None
-                result = await workflow.run(initial_state, thread_id=task_id)  # type: ignore[arg-type]
-            elif resume.get("mode") == RESUME_INTERRUPT:
-                result = await workflow.resume_interrupt(thread_id=task_id, value=resume.get("value") or {})
-            else:
-                result = await workflow.continue_pending(thread_id=task_id)
+            with usage_scope(ledger):
+                if resume is None:
+                    await _delete_thread(saver, task_id)
+                    record["resume_mode"] = None
+                    result = await workflow.run(initial_state, thread_id=task_id)  # type: ignore[arg-type]
+                elif resume.get("mode") == RESUME_INTERRUPT:
+                    result = await workflow.resume_interrupt(thread_id=task_id, value=resume.get("value") or {})
+                else:
+                    result = await workflow.continue_pending(thread_id=task_id)
+
+        # 任务级用量：按请求累计；缺失即 unknown，不用上一次的值顶替。
+        record["usage"] = ledger.as_dict()
 
         interrupts = result.get("__interrupt__") if isinstance(result, dict) else None
         if interrupts:
@@ -793,7 +811,6 @@ class AgentService:
                 # 调查轨迹与预算原样落库，供工作台展示"实际执行了什么、为什么停下"。
                 "investigation": investigation or record.get("investigation"),
                 "strategy": investigation.get("strategy") or record.get("strategy"),
-                "usage": investigation.get("usage") or record.get("usage"),
             }
         )
         # 草案重新生成后，与当前内容不一致的旧确认立即失效（保留痕跡）。

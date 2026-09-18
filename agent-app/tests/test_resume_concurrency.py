@@ -129,3 +129,51 @@ def test_resume_is_refused_while_an_execution_is_in_flight(
 
     outcome = run(scenario())
     assert outcome["status"] == TaskStatus.DRAFT_READY.value, outcome
+
+
+def test_cancel_during_checkpoint_read_is_not_overwritten_by_resume(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取消与并发恢复：恢复在读检查点期间被取消插入时，不得把 CANCELLED 覆盖成 RUNNING。
+
+    这是用户报告的场景：取消返回 CANCELLED，随后恢复返回 RUNNING 并再次派发任务。
+    用事件屏障把"读取检查点"卡住，让取消完整跑完，再放行恢复。
+    """
+    service = AgentService(settings)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_inspect = AgentService._inspect_checkpoint
+
+    async def gated_inspect(self: AgentService, task_id: str) -> dict[str, Any] | None:
+        entered.set()
+        await release.wait()
+        return await original_inspect(self, task_id)
+
+    monkeypatch.setattr(AgentService, "_inspect_checkpoint", gated_inspect)
+
+    async def scenario() -> dict[str, Any]:
+        paused, _ = await service.create_task(bare_request(), CONTEXT)
+        task_id = paused.task_id
+        assert paused.status is TaskStatus.NEEDS_INFO
+
+        resume = asyncio.create_task(service.resume(task_id, CONTEXT, full_clarification()))
+        await asyncio.wait_for(entered.wait(), timeout=10)
+
+        cancelled = await service.cancel(task_id, CONTEXT)
+        assert cancelled.status is TaskStatus.CANCELLED
+
+        release.set()
+        error: str | None = None
+        try:
+            resumed = await asyncio.wait_for(resume, timeout=30)
+            error = f"ACCEPTED status={resumed.status.value}"
+        except TaskNotResumable as refusal:
+            error = f"REFUSED: {refusal}"
+
+        final = await service.get_task(task_id, CONTEXT)
+        return {"resume_outcome": error, "final_status": final.status.value}
+
+    outcome = run(scenario())
+
+    assert outcome["final_status"] == TaskStatus.CANCELLED.value, f"取消被恢复覆盖：{outcome}"
+    assert outcome["resume_outcome"].startswith("REFUSED"), f"取消后不得再受理恢复：{outcome}"

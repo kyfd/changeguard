@@ -918,8 +918,9 @@ function renderTrajectory(task) {
   const usageText = !usage
     ? "未知（provider 未提供）"
     : usage.known
-      ? `prompt ${usage.prompt_tokens} · completion ${usage.completion_tokens}`
-      : "unknown（provider 未提供 token 用量；缺失不填 0）";
+      ? `prompt ${usage.prompt_tokens} · completion ${usage.completion_tokens}` +
+        (usage.cost_estimate === null || usage.cost_estimate === undefined ? " · 费用未知" : ` · 费用 ${usage.cost_estimate}`)
+      : `${usage.missing_responses || 0}/${usage.requests || 0} 次响应未提供 usage：总量不完整（不填 0 冒充已知）`;
 
   const items = observations.length
     ? observations.map((item) => `

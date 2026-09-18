@@ -30,6 +30,7 @@ from typing import Any, Awaitable, Callable
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
+from app.budget import TaskBudgetExceeded
 from app.config import Settings
 from app.guard import detect_injection
 from app.llm.provider import DraftProvider, DraftRequest, ModelCallError
@@ -531,6 +532,17 @@ class DraftWorkflow:
                     ],
                 }
             )
+        elif report.stop_reason == StopReason.BUDGET_EXHAUSTED.value:
+            # 预算用尽必须**终止**，而不是继续生成：继续只会再打一次模型并同样被拒。
+            investigation.update(
+                {
+                    "blocked": True,
+                    "status": TaskStatus.FAILED.value,
+                    "block_reason": "任务 token 预算已用尽，调查已停止；请提高预算或缩小范围后重试",
+                    "questions": [],
+                }
+            )
+            notes.append("任务 token 预算用尽，未继续生成草案")
         elif report.missing_required:
             # 必需证据缺失不得进入草稿生成——那会产出一份看起来可用的草案。
             investigation.update(
@@ -593,6 +605,10 @@ class DraftWorkflow:
                 failures.append(
                     f"模型调用失败（类型={error.failure_type}，已发出 {error.requests_sent} 次请求）：{error}"
                 )
+                break
+            except TaskBudgetExceeded as error:
+                # 预算用尽：不再重试、也不再消耗解析次数，直接如实失败。
+                failures.append(f"任务 token 预算已用尽，停止生成：{error}")
                 break
             except DraftParseError as error:
                 # 只有这一种失败才消耗解析重试：确实拿到了文本，但解析不出合格草案。

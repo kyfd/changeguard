@@ -42,7 +42,14 @@ async def open_checkpointer(settings: Settings) -> AsyncIterator[Any]:
     每次调用都重新 `setup()`：建表是幂等的，且这样重启后无需额外的初始化步骤。
     """
     # 延迟导入：只有真正要跑工作流时才需要这个可选依赖，导入失败应当发生在调用点。
-    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    # 但失败必须是**可执行的提示**，否则本地缺依赖时会变成一堆难归因的用例错误。
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except ImportError as error:  # pragma: no cover - 依赖缺失时的显式提示
+        raise RuntimeError(
+            "缺少检查点依赖 langgraph-checkpoint-sqlite（已在 pyproject.toml 声明）："
+            "请在 agent-app 目录执行 `pip install -e \".[dev]\"` 后重试"
+        ) from error
 
     path = checkpoint_path(settings)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
