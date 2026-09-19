@@ -225,6 +225,9 @@ class TaskView(BaseModel):
     # 本次执行是恢复还是全新执行：interrupt（从中断点续跑）/ checkpoint（续跑未完成节点）/
     # restart_from_scratch（受支持的重跑，明确不是续跑）/ None（首次执行）。
     resume_mode: str | None = None
+    # 恢复的执行语义。外部模型请求不保证 exactly-once：恢复会**重新执行**被中断的节点，
+    # 那次调用可能已经发出去了，因此这里是 `at_least_once`，不是"重放一次相同的执行"。
+    recovery_semantics: str | None = None
     # 进程重启时的处置策略，便于界面与验收复核。
     restart_policy: str | None = None
     # 当前材料摘要与人工确认记录（确认 ≠ 审批 ≠ 执行许可）。

@@ -64,6 +64,21 @@ PERSIST_FAILED = "failed"
 RESUME_INTERRUPT = "interrupt"
 RESUME_CHECKPOINT = "checkpoint"
 
+# 恢复的执行语义。**我们不宣称 exactly-once**：
+#
+# LangGraph 的节点级检查点保证的是"从哪个节点继续"，不是"那个节点没有执行过"。恢复一个
+# 中断的节点，等于**重新执行该节点**——`interrupt()` 之前的代码会再跑一遍，而如果进程是在
+# 节点执行到一半时消失的，那个节点根本没有完成过。两种情况都可能是 at-least-once。
+#
+# 外部模型请求尤其如此：请求可能在崩溃前就已经发出去了（账本会记下它），我们无法撤回，
+# 也不假装它没发生过。因此恢复时必须把这一不确定性**显式**写进记录与事件，而不是
+# 让"已从检查点恢复"读起来像"那次调用不存在"。
+RECOVERY_AT_LEAST_ONCE = "at_least_once"
+RECOVERY_UNCERTAINTY_NOTE = (
+    "恢复不宣称 exactly-once：被中断的节点可能已经开始执行，外部模型请求可能已经发出；"
+    "重新执行该节点属于 at-least-once。已发生的消耗以调用账本（usage）为准，不当作没有发生过。"
+)
+
 
 class TaskNotFound(Exception):
     """任务不存在。"""
@@ -246,7 +261,13 @@ class AgentService:
             record["status"] = TaskStatus.RUNNING.value
             record["error"] = None
             record["resume_mode"] = RESUME_INTERRUPT
+            # 从等待点继续同样会**重新执行该节点**（`interrupt()` 之前的代码会再跑一遍），
+            # 因此同样属于 at-least-once，必须如实标注而不是假装那次执行没发生过。
+            record["recovery_semantics"] = RECOVERY_AT_LEAST_ONCE
             record["resume_count"] = int(record.get("resume_count") or 0) + 1
+            events = list(record.get("events") or [])
+            events.append(event("recovery_at_least_once", RECOVERY_UNCERTAINTY_NOTE))
+            record["events"] = events
             self._repository.save(record)
             await self._dispatch_or_fail(
                 task_id, resume={"mode": RESUME_INTERRUPT, "value": _resume_value(record)}
@@ -327,9 +348,14 @@ class AgentService:
         record["status"] = TaskStatus.RUNNING.value
         record["error"] = None
         record["resume_mode"] = mode
+        # 不宣称 exactly-once：`interrupt` 与 `checkpoint` 两种模式都会**重新执行**节点，
+        # 而 `checkpoint` 模式的那个节点在中断前可能已经开始、甚至已经把模型请求发出去了。
+        # 与其假装那次调用不存在，不如把不确定性写进记录（消耗以账本为准）。
+        record["recovery_semantics"] = RECOVERY_AT_LEAST_ONCE
         record["resume_count"] = int(record.get("resume_count") or 0) + 1
         events = list(record.get("events") or [])
         events.append(event("resumed", f"从检查点恢复（mode={mode}）"))
+        events.append(event("recovery_at_least_once", RECOVERY_UNCERTAINTY_NOTE))
         record["events"] = events
         self._repository.save(record)
         await self._dispatch_or_fail(task_id, resume={"mode": mode, "value": value})
@@ -767,6 +793,12 @@ class AgentService:
         - `resume is None`：全新执行，先清掉该线程的旧检查点，避免意外"接着上次跑"；
         - `mode=interrupt`：从节点级中断继续，之前的节点不会重跑；
         - `mode=checkpoint`：续跑最后未完成的节点。
+
+        **外部模型请求不保证 exactly-once，这里也不这么宣称**：一次模型调用可能在进程崩溃
+        或请求被取消之前就已经发出去了，我们无法撤销它。能保证的是两点——
+        (1) 每次真的发出过的请求都会按次记进调用账本（并在恢复/重启后续算），
+        (2) 任务不会因为"看起来恢复过"就被当成没消耗过资源。因此恢复路径会显式写入
+        `recovery_semantics=at_least_once`（见 `resume` / `clarify`），并把不确定性留在事件里。
         """
         task_id = record["task_id"]
         initial_state: dict[str, Any] = {
@@ -830,6 +862,7 @@ class AgentService:
             events = list(result.get("events") or record.get("events") or [])
             events.append(event("awaiting_input", "图停在节点级中断上，等待用户补充信息后从该节点继续"))
             record["events"] = events
+            _annotate_recovery(record)
             return record
 
         record["awaiting_input"] = False
@@ -850,6 +883,7 @@ class AgentService:
         )
         # 草案重新生成后，与当前内容不一致的旧确认立即失效（保留痕跡）。
         _invalidate_stale_confirmations(record, "草案已重新生成，旧确认失效")
+        _annotate_recovery(record)
         return record
 
     def _build_workflow(self, record: dict[str, Any], checkpointer: Any) -> DraftWorkflow:
@@ -946,6 +980,8 @@ class AgentService:
                 "planned_at_missing": "planned_at" in (TaskSlots.model_validate(record.get("slots") or {}).missing()),
                 "awaiting_input": bool(record.get("awaiting_input")),
                 "resume_mode": record.get("resume_mode"),
+                # 恢复的执行语义：外部模型请求不保证 exactly-once，恢复过就是 at-least-once。
+                "recovery_semantics": record.get("recovery_semantics"),
                 "restart_policy": record.get("restart_policy"),
                 "material_hash": _current_material_hash(record) or None,
                 "confirmations": record.get("confirmations") or [],
@@ -1000,6 +1036,21 @@ def _apply_input_version(record: dict[str, Any]) -> None:
         # 调用账本**不清零**：预算是任务的累计消耗，改输入不等于没花过钱。
         # 旧的人工确认同样失效（材料内容/版本已变）。
         _invalidate_stale_confirmations(record, "输入或材料已变更，旧确认失效")
+
+
+def _annotate_recovery(record: dict[str, Any]) -> None:
+    """把"恢复 = at-least-once"的不确定性落到最终记录的事件里。
+
+    必须在工作流返回**之后**补写：图的事件流来自检查点里保存的旧状态，会把恢复时在记录上
+    追加的那一条覆盖掉。这里按 kind 去重，因此重复调用是幂等的。
+    """
+    if record.get("recovery_semantics") != RECOVERY_AT_LEAST_ONCE:
+        return
+    events = list(record.get("events") or [])
+    if any(item.get("kind") == "recovery_at_least_once" for item in events):
+        return
+    events.append(event("recovery_at_least_once", RECOVERY_UNCERTAINTY_NOTE))
+    record["events"] = events
 
 
 def _current_material_hash(record: dict[str, Any]) -> str:
