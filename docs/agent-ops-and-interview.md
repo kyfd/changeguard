@@ -166,10 +166,135 @@ $env:DBGUARD_WORKERS               = "0"
 | 11 | 评测 `--provider`/`--strategy` **真正改变执行路径**，开发/保留集分离，报告含数据集哈希、逐例结果、请求数、P50/P95 与**未知项** | `agent-app/evals/run_eval.py`、`tests/test_eval_harness.py` | ✅（离线/脚本） |
 | 12 | 修复了一个**既有跨实例一致性缺陷**：Postgres 通行证重放分支不刷新快照，导致并发消费中落败方一直显示 ACTIVE | PR #19（`802f59c`），由 CI `integration` 验证 | ✅（CI 证据） |
 | 13 | 修复了**已知偶发**的 Go 启动恢复用例：1ms 租约 + 立即 checkpoint 在 `-race` 下必然偶发 `ErrConcurrentWrite`，改为可注入时钟的确定性过期 | PR #20（`161a84e`） | ✅ |
-| 14 | 工作台把**四态**（模型建议 / 确定性检查 / 材料确认 / 治理审批）视觉区分，并显示存储降级与预算的已知/未知 | `internal/httpapi/web/agent/app.js` | ⚠️ 浏览器验收 19/19 为历史记录，本轮未重跑 |
-| 15 | **fixed_workflow vs bounded_agent 的对照评测** | — | ⬜ **未做**：无法据此声称"模型调查带来提升" |
+| 14 | 工作台把**四态**（模型建议 / 确定性检查 / 材料确认 / 治理审批）视觉区分，并显示存储降级与预算的已知/未知 | `internal/httpapi/web/agent/app.js` | ✅ 真实浏览器验收 **19/19**（本轮重跑，见 `docs/agent-upgrade-verification.md` §20.7 与 `docs/assets/agent-workbench-*.png`） |
+| 15 | **fixed_workflow vs bounded_agent 的同输入对照评测（离线）** | `evals/run_eval.py --compare`（scripted provider）、`tests/test_eval_harness.py`；实测 `13/13` vs `14/14` | ⚠️ 离线已做且可复现，但只证明"策略参数真正改变执行路径"，**不证明模型调查带来提升**（scripted provider 不是真实模型） |
 | 16 | **真实模型质量**（准确率、成本、延迟） | — | ⬜ **NOT_RUN**：无专用凭据与预算；离线评测是确定性回归，不是模型质量证明 |
 | 17 | **多副本 / 分布式部署** | — | ⬜ 未支持（见 §1.1）；单实例是本轮的明确边界 |
 
 **不能说**：多 Agent 协作、MCP、自进化 Prompt、长期用户画像、向量数据库、通用插件平台、
 多副本调度，以及任何准确率/成本/延迟的提升数字。
+
+---
+
+## 5. 两个前端各自实现了什么（§6 收尾）
+
+**口径**：页面能力以**实际代码**为准，不以"接口存在"或 README 为准。查不到服务端路由的面板
+一律按**未完成**计，不写成"已实现但暂时没数据"。
+
+先纠正一个称呼：`internal/httpapi/web/` 里的控制台**不是 Vue**——它对前端框架没有任何依赖
+（`grep -i "vue\|createApp" internal/httpapi/web/**` 无命中），是手写的 ES Module 应用
+（`index.html` → `ui-utils.mjs` → 动态 `import("./app.js")`）。`README.md` 另外引用了一个
+**外部** Vue 控制台仓库，它不在本仓库内，本轮未做任何验证，也不计入下面的结论。
+
+### 5.1 同源控制台（`/`，`internal/httpapi/web/`）
+
+| 维度 | 事实 | 证据 |
+| --- | --- | --- |
+| 提供方式 | `cmd/dbguard` 的 catch-all 静态资源；`/agent/` 单独注册（否则会被 catch-all 落到控制台首页） | `internal/httpapi/server.go:132,138-156` |
+| 视图 | 15 个导航项，按 5 种角色档案裁剪 | `web/app.js` `navItems`(35-55)、`workspaceProfiles`(86-129)、`renderPage`(400-433) |
+| 已实现的操作 | 创建/编辑变更、提交规则检查、预发布验证、审批与驳回、签发通行证、风险项指派/解决/复核、评论、`agent-ask` 问答、导出变更报告(MD/XLSX)/规则 JSON/审计、规则增改与开关与试跑、服务配置、成员与邀请、CI 信任、升级上传/应用/中止、登录注册 | `web/app.js` 中对应的 `api("/api/...")` 调用点（4360 / 4415 / 3691 / 4458 / 4227 / 4182 / 1693 / 2177 / 3972 / 2444-2503 / 2805 / 2850-2887） |
+| 实时刷新 | `EventSource /api/events`，变更详情另有轮询 | `web/app.js:3761,3655` |
+| 与工作台的关系 | 侧边栏固定一条**真实链接** `/agent/`（刻意不带 `data-route`，不走前端路由）；**不读取** `prepare_agent_enabled`，因此 Agent 未配置时链接照样显示 | `web/app.js:385-388`；`internal/httpapi/server.go:305` |
+
+**页面存在、但 `cmd/dbguard` 里没有对应路由的面板**（不得计入"控制台已完成"）：
+
+| 面板 | 前端调用 | 服务端实情 |
+| --- | --- | --- |
+| 发布观测 · 结果信号 | `GET /api/changes/{id}/outcomes`（`app.js:1987`） | **无路由** |
+| 事故回溯 | `GET /api/incidents/backtrace?symptom=…`（`app.js:2029`） | **无路由** |
+| 集成设置 · CI 信任 | `GET/POST/PUT /api/ci/trusts*`（`app.js:2805-2808,2908`） | **无路由** |
+| 集成设置 · 企业 LLM / 出站 | `/api/enterprise/llm*`、`/api/enterprise/outbound*`（`app.js:2938-2994,3310-3387`） | 只有 `/api/enterprise`、`/api/enterprise/members`、`/api/enterprise/invites`（`server.go:94-98`）；没有 llm/outbound。前端还要求 `capabilities.enterprise_api`，而 `handleConfigStatus` 从不返回 `capabilities`，因此这些控件**始终不可编辑** |
+| 集成设置 · Agent 运行时 | `/api/agent-runtime/summary`、`/api/agent-runtime/events`（`app.js:2947,2951,3233`） | `cmd/dbguard` **无此路由**；只有另一个二进制 `cmd/changeguard-agent-gateway` 提供（`internal/agentgateway/gateway.go:89-91`）。单跑 `cmd/dbguard` 时该面板走的是失败分支 |
+| 规则导出 | `GET /api/policies/export`（`app.js:2232`） | **无路由** |
+| 影响图谱 2.0 | 明确**不发请求**，渲染静态占位文案 | `app.js:1964-1973`（"当前版本未提供逐变更影响图谱"） |
+
+另有若干**未被 `index.html` 加载**的资产（`api-adapter.js`、`theme.js`、`stage3d.js`、
+`lucide.min.js`、`frontier.css`、`luminous.css`）；`server_test.go:184-186` 还显式断言后两个样式表
+不得被加载。
+
+> 所以"控制台有 15 个导航项"**不等于**"这 15 个面板都能用"。上表这些面板只能按"未完成"引用。
+
+### 5.2 Agent 工作台（`/agent/`，`internal/httpapi/web/agent/`）
+
+| 维度 | 事实 | 证据 |
+| --- | --- | --- |
+| 提供方式 | 显式注册 `/agent/`，`handleAgentWorkbench` 提供静态资源；`/api/agent/*` 由 `handleAgentProxy` 反向代理，**仅在配置 `DBGUARD_AGENT_BASE_URL` 时启用**，否则 503 且 `code=SERVICE_UNAVAILABLE` | `agentproxy.go:62,72,99-159`；`server.go:1672` |
+| 布局 | 单页三栏：对话 / 草案 / 证据与检查；顶栏显示身份与健康 | `agent/index.html`；`agent/app.js` `render`(482) |
+| 已实现的操作 | 创建任务（296）；补充信息（337，含追问表单 `wireQuestionForm`(622)）；停止（355）；`resumeTask`(376) 在有检查点时是「从检查点恢复」、没有检查点时按钮是「重新执行一次」（后者是**重跑**，不是续跑，`app.js:560-565`）；人工确认材料（392，携带 `material_hash` 做乐观并发校验）；查看/复制 SQL 与回滚 | `agent/app.js` 上述行号 |
+| 明确不做 | 治理审批与通行证签发、隔离库演练、执行 SQL；模型建议不参与放行判定 | `renderGovernanceBoundary`(967)、`renderShadowNotice`(1132)、`renderAdvice`(851)、`renderConfirmation`(871) |
+| 只读边界 | 只调用 6 个 `/api/agent/*` 接口，不请求 `/provider`、`/tools`，不显示任何密钥 | 同上 |
+| 降级判别 | 只有 503 **且** `code === "SERVICE_UNAVAILABLE"` 才判为"未启用"并禁用创建按钮；其余 503 按可重试错误处理 | `agent/app.js:265-270,419-424`、`markAgentDisabled`(281) |
+
+**工作台自身的边界（如实记录）**：
+
+- **单实例**：任务 JSON 与 SQLite 检查点都不支持多副本（§1.1）。
+- 页面里的 SQL 编辑**只影响本地显示**，不回写服务端；一旦本地改过，检查结果与确认都会被标为
+  对当前文本**已失效**（`app.js:729,1046`）。
+- 工作台的能力由**真实浏览器验收**证明，不由 CI 的 `e2e` 作业证明——CI 的 `e2e` 栈用
+  `compose.e2e.yml`，其中不含 agent-app（§1.4）。
+
+---
+
+## 6. 架构图
+
+口径：这张图只画**代码里真实存在的部件与调用方向**，不画计划中的能力。虚线表示"只读、且不产生
+放行判定"的通路；治理边界（审批、摘要、通行证签发与原子消费）**只在 Go 服务内**，Agent 侧没有节点。
+
+```mermaid
+flowchart TB
+    subgraph browser["浏览器 · 同源"]
+        console["控制台 /<br/>internal/httpapi/web/"]
+        workbench["变更准备工作台 /agent/<br/>internal/httpapi/web/agent/"]
+    end
+
+    subgraph go["cmd/dbguard · 治理服务（唯一权威）"]
+        session["会话与成员委托<br/>internal/auth"]
+        agentproxy["/api/agent/* 反向代理<br/>agentproxy.go"]
+        agenttools["/api/agent-tools/changes/{id}<br/>agenttools.go · 共享密钥 + 成员委托"]
+        gov["确定性规则 · 审批状态 · 制品摘要<br/>internal/checker · internal/service"]
+        passport["通行证签发与原子消费<br/>internal/changegate · internal/store"]
+    end
+
+    subgraph py["agent-app · 内部后端（只有治理服务会调用）"]
+        api["FastAPI 路由<br/>app/api/routes.py"]
+        svc["AgentService<br/>执行所有权 · 取消 · 恢复前重校验"]
+        graphwf["LangGraph 工作流<br/>screen_input → check_info → retrieve_evidence<br/>→ generate_draft → run_check → finalize"]
+        invest["受约束调查循环<br/>app/workflow/investigate.py"]
+        provider["模型接入<br/>OpenAICompatibleProvider / DeterministicProvider"]
+        tools["只读工具注册表<br/>app/tools"]
+        ledger["调用账本与预算<br/>app/budget.py"]
+    end
+
+    store[("任务记录 JSON<br/>app/store/tasks.py")]
+    ckpt[("LangGraph 检查点 SQLite<br/>app/workflow/checkpoint.py")]
+    model["外部模型端点"]
+
+    console -->|"登录 · 变更/审批/通行证"| session
+    console -->|"真实链接"| workbench
+    session --> gov
+    gov --> passport
+
+    workbench -->|"6 个 /api/agent/* 接口"| agentproxy
+    agentproxy --> api
+    api --> svc
+    svc --> graphwf
+    svc --> ledger
+    svc --> store
+    graphwf --> ckpt
+    graphwf --> invest
+    graphwf --> provider
+    graphwf --> tools
+
+    provider -.->|"模型请求（不保证 exactly-once）"| model
+    tools -.->|"只读 · 共享密钥"| agenttools
+    agenttools -.-> gov
+
+    passport -.->|"审批与签发不在此处"| workbench
+```
+
+图中三处与本文其余部分呼应，引用时不要拆开：
+
+- `provider -.-> model` 是**唯一**的外部调用；它按次记账到 `app/budget.py`，但**不保证 exactly-once**
+  （§2.3 的账本与恢复口径）。
+- `agenttools -.-> gov` 是**只读**通路：共享密钥 + 成员委托，且不复用会话中间件。
+- `passport -.-> workbench` 是**虚线**：工作台能看到治理边界的存在，但不能产生审批结论或执行许可。

@@ -111,6 +111,60 @@ def test_supported_failure_retries_from_the_pending_node(settings: Settings, mon
 
 
 # ---------------------------------------------------------------------------
+# 恢复的执行语义：不宣称 exactly-once
+# ---------------------------------------------------------------------------
+
+
+def test_resuming_a_pending_node_is_labelled_at_least_once(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """续跑"已开始但未完成"的节点，必须在记录与事件里如实标为不确定。
+
+    检查点保证的是"从哪个节点继续"，不是"那个节点没有执行过"。被中断的节点可能已经把
+    外部模型请求发出去了，重跑它就是 at-least-once——不能因为"恢复了"就假装那次调用不存在。
+    """
+    service = AgentService(settings)
+    calls = {"n": 0}
+    original = DraftWorkflow._generate_draft
+
+    async def fail_once(self, state):  # noqa: ANN001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("模拟执行中途中断")
+        return await original(self, state)
+
+    monkeypatch.setattr(DraftWorkflow, "_generate_draft", fail_once)
+
+    failed, _ = run(service.create_task(complete_request(), CONTEXT))
+    assert failed.status is TaskStatus.FAILED
+    assert failed.recovery_semantics is None, "尚未恢复时不应预先声明恢复语义"
+
+    resumed = run(service.resume(failed.task_id, CONTEXT))
+
+    assert resumed.status is TaskStatus.DRAFT_READY, resumed.error
+    assert resumed.resume_mode == "checkpoint"
+    assert resumed.recovery_semantics == "at_least_once", "恢复必须如实标注 at-least-once"
+    events = {item.kind: item.detail for item in resumed.events}
+    assert "recovery_at_least_once" in events, "不确定性必须留下事件痕迹，而不是只改字段"
+    assert "exactly-once" in events["recovery_at_least_once"]
+
+
+def test_resuming_from_an_interrupt_is_labelled_at_least_once(settings: Settings) -> None:
+    """从节点级中断继续同样会重新执行该节点，因此同样是 at-least-once。"""
+    service = AgentService(settings)
+    paused, _ = run(service.create_task(bare_request(), CONTEXT))
+    assert paused.status is TaskStatus.NEEDS_INFO
+    assert paused.recovery_semantics is None
+
+    continued = run(service.clarify(paused.task_id, full_clarification(), CONTEXT))
+
+    assert continued.status is TaskStatus.DRAFT_READY, continued.error
+    assert continued.resume_mode == "interrupt"
+    assert continued.recovery_semantics == "at_least_once"
+    assert "recovery_at_least_once" in [item.kind for item in continued.events]
+
+
+# ---------------------------------------------------------------------------
 # 恢复前的重新校验
 # ---------------------------------------------------------------------------
 

@@ -5,6 +5,10 @@
 并发 `ainvoke` 不是"最后写入者胜"，而是可能互相交错写入同一份检查点。
 
 这里的复现是确定性的：把那个 await 放大，并统计真正重叠进入图恢复的次数。
+
+还覆盖**恢复与补充材料并发**：`resume` 与 `clarify` 同时到达时只应有一个被受理，
+另一个得到 `TaskNotResumable`（路由层映射为 HTTP **409**），且整条生命周期只发生**一次**
+图调用。用事件屏障而不是 `sleep` 来固定交错顺序，结果不依赖调度时序。
 """
 
 from __future__ import annotations
@@ -129,6 +133,127 @@ def test_resume_is_refused_while_an_execution_is_in_flight(
 
     outcome = run(scenario())
     assert outcome["status"] == TaskStatus.DRAFT_READY.value, outcome
+
+
+def test_resume_and_clarify_race_accepts_exactly_one(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """恢复与补充材料并发：只有一个被受理，另一个 409，且只发生一次图调用。
+
+    交错顺序由**事件屏障**固定：`resume` 被卡在"读完检查点"之前，`clarify` 完整跑完；
+    放行后 `resume` 必须在同步的重校验处发现自己已被接管，从而拒绝——而不是在同一
+    `thread_id` 上再起一次图。用事件而不是 `sleep`，结果不依赖调度时序。
+    """
+    service = AgentService(settings)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    overlap = {"now": 0, "max": 0, "calls": 0}
+
+    original_inspect = AgentService._inspect_checkpoint
+    original_resume = DraftWorkflow.resume_interrupt
+
+    async def gated_inspect(self: AgentService, task_id: str) -> dict[str, Any] | None:
+        entered.set()
+        await release.wait()
+        return await original_inspect(self, task_id)
+
+    async def counting_resume(self: DraftWorkflow, *, thread_id: str, value: Any):
+        overlap["calls"] += 1
+        overlap["now"] += 1
+        overlap["max"] = max(overlap["max"], overlap["now"])
+        try:
+            return await original_resume(self, thread_id=thread_id, value=value)
+        finally:
+            overlap["now"] -= 1
+
+    monkeypatch.setattr(AgentService, "_inspect_checkpoint", gated_inspect)
+    monkeypatch.setattr(DraftWorkflow, "resume_interrupt", counting_resume)
+
+    async def scenario() -> dict[str, Any]:
+        paused, _ = await service.create_task(bare_request(), CONTEXT)
+        assert paused.status is TaskStatus.NEEDS_INFO
+        task_id = paused.task_id
+
+        racing = asyncio.create_task(service.resume(task_id, CONTEXT, full_clarification()))
+        await asyncio.wait_for(entered.wait(), timeout=10)
+
+        clarified = await asyncio.wait_for(
+            service.clarify(task_id, full_clarification(), CONTEXT), timeout=30
+        )
+        release.set()
+
+        outcome: str
+        try:
+            resumed = await asyncio.wait_for(racing, timeout=30)
+            outcome = f"ACCEPTED status={resumed.status.value}"
+        except TaskNotResumable as refusal:
+            outcome = f"REFUSED: {refusal}"
+
+        final = await service.get_task(task_id, CONTEXT)
+        kinds = [item.kind for item in final.events]
+        return {
+            "clarify_status": clarified.status.value,
+            "resume_outcome": outcome,
+            "final_status": final.status.value,
+            "graph_calls": overlap["calls"],
+            "max_overlap": overlap["max"],
+            "screen_input": kinds.count("screen_input"),
+        }
+
+    outcome = run(scenario())
+
+    assert outcome["clarify_status"] == TaskStatus.DRAFT_READY.value, outcome
+    assert outcome["resume_outcome"].startswith("REFUSED"), f"被受理的应只有一个：{outcome}"
+    assert outcome["graph_calls"] == 1, f"同一任务出现了两次图调用：{outcome}"
+    assert outcome["max_overlap"] == 1, f"同一 thread_id 上出现了并发图调用：{outcome}"
+    assert outcome["final_status"] == TaskStatus.DRAFT_READY.value, outcome
+    assert outcome["screen_input"] == 1, f"不得从头重跑：{outcome}"
+
+
+def test_clarify_is_refused_while_a_resume_is_in_flight(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """反方向同样成立：恢复在途时补充材料被拒，不会在同一 thread_id 上再起一次图。"""
+    service = AgentService(settings)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    # 统计**工作流执行**次数，而不是模型调用次数：一次执行里本来就可能因为修订
+    # 而调用多次模型，用它当判据会把正常的修订误判成"跑了两遍"。
+    executions = {"n": 0}
+    original_run_workflow = AgentService._run_workflow
+    original_generate = DraftWorkflow._generate_draft
+
+    async def counted_run_workflow(self: AgentService, record: Any, resume: Any = None):
+        executions["n"] += 1
+        return await original_run_workflow(self, record, resume)
+
+    async def slow_generate(self: DraftWorkflow, state: Any):
+        started.set()
+        await release.wait()
+        return await original_generate(self, state)
+
+    monkeypatch.setattr(AgentService, "_run_workflow", counted_run_workflow)
+    monkeypatch.setattr(DraftWorkflow, "_generate_draft", slow_generate)
+
+    async def scenario() -> dict[str, Any]:
+        paused, _ = await service.create_task(bare_request(), CONTEXT)
+        task_id = paused.task_id
+        baseline = executions["n"]  # 创建任务本身也是一次执行，不计入本次比较
+
+        first = asyncio.create_task(service.resume(task_id, CONTEXT, full_clarification()))
+        await asyncio.wait_for(started.wait(), timeout=10)
+
+        with pytest.raises(TaskNotResumable):
+            await service.clarify(task_id, full_clarification(), CONTEXT)
+
+        release.set()
+        await asyncio.wait_for(first, timeout=30)
+        final = await service.get_task(task_id, CONTEXT)
+        return {"status": final.status.value, "extra_executions": executions["n"] - baseline}
+
+    outcome = run(scenario())
+    assert outcome["status"] == TaskStatus.DRAFT_READY.value, outcome
+    assert outcome["extra_executions"] == 1, f"被受理的应只有一次工作流执行：{outcome}"
 
 
 def test_new_input_is_screened_before_resuming(settings: Settings) -> None:

@@ -1034,3 +1034,172 @@ fixed_workflow 与 bounded_agent 对照评测、工作台一致性、部署边�
 | P1 | ✅ 完成 | 重试分层、草案契约、方言边界、补充字段；受约束调查循环；provider 原生动作决策 |
 | P2 | ✅ 完成 | PR-A：检查点持久化、节点级中断与恢复、恢复前重校验、独立进程验收（§12）；PR-B：材料确认记录（确认人/时间/版本+内容哈希、幂等、新修订失效）与 flaky 修复（§13）。任务书 §P2-8 迁移记为 N/A |
 | P3 | ✅ 完成 | PR-C：评测 `--strategy`/`--provider` 真正生效、开发/保留集拆分、确定性评分与报告（§14）；PR-D：工作台展示与操作、四态区分、存储降级可见、真实浏览器验收 19/19 与截图（§15） |
+
+---
+
+## 20. 收尾（PR-E）：恢复的恰一次边界、前端边界与 live 状态
+
+本轮范围：任务书 §3（恢复收尾）、§6（控制台/工作台边界）与文档缺口（架构图）。
+Go 侧本轮**未改任何代码**（图表与文档除外）；没有触碰任何确定性治理规则。
+
+### 20.1 独立进程场景二：请求已发出、终态未落盘（§3-1）
+
+`agent-app/scripts/recovery_acceptance.py` 原本只有一个场景。本轮补第二个场景，专门覆盖
+"模型请求已经发出、账本已按次落盘，但终态尚未落盘就杀进程"：
+
+- 脚本自带一个 stub 模型端点：**第一次**请求返回一份会被确定性检查打回的草案（从而触发修订），
+  **之后的请求永不返回**；
+- 于是第二次模型请求发出去并被挂住，此时磁盘上是「记录仍在途 + 账本已记 1 次请求」；
+- 这时**强杀进程**；重启后断言三件事：
+  1. 磁盘上确实**没有**终态（"结果尚未落盘"是真实状态，不是假设）；
+  2. 任务被**显式**标为中断（`status=FAILED`，`restart_policy=checkpoint_available`）；
+  3. **中断前已消耗的账目没有丢**：`usage.requests` 与杀进程前完全一致。
+
+实测输出（节选，完整 24 项）：
+
+```
+[PASS] 模型请求已发出且账本已按次落盘 — requests=1, prompt_tokens=120
+[PASS] 进程已被强制终止 — pid=22800
+[PASS] 中断时记录仍在途（终态还没写） — status=RECEIVED
+[PASS] 磁盘上确实没有终态（结果尚未落盘） — status=RECEIVED
+[PASS] 中断前已消耗的账目仍写在磁盘上
+[PASS] 磁盘上存在检查点文件
+[PASS] 确实是新进程（PID 不同） — 22800 -> 21860
+[PASS] 重启后任务被显式标为中断 — status=FAILED
+[PASS] 中断策略如实标注（有检查点 → 可恢复）— checkpoint_available
+[PASS] 已消耗的账目没有丢（usage.requests 仍是中断前的值）— before=1 after=1
+[PASS] 已消耗的 token 统计同样保留 — prompt_tokens=120
+结果：24/24 通过（原 13 项 + 本轮新增 11 项）
+```
+
+> **口径提醒**：这一场景在**改动前**的代码上**同样通过**。它证明的是既有行为（账本逐次落盘 +
+> 重启中断标注）确实成立，**不是**修复了某个"丢账目"的缺陷。不要写成缺陷复现。
+
+### 20.2 恢复不宣称 exactly-once（§3-2）
+
+**这是新增能力，不是缺陷复现。**
+
+| 位置 | 改动 |
+| --- | --- |
+| `app/service.py` | 新增 `RECOVERY_AT_LEAST_ONCE` 与 `RECOVERY_UNCERTAINTY_NOTE`；`resume` 与 `clarify`（从等待点继续）都会写入 `recovery_semantics=at_least_once` 并追加 `recovery_at_least_once` 事件 |
+| `app/service.py::_annotate_recovery` | 在工作流返回**之后**补写该事件：图的事件流来自检查点里保存的旧状态，会把恢复时追加的那一条覆盖掉（这是实测发现的问题，不是推测） |
+| `app/service.py::_run_workflow` | 文档字符串写明：外部模型请求**不保证 exactly-once**，能保证的是"真的发出过的请求都记账 + 恢复/重启续算" |
+| `app/schemas/drafts.py` | `TaskView` 新增 `recovery_semantics`（缺省 `None`，只做加法演进，旧记录不受影响） |
+
+口径：节点级检查点保证的是"从哪个节点继续"，**不是**"那个节点没有执行过"。`interrupt` 与
+`checkpoint` 两种模式都会**重新执行**节点，被中断的节点可能已经把模型请求发出去了——所以恢复
+只能是 at-least-once。我们把这件事写进记录与事件，而不是让它读起来像"那次调用不存在"。
+
+**改前对照（必须如实区分）**：把 `app/service.py`、`app/schemas/drafts.py` 暂存回基线后运行这两条用例：
+
+```
+2 failed, 11 deselected
+AttributeError: 'TaskView' object has no attribute 'recovery_semantics'
+```
+
+这是**缺字段/缺契约**的失败，**不是**行为复现——基线根本没有表达这件事的地方。因此这 2 条用例是
+**新行为的规格**，不得称为"已复现的缺陷"。
+
+### 20.3 恢复与补充材料并发（§3-3）
+
+新增 2 条用例（`tests/test_resume_concurrency.py`）。交错顺序由**事件屏障**固定，不使用任何 `sleep`：
+
+| 用例 | 断言 |
+| --- | --- |
+| `test_resume_and_clarify_race_accepts_exactly_one` | `resume` 被卡在"读完检查点"之前，`clarify` 完整跑完后再放行。结果：`clarify` 受理、`resume` 得到 `TaskNotResumable`（路由层映射为 **409**）、整条生命周期**只发生 1 次图调用**（`max_overlap=1`）、`screen_input` 只出现 1 次 |
+| `test_clarify_is_refused_while_a_resume_is_in_flight` | 反方向：恢复在途时补充材料被拒，且**只发生 1 次工作流执行**（统计 `_run_workflow` 次数，而不是模型调用次数——一次执行本来就可能因修订多次调用模型） |
+
+**改前对照**：这两个文件在基线 `31d7049` 上运行 **7 passed**（含本轮新增的 2 条）。
+
+> 即：**并发互斥这一既有不变量已经成立**，本轮新增的是回归护栏，**不是**缺陷复现。不得写成
+> "修复了恢复与补充材料的并发缺陷"。
+
+### 20.4 前端边界（§6）
+
+见 `docs/agent-ops-and-interview.md` §5：分别列出同源控制台与 Agent 工作台**实际实现**的功能，
+并把"页面存在、但 `cmd/dbguard` 里没有对应路由"的面板逐条列出（结果信号、事故回溯、CI 信任、
+企业 LLM/出站、Agent 运行时、规则导出、影响图谱占位），以及工作台的明确非目标。
+
+顺带纠正一个称呼：`internal/httpapi/web/` 的控制台**不是 Vue**（对前端框架没有任何依赖），
+README 里那个"Vue 控制台"是**另一个仓库**，不在本仓库内，本轮未做任何验证。
+
+### 20.5 架构图
+
+`docs/agent-ops-and-interview.md` §6 新增一张 Mermaid 图（模型、工具、工作流、两个存储、治理边界），
+只画代码里真实存在的部件与调用方向；三条虚线标出"只读、且不产生放行判定"的通路。
+
+### 20.6 本轮命令与结果（本机）
+
+| 命令 | 结果 |
+| --- | --- |
+| `pytest -q`（`agent-app/`） | **242 passed**（§18 后 238 + 本轮新增 4） |
+| `evals/run_eval.py --provider scripted --strategy bounded_agent --split dev` | **14/14**，失败 0，NOT_RUN 0，SKIPPED 0 |
+| `evals/run_eval.py --provider scripted --strategy bounded_agent --split holdout` | **4/4** |
+| `evals/run_eval.py --provider scripted --compare --split dev` | `fixed_workflow` **13/13**、`bounded_agent` **14/14**（均 P50 < 100ms，无失败） |
+| `scripts/recovery_acceptance.py` | **24/24**（原 13 + 新增 11） |
+| `go test ./...` | 全部包 **ok**（20 个有测试的包） |
+| `go vet ./...` / `gofmt -l ./internal ./cmd` | clean / clean |
+| `npm test` | **2 passed** |
+| 递归 `node --check`（`internal/httpapi/web/**`、`tests/**`） | clean |
+| `tests/manual/agent-workbench-acceptance.mjs` | **19/19**（§20.7） |
+
+> `--compare` 的离线结果只说明"两臂在同一输入下都跑通、且策略参数真正改变了执行路径"。
+> scripted provider **不是**真实模型，因此**不能**据此说"模型调查更好"。
+
+### 20.7 真实浏览器验收（本轮重跑）
+
+按 §1.4 起两个真实进程（`bin/dbguard.exe` 在 18099 + `uvicorn` 在 18091，模型指向 stub 端点），
+真实登录 `developer@example.com / Demo1234`，桌面 1440×900 与窄屏 420×900 各留截图，
+两张图都在**本轮重新生成**：`docs/assets/agent-workbench-desktop.png`、`docs/assets/agent-workbench-narrow.png`。
+
+```
+[PASS] 真实登录成功（developer@example.com）
+[PASS] 缺信息时停在待补充并给出追问表单
+[PASS] 显示"从检查点恢复"而不是"重新执行一次"
+[PASS] 补充后从等待点继续并产出草案
+[PASS] 入口节点只执行过一次（未从头重跑） — screen_input=1
+[PASS] 四态区分：材料确认与治理审批各自成卡
+[PASS] 重复确认被置为已确认（幂等）
+[PASS] 运行中的任务可以取消
+[PASS] 错误处理：空需求被拦下并给出提示
+[PASS] 窄屏无横向溢出 — overflow=0px
+[PASS] 工作台无未捕获 JS 异常
+[PASS] 工作台接口无 4xx/5xx
+结果：19/19 通过
+```
+
+桌面截图里可以直接看到本轮新增的 `recovery_at_least_once` 事件文案（"恢复不宣称 exactly-once…"），
+说明 at-least-once 标注不只是后端字段，也确实出现在界面上。
+验收后已停止两个进程；18091 / 18099 / 18092 三个端口均已释放。
+
+> §15.6 的 19/19 是**历史记录**；本轮这 19/19 是重新执行的结果，引用时请用本节。
+
+### 20.8 live 对照评测：NOT_RUN（未取得授权）
+
+```
+> .venv\Scripts\python.exe evals/run_eval.py --provider live --compare --split dev
+报告写入：evals/reports/20260919-042142-compare-live-dev.json
+  fixed_workflow: 通过 1/1，失败 0，NOT_RUN 12，SKIPPED 1，P50 17ms
+  bounded_agent:  通过 1/1，失败 0，NOT_RUN 13，SKIPPED 0，P50 15ms
+EXITCODE=2
+```
+
+- 本机**没有**专用模型凭据与预算，12–13 个用例因此记为 `NOT_RUN`，原因写的是
+  "live provider 未配置凭据"；退出码 **2**（只有 NOT_RUN、没有失败，不会被当成绿灯）。
+- 唯一"通过"的是 `cancel-during-run`，它**不使用模型**（`model_requests=0`），属于合理拒绝，
+  不是模型质量证据。
+- **没有任何** live 的准确率 / 成本 / 延迟数字：`task_completion_rate` 为 `null`（分母为 0），
+  usage 一律标 unknown。
+- 因此"模型调查是否更好"这一问**仍然无法回答**，§4 清单第 16 行的 ⬜ 状态不变，只是把第 15 行
+  从"未做"更正为"离线已做、live 未做"。
+
+### 20.9 未运行 / 不得当作通过
+
+| 项 | 原因 |
+| --- | --- |
+| `go test -race ./...` | 本机 Windows 无 C 工具链（仅 Linux CI 覆盖） |
+| PostgreSQL / Redis 集成测试 | 本机无隔离数据库 |
+| CI 的 Playwright `e2e` | 该栈用 `compose.e2e.yml`，**不含 agent-app**，不能作为工作台的证据 |
+| 含 agent-app 的完整 `docker compose up --build` | 本机无 Docker |
+| 真实模型质量（live） | **NOT_RUN**（§20.8），无凭据 |
+| 多副本部署 | 未支持（§1.1） |
