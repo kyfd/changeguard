@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.config import Settings
 from app.schemas.drafts import Assumption, DatabaseKind, EvidenceRef, TaskSlots
-from app.budget import TaskBudgetExceeded, active_ledgers, active_phase
+from app.budget import LedgerPersistError, TaskBudgetExceeded, active_ledgers, active_phase
 from app.tools.registry import InvalidToolArgs, validate_args
 from app.workflow.investigate import AskUser, CallTool, Finish
 
@@ -445,6 +445,10 @@ class OpenAICompatibleProvider:
 
         缺失 usage 时显式记一笔缺失，绝不复用上一次的值；共享的 provider 实例不持有累计量，
         累计发生在调用方提供的账本上，因此并发任务不会互相串账。
+
+        **这里不做预算检查**：预算的判定点是"要不要发下一次请求"（见 `_post` 开头）。
+        以前在这里复查，会让**已经被允许、并且已经付过钱**的那次响应在拿到之后被拒绝丢弃
+        （max_requests=1 时第一次调用必定失败）。
         """
         parsed: dict[str, int] | None = None
         if (
@@ -467,7 +471,22 @@ class OpenAICompatibleProvider:
                 model=self._settings.llm_model,
                 failure_type=failure_type,
             )
-        self._guard_budget()
+
+    def _record_cancelled_call(self, duration_ms: int) -> None:
+        """记下被取消的那次请求，然后**不打断取消**。
+
+        取消不能成为漏记的理由：请求已经发出去了（`requests_sent` 已经加过），
+        它到底有没有到达模型、有没有被计费，我们并不知道——所以按"算它花过"记账，
+        而不是当作没发生过。这与"不宣称 exactly-once"是同一口径。
+
+        记账失败（例如执行已被取消/接管，落盘钩子按设计拒绝写入）不能顶掉取消语义：
+        把一次取消变成一次执行失败，比少一条账目更糟。此时调用方的降级路径会报告
+        状态不可确定。
+        """
+        try:
+            self._record_call(outcome="cancelled", duration_ms=duration_ms, usage=None, failure_type="cancelled")
+        except LedgerPersistError:
+            pass
 
     async def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """发一次请求并返回解析后的响应体。供 generate 与 decide 共用。"""
@@ -482,6 +501,10 @@ class OpenAICompatibleProvider:
                     json=payload,
                     headers={"Authorization": f"Bearer {self._settings.llm_api_key}"},
                 )
+        except asyncio.CancelledError:
+            self.model_seconds += time.perf_counter() - started
+            self._record_cancelled_call(int((time.perf_counter() - started) * 1000))
+            raise
         except Exception as error:  # noqa: BLE001 - 网络抖动与超时值得重试
             elapsed = int((time.perf_counter() - started) * 1000)
             self.model_seconds += time.perf_counter() - started
