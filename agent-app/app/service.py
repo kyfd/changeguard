@@ -26,6 +26,7 @@ from typing import Any
 
 from app.budget import PHASE_GENERATE, LedgerPersistError, UsageLedger, usage_scope
 from app.config import Settings
+from app.guard import detect_injection
 from app.llm.provider import build_provider
 from app.retrieval.corpus import build_retriever
 from app.schemas.drafts import (
@@ -216,6 +217,9 @@ class AgentService:
             notes.append(note)
             record["clarification_notes"] = notes
         events = list(record.get("events") or [])
+        # 新增输入要过与入口一致的筛查：检查点让旧节点不必重跑，
+        # 但**不能**因为走了检查点就跳过对新输入的校验。
+        _screen_new_input(request.note or "", request.schema_snapshot or "")
         provided = [
             name
             for name in (
@@ -274,6 +278,7 @@ class AgentService:
         if self._has_live_execution(task_id):
             raise TaskNotResumable("该任务已有执行在进行中，本次恢复未生效，请等待或先取消")
         if request is not None:
+            _screen_new_input(request.note or "", request.schema_snapshot or "")
             slots = TaskSlots.model_validate(record.get("slots") or {})
             record["slots"] = merge_slot_data(slots, request.model_dump()).model_dump(mode="json")
             if request.schema_snapshot is not None:
@@ -353,6 +358,11 @@ class AgentService:
         if not draft or not digest:
             raise TaskNotConfirmable("没有可确认的材料：草案为空")
         version = str(record.get("input_version") or "")
+
+        # 所见即所确认：调用方声明的材料哈希必须与当前材料一致，否则要求刷新。
+        claimed = (request.material_hash if request else None) or ""
+        if claimed.strip() and claimed.strip() != digest:
+            raise TaskNotConfirmable("材料已更新，当前页面看到的内容不是最新版本；请刷新后重新确认")
 
         # 幂等：同一人 + 同一版本 + 同一内容已经确认过，就直接返回，不新增记录。
         for item in record.get("confirmations") or []:
@@ -944,6 +954,23 @@ class AgentService:
                 "usage": record.get("usage"),
             }
         )
+
+
+def _screen_new_input(*texts: str) -> None:
+    """对**新增输入**做与入口一致的注入筛查。
+
+    检查点使旧节点不必重跑，但新输入（补充说明、替换的快照）仍必须校验：
+    否则"通过检查点恢复"就成了绕过入口筛查的旁路。
+
+    正则与 untrusted 标签只是**辅助**手段，挡的是明显的注入模式，
+    不构成完整的安全保证——模型输出本身依旧按不可信数据处理。
+    """
+    hits: list[str] = []
+    for text in texts:
+        if text and str(text).strip():
+            hits.extend(detect_injection(str(text)))
+    if hits:
+        raise TaskNotResumable("新增内容命中提示注入检测（" + "、".join(sorted(set(hits))) + "），已拒绝继续")
 
 
 def _effective_requirement(record: dict[str, Any]) -> str:

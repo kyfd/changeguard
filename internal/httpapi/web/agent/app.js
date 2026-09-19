@@ -394,7 +394,12 @@ async function confirmMaterial() {
   state.busy = true;
   clearError();
   try {
-    const task = await api(`/api/agent/tasks/${state.task.task_id}/confirm`, { method: "POST", body: {} });
+    const task = await api(`/api/agent/tasks/${state.task.task_id}/confirm`, {
+      method: "POST",
+      // 带上"我所看到的"材料哈希：材料在别处被改过时，服务端会拒绝并要求刷新，
+      // 避免停留在旧页面的人把已经更新的材料确认掉。
+      body: { material_hash: state.task.material_hash || null },
+    });
     adoptTask(task);
   } catch (error) {
     handleActionError(error);
