@@ -1,16 +1,19 @@
 """usage 记账与任务级预算。
 
-锁定三件事：
+锁定四件事：
 
 1. **按请求累计**：每轮 100 输入 + 10 输出，三轮就是 300 + 30，而不是只报最后一次；
 2. **缺失不复用**：某次响应没带 usage，不能被上一次的值顶替，也不能因此把总量说成已知；
 3. **按任务隔离**：provider 是跨任务共享的，用量必须记在任务自己的记账器上，
    并且任务级 token／费用预算真的会**停止**后续模型调用（未知用量按保守值计入，
-   缺定价时费用上限失败关闭）。
+   缺定价时费用上限失败关闭）；
+4. **记账不因取消而漏**：被取消的请求同样算发出去过；费用只在**不缺任何 usage** 时
+   才作为已知数字报出；预算只决定"能不能发下一次"，不会把已经付过钱的响应丢掉。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from typing import Any
@@ -18,12 +21,13 @@ from typing import Any
 import httpx
 import pytest
 
+from app.budget import PHASE_GENERATE, TaskBudgetExceeded, UsageLedger, usage_scope
 from app.config import Settings
-from app.llm.provider import OpenAICompatibleProvider
+from app.llm.provider import DraftRequest, OpenAICompatibleProvider
 from app.schemas.drafts import TaskStatus
 from app.service import AgentService
 from app.tools.registry import TrustedContext
-from tests.conftest import complete_request, run
+from tests.conftest import complete_request, complete_slots, run
 
 CONTEXT = TrustedContext(user_id="alice", organization_id="org_demo")
 
@@ -155,8 +159,6 @@ def test_last_usage_is_cleared_when_a_response_omits_it(
     stub.install(monkeypatch)
     scoped = configured(settings)
     provider = OpenAICompatibleProvider(scoped)
-    from app.llm.provider import DraftRequest
-    from tests.conftest import complete_slots
 
     async def scenario() -> tuple[Any, Any]:
         request = DraftRequest(requirement="x", slots=complete_slots())
@@ -371,6 +373,187 @@ def test_model_request_cap_is_enforced(settings: Settings, monkeypatch: pytest.M
     assert stub.calls == 2, f"请求次数上限是硬边界，实际 {stub.calls}"
     assert view.status is TaskStatus.FAILED
     assert "请求次数" in (view.error or ""), view.error
+
+
+def test_cancelled_request_is_still_accounted(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """取消不是漏记的理由：请求已经发出去了，账本必须留下这一笔。
+
+    请求被取消后到底有没有到达模型、有没有被计费，我们并不知道——所以按"算它花过"记账，
+    而不是当作没发生过。这与"不宣称 exactly-once"是同一口径。
+    """
+    started = asyncio.Event()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        started.set()
+        await asyncio.Event().wait()  # 一直不返回，直到被取消
+        raise AssertionError("unreachable")
+
+    transport = httpx.MockTransport(handler)
+    original_client = httpx.AsyncClient
+
+    def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    scoped = configured(settings)
+    provider = OpenAICompatibleProvider(scoped)
+    ledger = UsageLedger(task_id="t", execution_id="e", model=scoped.llm_model)
+
+    async def scenario() -> None:
+        request = DraftRequest(requirement="x", slots=complete_slots())
+        with usage_scope(ledger, phase=PHASE_GENERATE):
+            task = asyncio.create_task(provider.generate(request))
+            await asyncio.wait_for(started.wait(), timeout=10)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    run(scenario())
+
+    assert provider.requests_sent == 1
+    assert ledger.requests == 1, "被取消的请求漏记了"
+    assert [item.outcome for item in ledger.calls] == ["cancelled"], ledger.calls
+    assert ledger.reported == 0, "取消的那次拿不到 usage，不能被算成已报"
+    assert ledger.known is False, "取消的那次没有 usage，总量不能算已知"
+
+
+def test_cost_is_unknown_rather_than_zero_when_usage_is_missing(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺 usage 时报费用必须是不确定，而不是一个"已知的 0"。
+
+    以前只要配了单价就返回一个数：一次响应都没报 usage 时恰好是 0.0，读起来像"确定没花钱"。
+    """
+    stub = ModelStub([(NOT_JSON, None)])
+    stub.install(monkeypatch)
+    scoped = configured(
+        settings, llm_price_prompt_per_1k=1.0, llm_price_completion_per_1k=1.0
+    )
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    reported = usage_of(view)
+    assert reported["missing_responses"] == 1
+    assert reported["known"] is False
+    assert reported["cost_estimate"] is None, "缺 usage 时不得报已知费用（更不得报 0）"
+    assert reported["cost_known"] is False
+    assert "费用" in reported["note"], reported["note"]
+
+
+def test_cost_is_reported_when_every_response_reports_usage(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """对照组：每一次响应都报了 usage 时，费用照常报出并按单价折算。"""
+    stub = ModelStub([(json.dumps(_draft()), {"prompt_tokens": 100, "completion_tokens": 10})])
+    stub.install(monkeypatch)
+    scoped = configured(
+        settings, llm_price_prompt_per_1k=1.0, llm_price_completion_per_1k=1.0
+    )
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    reported = usage_of(view)
+    assert reported["known"] is True
+    assert reported["cost_known"] is True
+    assert reported["cost_estimate"] == pytest.approx(0.11, abs=0.001)
+
+
+def test_cost_limit_fails_closed_when_usage_is_missing(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配了费用上限但响应不报 usage：下一次请求无法判定费用，按失败关闭，不当作 0 继续花。"""
+    stub = ModelStub([(NOT_JSON, None)])
+    stub.install(monkeypatch)
+    scoped = configured(
+        settings,
+        draft_parse_attempts=5,
+        max_task_cost_estimate=1.0,
+        llm_price_prompt_per_1k=1.0,
+        llm_price_completion_per_1k=1.0,
+    )
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    assert stub.calls == 1, f"缺 usage 时费用上限无法判定，应在下一次请求前停住，实际 {stub.calls}"
+    assert view.status is TaskStatus.FAILED
+    assert "usage" in (view.error or ""), view.error
+
+
+def test_missing_usage_does_not_discard_a_response_that_needs_no_further_request(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """费用上限是"花钱闸门"，不是"结果闸门"：已经拿到的合格响应不该被判为失败。
+
+    缺 usage 时费用按未知报出，但既然后续不需要再发请求，就没有"再多花"的风险。
+    """
+    stub = ModelStub([(json.dumps(_draft()), None)])
+    stub.install(monkeypatch)
+    scoped = configured(
+        settings,
+        max_task_cost_estimate=1.0,
+        llm_price_prompt_per_1k=1.0,
+        llm_price_completion_per_1k=1.0,
+    )
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    assert stub.calls == 1
+    assert view.status is TaskStatus.DRAFT_READY, (view.status, view.error)
+    reported = usage_of(view)
+    assert reported["cost_estimate"] is None
+    assert reported["cost_known"] is False
+
+
+def test_the_last_allowed_request_keeps_its_successful_response(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """预算只管"能不能发下一次"：被允许的那次成功响应必须被使用，不能被丢弃。
+
+    以前 `_record_call` 在记账后又复查一次预算，于是 max_requests=1 时第一次（也是唯一一次）
+    调用必定失败——钱已经花了，响应却被扔掉。
+    """
+    stub = ModelStub([(json.dumps(_draft()), {"prompt_tokens": 100, "completion_tokens": 10})])
+    stub.install(monkeypatch)
+    scoped = configured(settings, max_task_requests=1)
+    service = AgentService(scoped, provider=OpenAICompatibleProvider(scoped))
+
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+
+    assert stub.calls == 1, f"只允许一次请求，实际发了 {stub.calls} 次"
+    assert view.status is TaskStatus.DRAFT_READY, (view.status, view.error)
+    assert view.draft is not None
+    assert usage_of(view)["requests"] == 1
+
+
+def test_the_budget_refuses_the_next_request_before_sending_it(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """硬边界仍然成立：超限后**不再发出**下一次请求，账本也不再多记一笔。"""
+    stub = ModelStub([(json.dumps(_draft()), {"prompt_tokens": 100, "completion_tokens": 10})])
+    stub.install(monkeypatch)
+    scoped = configured(settings)
+    provider = OpenAICompatibleProvider(scoped)
+    ledger = UsageLedger(max_requests=1, task_id="t", execution_id="e", model=scoped.llm_model)
+
+    async def scenario() -> None:
+        request = DraftRequest(requirement="x", slots=complete_slots())
+        with usage_scope(ledger, phase=PHASE_GENERATE):
+            await provider.generate(request)  # 被允许
+            with pytest.raises(TaskBudgetExceeded):
+                await provider.generate(request)  # 在发出去之前被拦下
+
+    run(scenario())
+
+    assert stub.calls == 1, "被拒绝的那次不应真的发出去"
+    assert ledger.requests == 1
+    assert provider.last_usage == {"prompt_tokens": 100, "completion_tokens": 10}, (
+        "被允许的那次响应结果必须保留"
+    )
 
 
 def _draft() -> dict[str, Any]:

@@ -8,8 +8,13 @@
    provider 是跨任务共享的，把累计量放在它上面会让并发任务互相串账。
 3. **缺失不等于 0**：真实 token 只累加真的报了 usage 的响应；未报的计入 `missing`，
    `known` 为假；预算判定则对未报的请求按**保守值**计费，使预算在"未知"时仍然有界。
+   费用同理：只要有响应没报 usage，就**不报已知费用**（`cost_known=False`、值为 `None`），
+   配了费用上限时更是失败关闭——拿"已报部分的折算值"（常常是 0）去比上限，等于把未知当 0。
 4. **必须可持久化**：账本支持从已落盘的累计值**续算**（恢复/重启不重置预算），
    并在每次记账后回调持久化钩子；钩子失败必须上抛——不允许在无账本的情况下继续调用模型。
+
+预算的判定点是**发请求之前**（provider 的 `_post` 开头），不是拿到响应之后：
+已经付过钱的那次响应不能因为"发完就超了"而被丢弃，但下一次请求会被拦住。
 
 本模块不依赖 `app.llm` 或 `app.workflow`，避免为了一个异常类型产生循环导入。
 """
@@ -162,7 +167,11 @@ class UsageLedger:
 
     @property
     def cost_estimate(self) -> float | None:
-        """按配置单价折算的费用；**没有单价就是 None（未知）**，不是 0。"""
+        """按配置单价折算的费用；**没有单价就是 None（未知）**，不是 0。
+
+        注意这是**已报 usage 的那部分**折算出来的数，只用于预算判定；
+        对外表示必须走 `cost_known`，否则会把"只算了一部分"说成"就是这么多"。
+        """
         if self.prompt_price_per_1k <= 0 and self.completion_price_per_1k <= 0:
             return None
         return round(
@@ -170,6 +179,17 @@ class UsageLedger:
             + self.completion_tokens / 1000 * self.completion_price_per_1k,
             6,
         )
+
+    @property
+    def cost_known(self) -> bool:
+        """费用能否作为一个**已知**数字报出去。
+
+        三个条件缺一不可：有请求、配了单价、**每一次响应都提供了 usage**。
+        只要有响应没报 usage，我们知道的就只是"已报的那部分折算出来是多少"——
+        把它当成总额报出去，就是拿一个偏小的数字冒充已知费用（0 尤其危险：
+        它读起来像"确定没花钱"）。
+        """
+        return self.requests > 0 and self.missing == 0 and self.cost_estimate is not None
 
     def exceeded(self) -> str | None:
         if self.max_requests > 0 and self.requests >= self.max_requests:
@@ -192,6 +212,13 @@ class UsageLedger:
                     "配置了任务费用上限，但没有可用的定价数据（AGENT_LLM_PRICE_PROMPT_PER_1K / "
                     "AGENT_LLM_PRICE_COMPLETION_PER_1K 均为 0）：费用预算无法执行，按失败处理"
                 )
+            if self.missing:
+                # 同样失败关闭：缺 usage 的那几次花了多少我们不知道，
+                # 用它去比上限只会得到一个偏小的数——那是"把未知当 0"。
+                return (
+                    f"配置了任务费用上限，但 {self.missing} 次响应未提供 usage："
+                    "费用无法确定，按失败处理（不把未知当作 0）"
+                )
             if cost > self.max_cost_estimate:
                 return f"任务费用预算已用尽：上限 {self.max_cost_estimate}，已计 {cost}"
         return None
@@ -205,6 +232,8 @@ class UsageLedger:
                 f"{self.requests} 次模型请求中有 {self.missing} 次未提供 usage："
                 "token 总量不完整、按未知处理，不填 0 冒充已知"
             )
+            if self.max_cost_estimate > 0 or self.cost_estimate is not None:
+                note += "；费用同样按未知处理（不报一个只算了部分响应的数）"
         elif self.requests:
             note = "usage 由 provider 按请求提供；估算费用不等于供应商账单"
         else:
@@ -219,8 +248,10 @@ class UsageLedger:
             "completion_tokens": self.completion_tokens if self.reported else None,
             "charged_unknown_tokens": self.charged_unknown_tokens,
             "known": self.known,
-            "cost_estimate": self.cost_estimate,
-            "cost_known": self.cost_estimate is not None,
+            # 费用只在不缺任何 usage 时才作为已知数字报出；否则是 unknown，
+            # 而不是把"已报部分的折算值"（哪怕恰好是 0）当成实际费用。
+            "cost_estimate": self.cost_estimate if self.cost_known else None,
+            "cost_known": self.cost_known,
             "note": note,
             "calls": [record.__dict__ for record in self.calls],
         }

@@ -953,6 +953,10 @@ provider 是跨任务共享的，累计量还会串到别的任务。
   这正是"显示 unknown 不等于实现了预算"所要求的那条策略。
 - **费用未实现时不装作实现**：配了费用上限却没有单价 → 第一次调用前就失败关闭。
 
+> §21 修掉了本节表述与实现之间的三处偏差（判定点一度被放在记账之后、缺 usage 时费用被报成
+> 已知的 0、费用上限拿部分折算值去比）。以 §21 的口径为准：预算只在**发请求之前**判定，
+> 缺 usage 时费用为空、并且费用上限失败关闭。
+
 用例：预算用尽后调用次数被硬性拦住（2 次而非 5 次）；缺 usage 时同样被拦住且真实 token 仍为 unknown；
 缺定价时 0 次调用即失败；有定价时按 0.22 折算并停止。
 
@@ -1203,3 +1207,97 @@ EXITCODE=2
 | 含 agent-app 的完整 `docker compose up --build` | 本机无 Docker |
 | 真实模型质量（live） | **NOT_RUN**（§20.8），无凭据 |
 | 多副本部署 | 未支持（§1.1） |
+
+---
+
+## 21. 账本三处边界缺陷：先复现，再修（PR-F）
+
+本轮只修一组已复现的问题，**不动架构**：任务级调用账本（`app/budget.py`）与 provider 的
+记账/预算判定点（`app/llm/provider.py`）。真实模型对照评测不在本轮范围内。
+
+### 21.1 复现（改动前，`d5bc430`）
+
+用一份独立探针脚本（一次性，不入库）在**现有实现**上跑，三个断言全部命中：
+
+```
+[断言1] requests_sent=1 ledger.requests=0 calls=[]
+        期望 ledger.requests == 1（请求确实发出去了）；漏记即为缺陷
+[断言2] token known=False prompt_tokens=None
+        cost_estimate=0.0 cost_known=True
+        期望：usage 缺失时费用必须是未知（None/False）
+[断言3] max_requests=1 时唯一一次调用的结果：TaskBudgetExceeded: 任务模型请求次数已用尽：上限 1，已发 1
+        ledger.requests=1，期望 OK
+```
+
+三个问题的根因：
+
+| # | 问题 | 根因 |
+| --- | --- | --- |
+| 1 | 请求被取消后**漏记** | `_post` 只捕获 `Exception`；`asyncio.CancelledError` 继承 `BaseException`，于是"已经发出去"的那次请求既不进账本也不进 `requests_sent` 的对账 |
+| 2 | usage 缺失时**费用被报成已知的 0** | `cost_known = cost_estimate is not None`，而 `cost_estimate` 只要求"配了单价"。一次响应都没带 usage 时它恰好算出 `0.0`，读起来像"确定没花钱"；同时费用上限拿这个偏小的数去比，等于**把未知当 0**，永远不会触发 |
+| 3 | 最后一次**允许**请求的成功响应被预算检查拒绝 | `_record_call` 在记账**之后**又复查一次预算，而 `max_requests` 用的是 `>=`：第 N 次（N 为上限）响应一记账就判定超限并抛错，钱已经花了、响应却被丢掉 |
+
+### 21.2 修法
+
+| 文件 | 改动 |
+| --- | --- |
+| `app/llm/provider.py` | `_post` 显式捕获 `asyncio.CancelledError`，先记一笔 `outcome="cancelled"`（usage 未知）再重新抛出；新增 `_record_cancelled_call`，并说明"请求是否真的到达模型我们并不知道，所以按算它花过记账"——与"不宣称 exactly-once"同一口径。记账失败（例如执行已被接管、落盘钩子按设计拒写）**不顶掉取消语义**：把一次取消变成一次执行失败比少一条账目更糟 |
+| `app/llm/provider.py` | `_record_call` **不再**复查预算；预算只在 `_post` 开头（发请求之前）判定 |
+| `app/budget.py` | 新增 `cost_known`：有请求 + 配了单价 + **每一次响应都报了 usage**，三者缺一即不是已知费用；`as_dict` 的 `cost_estimate` 只在 `cost_known` 时给出数字，否则 `None` |
+| `app/budget.py` | `exceeded()` 的费用分支新增失败关闭：配了费用上限而存在未报 usage 的响应时，明确报"费用无法确定"，**不拿部分折算值去比上限** |
+| `app/budget.py` | 模块文档写明：预算结论靠"发请求之前"的判定；已经付过钱的响应不因超限被丢弃 |
+
+### 21.3 改前/改后对照（确定性用例，事件驱动、无 sleep、无真实模型）
+
+新增 7 条用例（`tests/test_usage_budget.py`）。把 `app/budget.py`、`app/llm/provider.py`
+暂存回基线后运行同一批：
+
+```
+FAILED tests/test_usage_budget.py::test_cancelled_request_is_still_accounted
+FAILED tests/test_usage_budget.py::test_cost_is_unknown_rather_than_zero_when_usage_is_missing
+FAILED tests/test_usage_budget.py::test_cost_limit_fails_closed_when_usage_is_missing
+FAILED tests/test_usage_budget.py::test_missing_usage_does_not_discard_a_response_that_needs_no_further_request
+FAILED tests/test_usage_budget.py::test_the_last_allowed_request_keeps_its_successful_response
+FAILED tests/test_usage_budget.py::test_the_budget_refuses_the_next_request_before_sending_it
+6 failed, 13 passed
+```
+
+失败信息即问题本身：`assert 0 == 1`（取消没进账本）、`assert 0.0 is None`（费用被报成已知 0）、
+`assert 5 == 1`（缺 usage 时费用上限根本没拦住后续请求）、
+`<TaskStatus.FAILED> is <TaskStatus.DRAFT_READY>` 且错误为"请求次数已用尽：上限 1，已发 1"
+（唯一一次被允许的请求，响应拿到后被丢弃）。
+
+修后同一个文件 **19 passed**；`test_cost_is_reported_when_every_response_reports_usage` 是
+对照组（每条响应都带 usage 时费用照常按单价折算），改前改后都通过——确保修复没有把
+"正常情况下的费用报告"一起关掉。
+
+> **口径**：6 条失败全部是行为复现，不存在"缺方法/缺字段"造成的失败；对照组 1 条在两个版本
+> 都通过。
+
+### 21.4 行为变更（需要显式知道）
+
+| 场景 | 以前 | 现在 |
+| --- | --- | --- |
+| 请求被取消 | 账本不计这一笔 | 记 `outcome="cancelled"`，计入 `requests`，该次无 usage → 总量标为不完整 |
+| 配了单价但某次响应缺 usage | `cost_estimate` 给一个数（常常是 `0.0`）、`cost_known=true` | `cost_estimate=null`、`cost_known=false`，并说明费用按未知处理 |
+| 配了费用上限且存在缺 usage 的响应 | 拿偏小的估算去比上限，等于不设限 | **失败关闭**：下一次请求前停住，报"费用无法确定" |
+| 预算刚好用尽（第 N 次请求，N 为上界） | 第 N 次响应被丢弃、任务判失败 | 第 N 次响应正常使用；**第 N+1 次**请求在发出之前被拒绝 |
+| token 上限（已有行为） | 同上（丢弃触发超限的那次响应） | 同上：允许的那次响应保留，下一次请求被拦 |
+
+硬边界没有放松：`tests/test_usage_budget.py::test_model_request_cap_is_enforced`、
+`test_task_token_budget_stops_further_model_calls`、`test_unknown_usage_is_charged_conservatively_to_the_budget`
+与评测里的 `budget-exhausted-no-evidence` 全部保持通过——超限之后仍然**一次请求都不会再发**。
+
+### 21.5 本轮命令与结果（本机，改后）
+
+| 命令 | 结果 |
+| --- | --- |
+| `pytest -q` | **249 passed**（§20 后 242 + 本轮新增 7） |
+| `evals/run_eval.py --provider scripted --strategy bounded_agent --split dev` | **14/14**（含预算用例） |
+| `evals/run_eval.py --provider scripted --strategy fixed_workflow --split dev` | **13/13**，SKIPPED 1（与既有口径一致） |
+| `scripts/recovery_acceptance.py` | 无 FAIL 项 |
+
+### 21.6 未运行 / 不得当作通过
+
+真实模型（live）对照评测仍为 **NOT_RUN**（无凭据，见 §20.8），本轮不涉及模型质量结论。
+`go test -race`、PostgreSQL/Redis 集成、CI 的 Playwright e2e 仍由 CI 提供证据（本机不满足条件）。
