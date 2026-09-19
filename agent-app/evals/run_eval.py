@@ -634,6 +634,54 @@ def write_report(report: dict[str, Any], slug: str) -> Path:
     return json_path
 
 
+def write_comparison_report(report: dict[str, Any], slug: str) -> Path:
+    """对照报告：两臂并排，只陈述实测差异。"""
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    json_path = REPORT_DIR / f"{stamp}-{slug}.json"
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    left = report["arms"]["fixed_workflow"]["summary"]
+    right = report["arms"]["bounded_agent"]["summary"]
+    rows = [
+        ("通过 / 已执行", lambda s: f"{s['passed']}/{s['executed']}"),
+        ("失败", lambda s: str(s["failed"])),
+        ("NOT_RUN / SKIPPED", lambda s: f"{s['not_run']} / {s['skipped']}"),
+        ("任务完成率", lambda s: _rate(s["task_completion_rate"])),
+        ("模型请求总数", lambda s: str(s["model_requests_total"])),
+        ("端到端 P50 / P95 (ms)", lambda s: f"{s['latency_ms']['p50']} / {s['latency_ms']['p95']}"),
+        ("usage", lambda s: "已知" if s["usage"]["known"] else "unknown（不填 0）"),
+    ]
+    lines = [
+        "# Agent 对照评测报告",
+        "",
+        f"- 数据集：`{report['dataset']['version']}`",
+        f"- 数据集 SHA-256：`{report['dataset']['sha256']}`",
+        f"- 提交：`{report['commit']}`　provider：`{report['provider']}`　重复次数：`{report['config']['repeats']}`",
+        "",
+        "> " + report["note"],
+        "",
+        "## 两臂对比（只有策略不同）",
+        "",
+        "| 指标 | fixed_workflow | bounded_agent |",
+        "| --- | --- | --- |",
+    ]
+    for label, getter in rows:
+        lines.append(f"| {label} | {getter(left)} | {getter(right)} |")
+    lines += ["", "## 逐例结局", "", "| 用例 | 类型 | fixed_workflow | bounded_agent |", "| --- | --- | --- | --- |"]
+    right_cases = {item["id"]: item for item in report["arms"]["bounded_agent"]["cases"]}
+    for item in report["arms"]["fixed_workflow"]["cases"]:
+        other = right_cases.get(item["id"], {})
+        lines.append(
+            f"| {item['id']} | {item.get('type')} | {item['outcome'].upper()} | {other.get('outcome', '-').upper()} |"
+        )
+    lines += ["", "## 局限", ""] + [f"- {item}" for item in report["limitations"]]
+
+    md_path = REPORT_DIR / f"{stamp}-{slug}.md"
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return json_path
+
+
 def _rate(value: float | None) -> str:
     return "N/A" if value is None else f"{value * 100:.1f}%"
 
@@ -658,28 +706,23 @@ async def main_async(args: argparse.Namespace) -> int:
     version, digest = dataset_digest(entries)
 
     args.workdir.mkdir(parents=True, exist_ok=True)
-    results = [await run_case(case, args, args.workdir) for case in cases]
     # 供汇总区分"以产出草案为目标"的用例（完成率分母）。
     expectations = {case["id"]: (case.get("expect") or {}) for case in cases}
-    for item in results:
-        item["expected_status"] = expectations.get(item["id"], {}).get("status")
 
-    summary = summarize(results)
+    if getattr(args, "compare", False):
+        return await run_comparison(args, entries, cases, expectations, version, digest)
+
+    arm = await run_arm(args, cases, expectations, strategy=args.strategy)
+    summary = arm["summary"]
     report = {
         "dataset": {"version": version, "sha256": digest, "files": [str(path) for _n, path in entries]},
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "commit": commit_sha(),
         "provider": args.provider,
         "strategy": args.strategy,
-        "config": {
-            "split": args.split,
-            "dataset_arg": str(args.dataset) if args.dataset else None,
-            "workdir": str(args.workdir),
-            "providers_available": list(PROVIDERS),
-            "strategies_available": list(STRATEGIES),
-        },
+        "config": _config(args),
         "summary": summary,
-        "cases": results,
+        "cases": arm["cases"],
         "limitations": LIMITATIONS,
     }
     slug = f"{args.provider}-{args.strategy}-{args.split}"
@@ -690,12 +733,86 @@ async def main_async(args: argparse.Namespace) -> int:
         f"通过 {summary['passed']}/{summary['executed']}"
         f"，失败 {summary['failed']}，NOT_RUN {summary['not_run']}，SKIPPED {summary['skipped']}"
     )
-    if summary["failed"]:
+    return _exit_code([summary])
+
+
+def _config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "split": args.split,
+        "dataset_arg": str(args.dataset) if args.dataset else None,
+        "workdir": str(args.workdir),
+        "providers_available": list(PROVIDERS),
+        "strategies_available": list(STRATEGIES),
+        "repeats": int(getattr(args, "repeats", 1) or 1),
+    }
+
+
+def _exit_code(summaries: list[dict[str, Any]]) -> int:
+    if any(item["failed"] for item in summaries):
         return 1
-    if summary["not_run"]:
+    if any(item["not_run"] for item in summaries):
         # 未运行不等于通过：用不同的退出码，避免 CI 把它当成绿灯。
         return 2
     return 0
+
+
+async def run_arm(
+    args: argparse.Namespace,
+    cases: list[dict[str, Any]],
+    expectations: dict[str, Any],
+    *,
+    strategy: str,
+) -> dict[str, Any]:
+    """在**同一份输入**上跑一遍某个策略。
+
+    对照评测必须只改策略这一个变量：数据集、provider、生成设置与预算都相同。
+    """
+    scoped = argparse.Namespace(**{**vars(args), "strategy": strategy})
+    results = [await run_case(case, scoped, args.workdir) for case in cases]
+    for item in results:
+        item["expected_status"] = expectations.get(item["id"], {}).get("status")
+    return {"strategy": strategy, "summary": summarize(results), "cases": results}
+
+
+COMPARISON_NOTE = (
+    "两臂在**同一数据集、同一 provider、同一预算**下运行，只有策略不同；"
+    "报告只陈述实测差异，不预设任何提升比例。"
+    "差异可能来自策略，也可能来自模型随机性（重复次数见 config.repeats，样本小时不做统计结论）。"
+    "离线 provider 的对照是工程回归，不代表真实模型的质量差异。"
+)
+
+
+async def run_comparison(
+    args: argparse.Namespace,
+    entries: list[tuple[str, Path]],
+    cases: list[dict[str, Any]],
+    expectations: dict[str, Any],
+    version: str,
+    digest: str,
+) -> int:
+    """固定工作流 vs 受约束调查：同输入对照。"""
+    arms = [await run_arm(args, cases, expectations, strategy=name) for name in STRATEGIES]
+    report = {
+        "dataset": {"version": version, "sha256": digest, "files": [str(path) for _n, path in entries]},
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "commit": commit_sha(),
+        "provider": args.provider,
+        "compare": list(STRATEGIES),
+        "config": _config(args),
+        "arms": {arm["strategy"]: arm for arm in arms},
+        "note": COMPARISON_NOTE,
+        "limitations": LIMITATIONS,
+    }
+    path = write_comparison_report(report, f"compare-{args.provider}-{args.split}")
+    print(f"对照报告已写入：{path}")
+    for arm in arms:
+        summary = arm["summary"]
+        print(
+            f"  {arm['strategy']}: 通过 {summary['passed']}/{summary['executed']}"
+            f"，失败 {summary['failed']}，完成率 {_rate(summary['task_completion_rate'])}"
+            f"，请求 {summary['model_requests_total']}，P50 {summary['latency_ms']['p50']}ms"
+        )
+    return _exit_code([arm["summary"] for arm in arms])
 
 
 def main() -> int:
@@ -704,6 +821,9 @@ def main() -> int:
     parser.add_argument("--split", choices=["dev", "holdout", "all"], default="dev")
     parser.add_argument("--provider", choices=list(PROVIDERS), default="scripted")
     parser.add_argument("--strategy", choices=list(STRATEGIES), default="bounded_agent")
+    # 对照评测：同一数据集/provider/预算下把两种策略都跑一遍。
+    parser.add_argument("--compare", action="store_true", help="固定工作流与受约束调查的同输入对照")
+    parser.add_argument("--repeats", type=int, default=1, help="每个用例重复次数（用于观察波动，默认 1）")
     parser.add_argument("--workdir", type=Path, default=APP_DIR / "evals" / ".work")
     args = parser.parse_args()
     return asyncio.run(main_async(args))
