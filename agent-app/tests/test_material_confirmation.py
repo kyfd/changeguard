@@ -146,6 +146,20 @@ def test_a_changed_draft_invalidates_the_previous_confirmation(settings: Setting
     assert active[0].material_hash != invalidated[0].material_hash
 
 
+def test_confirm_rejects_a_stale_material_hash(settings: Settings) -> None:
+    """停留在旧页面的用户不能确认已经更新过的材料。"""
+    service, task_id = prepared(settings)
+
+    with pytest.raises(TaskNotConfirmable) as error:
+        run(service.confirm(task_id, CONTEXT, ConfirmRequest(material_hash="stale-hash")))
+    assert "刷新" in str(error.value), error.value
+
+    # 带上当前哈希则可以确认：所见与所确认一致。
+    current = run(service.get_task(task_id, CONTEXT)).material_hash
+    confirmed = run(service.confirm(task_id, CONTEXT, ConfirmRequest(material_hash=current)))
+    assert confirmed.confirmations, "带上正确哈希时必须可以确认"
+
+
 def test_changing_input_invalidates_the_previous_confirmation(settings: Settings) -> None:
     """输入/材料版本变化后旧确认失效（走补充信息 → 重算版本 → 重新执行）。"""
     service = AgentService(settings, provider=ScriptedProvider(BLOCKING_DRAFT))
