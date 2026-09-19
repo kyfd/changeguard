@@ -111,6 +111,18 @@ PG/Redis 集成测试、浏览器测试和并发场景的环境要求见[测试�
 
 完整安全边界见[威胁模型](docs/threat-model.md)。生产部署需要独立凭据、隔离影子库、HTTPS 和备份恢复方案，见[运维文档](docs/enterprise-operations.md)。
 
+## 变更准备 Agent（`/agent/`）
+
+模型只**准备材料**，不审批、不执行。它能：把需求整理成结构化草案、检索规范与历史案例并引用**可核对片段**、
+做确定性静态扫描（并发建索引、锁超时、回滚缺失等）、缺信息时**停在节点上追问**、并从检查点**恢复**未跑完的调查。
+
+明确边界：模型建议不参与放行判定；**材料确认 ≠ 治理审批 ≠ 执行许可**；三个远程只读工具需要共享密钥 + 成员委托；
+任务记录与检查点都是**单实例**存储（多副本未支持）。模型不可用时退回确定性生成器——
+这是可运行状态，但不代表真实模型的起草质量。
+
+- 运维边界、设计说明、五分钟演示脚本与可引用事实清单：[docs/agent-ops-and-interview.md](docs/agent-ops-and-interview.md)
+- 改造计划与逐项验证记录：[docs/agent-upgrade-plan.md](docs/agent-upgrade-plan.md)、[docs/agent-upgrade-verification.md](docs/agent-upgrade-verification.md)
+
 ## 代码入口
 
 ```text
