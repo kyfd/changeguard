@@ -990,10 +990,15 @@ def _apply_input_version(record: dict[str, Any]) -> None:
         schema_snapshot=record.get("schema_snapshot") or "",
     )
     if version != record.get("input_version"):
+        # 输入/材料已变：旧草案、旧调查轨迹与旧检查结果都不再对应当前输入，必须失效——
+        # 只清草案而留着旧轨迹，会让界面把上一次的调查结论当成这一次的。
         record["draft"] = None
         record["questions"] = []
+        record["investigation"] = None
+        record["evidence_note"] = None
         record["input_version"] = version
-        # 输入/材料已变：旧的人工确认不再适用于当前材料。
+        # 调用账本**不清零**：预算是任务的累计消耗，改输入不等于没花过钱。
+        # 旧的人工确认同样失效（材料内容/版本已变）。
         _invalidate_stale_confirmations(record, "输入或材料已变更，旧确认失效")
 
 
