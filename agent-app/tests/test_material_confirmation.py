@@ -160,6 +160,32 @@ def test_confirm_rejects_a_stale_material_hash(settings: Settings) -> None:
     assert confirmed.confirmations, "带上正确哈希时必须可以确认"
 
 
+def test_input_change_invalidates_stale_results_but_keeps_the_budget() -> None:
+    """改输入要让旧结果失效，但**不得**清掉已累计的调用预算。"""
+    from app.service import _apply_input_version
+
+    record = {
+        "input_version": "stale-version",  # 与按当前 requirement/slots/snapshot 算出的值不同
+        "requirement": "给订单表准备索引变更。",
+        "slots": {"table": "orders"},
+        "schema_snapshot": "",
+        "draft": {"sql": "CREATE INDEX ..."},
+        "questions": [{"field": "planned_at"}],
+        "investigation": {"strategy": "bounded_agent", "stop_reason": "EVIDENCE_SUFFICIENT"},
+        "evidence_note": "旧的检索备注",
+        "usage": {"requests": 3, "prompt_tokens": 300, "charged_unknown_tokens": 0},
+    }
+
+    _apply_input_version(record)
+
+    assert record["input_version"] != "stale-version"
+    assert record["draft"] is None, "旧草案必须失效"
+    assert record["questions"] == []
+    assert record["investigation"] is None, "旧调查轨迹必须失效，不能和新输入混在一起"
+    assert record["evidence_note"] is None
+    assert record["usage"]["requests"] == 3, "预算必须续算，改输入不等于没花过钱"
+
+
 def test_changing_input_invalidates_the_previous_confirmation(settings: Settings) -> None:
     """输入/材料版本变化后旧确认失效（走补充信息 → 重算版本 → 重新执行）。"""
     service = AgentService(settings, provider=ScriptedProvider(BLOCKING_DRAFT))
