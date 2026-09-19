@@ -166,6 +166,33 @@ def test_failures_are_preserved_and_no_improvement_is_prefilled(
 # ---------------------------------------------------------------------------
 
 
+def test_compare_runs_both_strategies_on_the_same_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """对照评测：只改策略这一个变量，两臂共用数据集/provider/预算，只陈述实测差异。"""
+    reports = tmp_path / "reports"
+    monkeypatch.setattr(run_eval, "REPORT_DIR", reports)
+    args = argparse.Namespace(
+        dataset=None, split="dev", provider="scripted", strategy="bounded_agent",
+        compare=True, repeats=1, workdir=tmp_path / "work",
+    )
+
+    code = asyncio.run(run_eval.main_async(args))
+
+    assert code == 0
+    report = json.loads(max(reports.glob("*.json"), key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8"))
+    assert set(report["arms"]) == {"fixed_workflow", "bounded_agent"}
+    assert report["compare"] == ["fixed_workflow", "bounded_agent"]
+    # 两臂必须跑同一份数据、同一个 provider。
+    for arm in report["arms"].values():
+        assert arm["summary"]["total"] == report["arms"]["fixed_workflow"]["summary"]["total"]
+    assert set(report["arms"]["fixed_workflow"]["summary"]) == set(report["arms"]["bounded_agent"]["summary"])
+    # 不预设提升比例：只给实测数字、差异来源与重复次数。
+    assert "不预设任何提升比例" in report["note"]
+    assert "随机性" in report["note"] and "工程回归" in report["note"]
+    assert report["config"]["repeats"] == 1
+
+
 def test_dataset_digest_is_content_addressed(tmp_path: Path) -> None:
     first = tmp_path / "a.jsonl"
     first.write_text('{"id":"x"}\n', encoding="utf-8")
