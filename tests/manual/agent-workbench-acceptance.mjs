@@ -182,6 +182,20 @@ async function main() {
     check("错误处理：空需求被拦下并给出提示", banner.includes("请先填写需求"), banner.trim());
     await page.locator("#errorBanner").evaluate((node) => { node.hidden = true; });
 
+    // ---- 6b. 超长需求：给一句人话，而不是把服务端的原始 JSON 摊出来 ----
+    await page.locator("#requirement").fill("长".repeat(4001));
+    await page.getByRole("button", { name: "开始准备材料" }).click();
+    await page.locator("#errorBanner").waitFor({ timeout: 10000 });
+    const longBanner = await page.locator("#errorBanner").innerText();
+    check(
+      "错误处理：超长需求被拦下并给出人话提示",
+      longBanner.includes("最多 4000 字") && longBanner.includes("4001") && !longBanner.includes("{"),
+      longBanner.trim().slice(0, 80)
+    );
+    check("长度提示：接近上限时显示字数", (await page.locator("#requirementCount").innerText()).includes("4001"), "");
+    await page.locator("#requirement").fill("");
+    await page.locator("#errorBanner").evaluate((node) => { node.hidden = true; });
+
     // ---- 7. 窄屏 ----
     await page.setViewportSize({ width: 420, height: 900 });
     await page.waitForTimeout(400);

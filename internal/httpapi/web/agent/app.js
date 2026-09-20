@@ -69,6 +69,10 @@ const CLARIFY_FIELDS = [
   },
 ];
 
+/** 与后端 `CreateTaskRequest.requirement` 的 max_length 保持一致。
+ *  前端先拦一次：省一次往返，也避免把超长内容发出去。 */
+const REQUIREMENT_MAX_CHARS = 4000;
+
 const state = {
   authStatus: null,
   session: null,
@@ -84,6 +88,26 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 /* ---------- 基础工具 ---------- */
+
+/**
+ * 把服务端的错误体压成一句可读文本。
+ *
+ * 校验错误（FastAPI 是**数组**）以前被整体 `JSON.stringify` 后摊在错误横幅里：
+ * 用户看到的是一大坨 JSON，而且里面带着后端回显的提交内容。这里只取可读的那部分，
+ * 取不到才退回原始文本。
+ */
+function readableError(detail, fallback) {
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((item) => (item && typeof item.msg === "string" ? item.msg.trim() : ""))
+      .filter(Boolean);
+    if (parts.length) return parts.join("；");
+  } else if (detail && typeof detail === "object" && typeof detail.msg === "string" && detail.msg.trim()) {
+    return detail.msg.trim();
+  }
+  return fallback;
+}
 
 function esc(value) {
   return String(value === null || value === undefined ? "" : value)
@@ -158,10 +182,11 @@ async function api(path, options) {
   }
 
   if (!response.ok) {
+    const fallback = raw || `HTTP ${response.status}`;
     const detail = payload && payload.error !== undefined
       ? payload.error
-      : (payload && payload.detail !== undefined ? payload.detail : (raw || `HTTP ${response.status}`));
-    const error = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      : (payload && payload.detail !== undefined ? payload.detail : fallback);
+    const error = new Error(readableError(detail, fallback));
     error.status = response.status;
     // 保留机器可读的错误码：调用方需要靠它在**同为 503 的两种情况**之间区分，
     // 只按状态码判断会把应用层失败误诊成"功能未启用"。
@@ -293,6 +318,22 @@ function markAgentDisabled(message) {
 
 /* ---------- 任务动作 ---------- */
 
+/**
+ * 需求长度提示：只在接近上限时才显示，平时不占地方。
+ * 上限由后端定义（`CreateTaskRequest.requirement` 的 max_length），这里只是提前告知。
+ */
+function wireRequirementCounter() {
+  const input = $("requirement");
+  const counter = $("requirementCount");
+  if (!input || !counter) return;
+  const update = () => {
+    const size = (input.value || "").length;
+    counter.textContent = size > REQUIREMENT_MAX_CHARS - 400 ? `${size} / ${REQUIREMENT_MAX_CHARS} 字` : "";
+  };
+  input.addEventListener("input", update);
+  update();
+}
+
 async function createTask(event) {
   event.preventDefault();
   if (state.busy || !state.agentEnabled) return;
@@ -300,6 +341,12 @@ async function createTask(event) {
   const requirement = $("requirement").value.trim();
   if (!requirement) {
     showError("请先填写需求。");
+    return;
+  }
+  if (requirement.length > REQUIREMENT_MAX_CHARS) {
+    showError(
+      `需求最多 ${REQUIREMENT_MAX_CHARS} 字，当前 ${requirement.length} 字。请精简后再提交（长内容请放「表结构快照」或补充说明）。`
+    );
     return;
   }
 
@@ -1158,6 +1205,7 @@ function renderProvenance() {
 
 async function init() {
   $("createForm").addEventListener("submit", createTask);
+  wireRequirementCounter();
   $("healthChip").addEventListener("click", () => {
     window.alert($("healthChip").title || "无健康信息。");
   });
