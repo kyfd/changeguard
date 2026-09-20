@@ -106,6 +106,12 @@ class Settings:
     # 未配置时，远程只读工具**显式不可用**，不会退化成匿名读取。
     upstream_token: str = ""
 
+    # 用量闸门（0 = 不启用该层），按治理服务注入的 X-Actor-Id 计数。
+    # 目的：防止恶意或失控的调用烧掉模型账单。详见 app/usage.py。
+    rate_per_minute: int = 6
+    user_daily_limit: int = 60
+    global_daily_limit: int = 400
+
     @property
     def llm_configured(self) -> bool:
         return bool(self.llm_base_url.strip()) and bool(self.llm_api_key.strip())
@@ -168,4 +174,7 @@ class Settings:
             allow_header_identity=os.getenv("AGENT_ALLOW_HEADER_IDENTITY", "0").strip()
             in {"1", "true", "on", "yes"},
             upstream_token=os.getenv("AGENT_UPSTREAM_TOKEN", "").strip(),
+            rate_per_minute=int(os.getenv("AGENT_RATE_PER_MINUTE", str(defaults.rate_per_minute))),
+            user_daily_limit=int(os.getenv("AGENT_USER_DAILY_LIMIT", str(defaults.user_daily_limit))),
+            global_daily_limit=int(os.getenv("AGENT_GLOBAL_DAILY_LIMIT", str(defaults.global_daily_limit))),
         )
