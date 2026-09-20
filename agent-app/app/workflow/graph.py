@@ -47,6 +47,7 @@ from app.schemas.drafts import (
 from app.tools.business import Toolbox
 from app.tools.registry import TrustedContext
 from app.tools.scan import feedback_lines
+from app.workflow.extract import suggest_slots
 from app.workflow.investigate import (
     BoundedInvestigation,
     PlannerUnavailable,
@@ -333,14 +334,26 @@ class DraftWorkflow:
             missing = slots.missing()
             if not missing:
                 break
+            # 从需求原文确定性抽取候选值，作为追问表单的预填建议。
+            # 它不写入 slots，因此不改变缺失判定，也不替用户完成确认。
+            suggestions = suggest_slots(requirement, missing)
             if self._deps.checkpointer is None:
-                events.append(event("check_info", f"缺少必要信息：{', '.join(missing)}"))
+                detail = f"缺少必要信息：{', '.join(missing)}"
+                if suggestions:
+                    detail += f"；已从需求原文预填 {', '.join(sorted(suggestions))} 供核对"
+                events.append(event("check_info", detail))
                 return {
                     "status": TaskStatus.NEEDS_INFO.value,
-                    "questions": [item.model_dump(mode="json") for item in build_questions(missing)],
+                    "questions": [
+                        item.model_dump(mode="json")
+                        for item in build_questions(missing, suggestions=suggestions)
+                    ],
                     "events": events,
                 }
-            questions = [item.model_dump(mode="json") for item in build_questions(missing)]
+            questions = [
+                item.model_dump(mode="json")
+                for item in build_questions(missing, suggestions=suggestions)
+            ]
             # 中断前追加的事件不会被提交（节点没有返回），因此不会重复记录。
             events.append(event("check_info", f"缺少必要信息：{', '.join(missing)}"))
             provided = interrupt({"kind": "needs_info", "questions": questions})
@@ -361,7 +374,10 @@ class DraftWorkflow:
             events.append(event("check_info", f"补充后仍缺少必要信息：{', '.join(missing)}"))
             return {
                 "status": TaskStatus.NEEDS_INFO.value,
-                "questions": [item.model_dump(mode="json") for item in build_questions(missing)],
+                "questions": [
+                    item.model_dump(mode="json")
+                    for item in build_questions(missing, suggestions=suggest_slots(requirement, missing))
+                ],
                 "slots": slots.model_dump(mode="json"),
                 "events": events,
             }
