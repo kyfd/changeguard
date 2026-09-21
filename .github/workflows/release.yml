@@ -97,10 +97,10 @@ jobs:
           test -z "$(gofmt -l .)"
           npm ci
           npm test
-          for file in internal/httpapi/web/*.js internal/httpapi/web/*.mjs; do
-            [ -e "$file" ] || continue
-            node --check "$file"
-          done
+          # 必须递归：变更准备工作台是独立文档，放在 internal/httpapi/web/agent/，
+          # 单层 glob 会静默漏掉它——那正是本次修复的前端文件。
+          find internal/httpapi/web -type f \( -name '*.js' -o -name '*.mjs' \) -print0 |
+            xargs -0 -r -n1 node --check
 
       - name: Run Go tests and vet
         run: |

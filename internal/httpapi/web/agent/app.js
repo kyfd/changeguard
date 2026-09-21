@@ -77,6 +77,9 @@ const state = {
   authStatus: null,
   session: null,
   agentEnabled: true,
+  // 是否因为"下游未启用"而禁用过创建按钮：只有这个标记为真时才由本页面撤掉该提示，
+  // 避免把登录失效等其他横幅一起清掉。
+  agentDisabled: false,
   health: null,
   task: null,
   timer: null,
@@ -122,7 +125,13 @@ function formatTime(iso) {
   if (!iso) return "--:--:--";
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return String(iso);
-  return parsed.toLocaleTimeString("zh-CN", { hour12: false });
+  const time = parsed.toLocaleTimeString("zh-CN", { hour12: false });
+  // 只显示时刻会让跨天（或被中断到第二天再恢复）的进度看起来都发生在同一时间。
+  // 当天只给时刻，非当天补上日期，列宽仍然可控。
+  const sameDay = parsed.toDateString() === new Date().toDateString();
+  if (sameDay) return time;
+  const day = parsed.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+  return `${day} ${time}`;
 }
 
 function formatDate(value) {
@@ -254,12 +263,22 @@ function renderIdentityBanner(html) {
 
 /* ---------- 健康检查 ---------- */
 
-async function refreshHealth() {
+/** 刷新健康状态。
+ *
+ * `quiet` 用于周期轮询：服务在页面打开后才恢复或才降级时，右上角的状态、
+ * 右栏的「存储降级 / 模型不可用」卡片、以及创建按钮的可用性都必须跟上，
+ * 否则一次启动时的抖动会把界面永久留在错误状态上（按钮从此点不动）。
+ * 轮询失败不弹错误横幅——那会在服务重启期间反复打断用户。
+ */
+async function refreshHealth(options) {
+  const quiet = Boolean(options && options.quiet);
   const dot = $("healthDot");
   const text = $("healthText");
   try {
     const health = await api("/api/agent/healthz");
     state.health = health;
+    // 下游重新可达：撤掉"未启用"的判定，把创建按钮还回去。
+    restoreAgentAvailability();
     // 健康检查里的键是 provider.provider（见 agent-app/app/llm/provider.py 的 describe()）。
     const provider = health.provider || {};
     const realModel = Boolean(provider.llm_configured);
@@ -286,34 +305,65 @@ async function refreshHealth() {
     ].join("\n");
   } catch (error) {
     dot.className = "dot bad";
+    if (error.status === 401) {
+      // 会话过期时健康检查也会 401：这不是"服务不可达"，不能混为一谈。
+      state.session = null;
+      text.textContent = "未登录";
+      renderIdentityBanner('登录状态已失效。请先回到 <a href="/">控制台</a> 登录，再进入变更准备。');
+      disableCreateButton("请先登录");
+      return;
+    }
     // 503 有两种含义，必须靠**错误码**区分，不能只看状态码：
     //   - 治理代理在下游未配置时返回 SERVICE_UNAVAILABLE：功能没开，需要配置后重启；
     //   - 应用层 503 表示"本次操作未生效、可重试"（例如状态未能落盘）。
-    // 把后者当成前者，一次存储抖动就会被误诊为"功能没启用"并禁用整个面板。
+    // 把后者当成前者，一次存储抖动就会被误诊成"功能没启用"并禁用整个面板。
     if (error.status === 503 && error.code === "SERVICE_UNAVAILABLE") {
       text.textContent = "未启用";
-      markAgentDisabled(error.message);
+      markAgentDisabled(error.message, quiet);
     } else if (error.status === 503) {
       text.textContent = "服务暂时不可用";
-      showError("变更准备服务暂时不可用：" + error.message, "该操作未生效，可稍后重试；这不代表功能未启用。");
+      if (!quiet) {
+        showError("变更准备服务暂时不可用：" + error.message, "该操作未生效，可稍后重试；这不代表功能未启用。");
+      }
     } else {
       text.textContent = "服务不可达";
-      showError("无法连接变更准备服务：" + error.message);
+      if (!quiet) showError("无法连接变更准备服务：" + error.message);
     }
   }
 }
 
-function markAgentDisabled(message) {
-  state.agentEnabled = false;
-  renderIdentityBanner(
-    esc(message) +
-    ' 下游 Agent 服务需要配置 <code>DBGUARD_AGENT_BASE_URL</code> 后重启本服务。'
-  );
+function disableCreateButton(label) {
   const button = $("createButton");
   if (button) {
     button.disabled = true;
-    button.textContent = "变更准备未启用";
+    button.textContent = label;
   }
+}
+
+function restoreAgentAvailability() {
+  state.agentEnabled = true;
+  // 只有"未启用"横幅是本函数写进去的，才由本函数撤掉；登录失效等提示不碰。
+  if (state.agentDisabled) {
+    state.agentDisabled = false;
+    renderIdentityBanner(null);
+  }
+  const button = $("createButton");
+  if (button && button.disabled && !state.busy) {
+    button.disabled = false;
+    button.textContent = "开始准备材料";
+  }
+}
+
+function markAgentDisabled(message, quiet) {
+  state.agentEnabled = false;
+  state.agentDisabled = true;
+  if (!quiet) {
+    renderIdentityBanner(
+      esc(message) +
+      ' 下游 Agent 服务需要配置 <code>DBGUARD_AGENT_BASE_URL</code> 后重启本服务。'
+    );
+  }
+  disableCreateButton("变更准备未启用");
 }
 
 /* ---------- 任务动作 ---------- */
@@ -628,39 +678,92 @@ function renderConversation() {
   wireQuestionForm();
 }
 
+/** 追问表单的预填值。
+ *
+ * 服务端用 `suggest_slots()` 从需求原文里**确定性**抽取候选值，挂在每个追问的
+ * `suggested` / `suggested_from` 上（见 agent-app/app/workflow/extract.py）。
+ * 它是建议，不是已确认信息：预填进输入框供用户核对，用户改掉或清空都以用户为准，
+ * 清空的值不会被提交。格式对不上控件时宁可不预填，也不猜一个值塞进去。
+ */
+function suggestedValue(question, field) {
+  const raw = typeof question.suggested === "string" ? question.suggested.trim() : "";
+  if (!raw || !field) return "";
+  if (field.type === "select") {
+    const matched = field.options.find(([value]) => value === raw);
+    return matched ? matched[0] : "";
+  }
+  if (field.type === "datetime-local") {
+    // 服务端返回的就是 `YYYY-MM-DDTHH:mm`（datetime-local 原生格式）；不一致就不预填。
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw) ? raw : "";
+  }
+  return raw;
+}
+
 function renderQuestions(task) {
-  const rows = (task.questions || []).map((question, index) => {
+  const slotRows = [];
+  // 非槽位追问（模型要求的补充说明、草案里的未解决问题）在 ClarifyRequest 里没有对应字段，
+  // 渲染成输入框只会让用户提交一个被服务端直接丢弃的值。这里只陈述需要人工确认的事实。
+  const openNotes = [];
+
+  (task.questions || []).forEach((question) => {
     const field = CLARIFY_FIELDS.find((item) => item.name === question.field);
-    const label = field ? field.label : question.field;
-    const inputName = `q_${esc(question.field)}_${index}`;
-    let control;
-    if (field && field.type === "select") {
-      const options = field.options
-        .map(([value, text]) => `<option value="${esc(value)}">${esc(text)}</option>`)
-        .join("");
-      control = `<select data-field="${esc(question.field)}" id="${inputName}">${options}</select>`;
-    } else if (field && field.type === "textarea") {
-      control = `<textarea data-field="${esc(question.field)}" id="${inputName}" rows="3" placeholder="${esc(field.placeholder || "")}"></textarea>`;
-    } else if (question.field === "planned_at") {
-      control = `<input data-field="planned_at" id="${inputName}" type="datetime-local">`;
-    } else {
-      control = `<input data-field="${esc(question.field)}" id="${inputName}" type="text" placeholder="${esc((field && field.placeholder) || "")}">`;
+    if (!field) {
+      openNotes.push(`
+        <div class="confirm-item">
+          <div class="confirm-head">
+            <span class="badge badge-warn">需要人工确认</span>
+            <span class="note-inline">${esc(question.field)}</span>
+          </div>
+          <p>${esc(question.question || "")}</p>
+          ${question.reason ? `<p class="note-inline">${esc(question.reason)}</p>` : ""}
+          <p class="note-inline">这不是可提交的槽位：请把结论写进下方的「补充说明」，或修正需求后重新发起。</p>
+        </div>
+      `);
+      return;
     }
+
+    const label = field.label;
+    const index = slotRows.length;
+    const inputName = `q_${esc(question.field)}_${index}`;
+    const suggested = suggestedValue(question, field);
+    let control;
+    if (field.type === "select") {
+      const options = field.options
+        .map(([value, text]) => `<option value="${esc(value)}"${value === suggested ? " selected" : ""}>${esc(text)}</option>`)
+        .join("");
+      control = `<select data-field="${esc(question.field)}" id="${inputName}"${suggested ? " data-suggested=\"1\"" : ""}>${options}</select>`;
+    } else if (field.type === "textarea") {
+      control = `<textarea data-field="${esc(question.field)}" id="${inputName}" rows="3"${suggested ? " data-suggested=\"1\"" : ""} placeholder="${esc(field.placeholder || "")}">${esc(suggested)}</textarea>`;
+    } else if (question.field === "planned_at") {
+      control = `<input data-field="planned_at" id="${inputName}" type="datetime-local"${suggested ? " data-suggested=\"1\"" : ""} value="${esc(suggested)}">`;
+    } else {
+      control = `<input data-field="${esc(question.field)}" id="${inputName}" type="text"${suggested ? " data-suggested=\"1\"" : ""} value="${esc(suggested)}" placeholder="${esc(field.placeholder || "")}">`;
+    }
+
     const examples = question.examples || [];
-    return `
-      <label class="field">
+    slotRows.push(`
+      <label class="field${suggested ? " field-suggested" : ""}">
         <span>${esc(question.question || label)}</span>
         ${control}
         <span class="note-inline">${esc(question.reason || "")}</span>
         ${examples.length ? `<span class="note-inline">例如：${esc(examples.join("、"))}</span>` : ""}
+        ${suggested
+          ? `<span class="note-inline note-suggested">已从${esc(question.suggested_from || "需求原文")}识别到「${esc(suggested)}」并预填：这是建议值，不是已确认信息，请核对后再提交。</span>`
+          : ""}
       </label>
-    `;
-  }).join("");
+    `);
+  });
 
   return `
     <article class="card">
       <div class="card-title"><span>需要你补充</span><span class="badge badge-warn">缺失信息不会被猜测</span></div>
-      <div class="stack" id="questionFields">${rows}</div>
+      ${openNotes.length ? `<div class="stack">${openNotes.join("")}</div>` : ""}
+      ${slotRows.length ? `<div class="stack" id="questionFields">${slotRows.join("")}</div>` : ""}
+      <label class="field">
+        <span>补充说明（可选）</span>
+        <textarea id="clarifyNote" rows="2" spellcheck="false" placeholder="例如：orders 表约 800 万行，写入高峰在白天。"></textarea>
+        <span class="note-inline">自由说明会写入任务记录，并在下一次执行时作为「补充说明」拼进需求文本。</span>
+      </label>
       <button class="button button-primary" type="button" id="clarifyButton">提交并继续</button>
     </article>
   `;
@@ -681,6 +784,8 @@ function wireQuestionForm() {
         payload[field] = value;
       }
     });
+    const note = ($("clarifyNote") ? $("clarifyNote").value : "").trim();
+    if (note) payload.note = note;
     if (!Object.keys(payload).length) {
       showError("请至少补充一项信息。");
       return;
@@ -769,15 +874,16 @@ function renderDraft() {
     </article>
   `);
 
-  if (isLocallyEdited()) {
-    parts.push(`
-      <article class="card card-warn" id="staleNoticeMiddle">
-        <div class="card-title"><span>本地编辑未经验证</span></div>
-        <p>下面显示的 SQL 已被本地修改。右侧的检查结果对应的是<strong>生成时的那一份 SQL</strong>，对当前文本已失效。</p>
-        <p class="note-inline">本地编辑只用于审阅，不会回传服务端。需要正式修改请重新提交需求。</p>
-      </article>
-    `);
-  }
+  // 本地编辑提示**始终渲染**，只切换显隐。原因：编辑动作只走 markStale()，
+  // 不会重绘中栏；如果这里按"当前是否已编辑"条件渲染，这张卡永远出不来的——
+  // 而它正是"右侧检查结论已对当前文本失效"的唯一提醒。
+  parts.push(`
+    <article class="card card-warn" id="staleNoticeMiddle" hidden>
+      <div class="card-title"><span>本地编辑未经验证</span></div>
+      <p>下面显示的 SQL 已被本地修改。右侧的检查结果对应的是<strong>生成时的那一份 SQL</strong>，对当前文本已失效。</p>
+      <p class="note-inline">本地编辑只用于审阅，不会回传服务端。需要正式修改请重新提交需求。</p>
+    </article>
+  `);
 
   const readOnlyAttr = state.editing ? "" : "readonly";
   const staleClass = isLocallyEdited() ? " stale" : "";
@@ -830,15 +936,18 @@ function renderDraft() {
   if (sqlText) {
     sqlText.addEventListener("input", () => {
       state.edits.sql = sqlText.value;
-      markStale(sqlText, rollbackText);
+      markStale();
     });
   }
   if (rollbackText) {
     rollbackText.addEventListener("input", () => {
       state.edits.rollback = rollbackText.value;
-      markStale(sqlText, rollbackText);
+      markStale();
     });
   }
+
+  // 重绘之后同步一次显隐：模板里的初始状态可能和当前编辑状态不一致。
+  markStale();
 
   const editToggle = $("editToggle");
   if (editToggle) {
@@ -868,12 +977,22 @@ function renderDraft() {
   if (confirmButtonEl) confirmButtonEl.addEventListener("click", confirmMaterial);
 }
 
-/** SQL 一改，旧检查结果必须立刻标为失效，而不是继续显示为当前结论。 */
-function markStale(sqlNode, rollbackNode) {
+/** SQL 一改，旧检查结果必须立刻标为失效，而不是继续显示为当前结论。
+ *
+ * 只切换显隐与样式类，**不重绘整栏**：右栏内容有近三千像素高，每次按键都重建 DOM
+ * 会把用户的滚动位置打回顶部，也会让正在阅读的引用证据整块跳走。 */
+function markStale() {
   const stale = isLocallyEdited();
-  if (sqlNode) sqlNode.classList.toggle("stale", stale);
-  if (rollbackNode) rollbackNode.classList.toggle("stale", stale);
-  renderEvidence();
+  const middle = $("staleNoticeMiddle");
+  if (middle) middle.hidden = !stale;
+  const right = $("staleNoticeRight");
+  if (right) right.hidden = !stale;
+  ["sqlText", "rollbackText"].forEach((id) => {
+    const node = $(id);
+    if (node) node.classList.toggle("stale", stale);
+  });
+  const reset = $("resetSql");
+  if (reset) reset.disabled = !stale;
 }
 
 function renderAssumptions(draft) {
@@ -1086,13 +1205,12 @@ function renderCheck(draft) {
   const meta = CHECK_META[status] || CHECK_META.NOT_RUN;
   const items = check.items || [];
   const stale = isLocallyEdited();
-
-  const staleBlock = stale
-    ? `<div class="card card-warn" id="staleNoticeRight">
-         <strong>当前 SQL 已被本地修改</strong>
-         <p class="note-inline">以下结论对应生成时的 SQL，对当前文本<strong>已失效</strong>。请勿据此判断当前 SQL 的安全性。</p>
-       </div>`
-    : "";
+  // 与中栏同理：始终渲染、只切显隐，否则本地编辑后这张"结论已失效"的卡不会出现。
+  const staleBlock = `
+    <div class="card card-warn" id="staleNoticeRight" ${stale ? "" : "hidden"}>
+      <strong>当前 SQL 已被本地修改</strong>
+      <p class="note-inline">以下结论对应生成时的 SQL，对当前文本<strong>已失效</strong>。请勿据此判断当前 SQL 的安全性。</p>
+    </div>`;
 
   const itemBlock = items.length
     ? items.map((item) => `
@@ -1203,6 +1321,9 @@ function renderProvenance() {
 
 /* ---------- 启动 ---------- */
 
+const HEALTH_REFRESH_MS = 5000;
+let healthTimer = null;
+
 async function init() {
   $("createForm").addEventListener("submit", createTask);
   wireRequirementCounter();
@@ -1221,12 +1342,14 @@ async function init() {
   }
 
   if (!authenticated) {
-    const button = $("createButton");
-    if (button) button.disabled = true;
+    disableCreateButton("请先登录");
     return;
   }
 
   await refreshHealth();
+  // 健康状态只读一次是不够的：页面打开后下游才恢复（或才降级）时，
+  // 右上角状态、右栏的降级卡片和创建按钮会一直停在加载时的那一帧上。
+  healthTimer = setInterval(() => { refreshHealth({ quiet: true }); }, HEALTH_REFRESH_MS);
 }
 
 if (document.readyState === "loading") {

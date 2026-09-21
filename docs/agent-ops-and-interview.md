@@ -219,17 +219,21 @@ $env:DBGUARD_WORKERS               = "0"
 | 维度 | 事实 | 证据 |
 | --- | --- | --- |
 | 提供方式 | 显式注册 `/agent/`，`handleAgentWorkbench` 提供静态资源；`/api/agent/*` 由 `handleAgentProxy` 反向代理，**仅在配置 `DBGUARD_AGENT_BASE_URL` 时启用**，否则 503 且 `code=SERVICE_UNAVAILABLE` | `agentproxy.go:62,72,99-159`；`server.go:1672` |
-| 布局 | 单页三栏：对话 / 草案 / 证据与检查；顶栏显示身份与健康 | `agent/index.html`；`agent/app.js` `render`(482) |
-| 已实现的操作 | 创建任务（296）；补充信息（337，含追问表单 `wireQuestionForm`(622)）；停止（355）；`resumeTask`(376) 在有检查点时是「从检查点恢复」、没有检查点时按钮是「重新执行一次」（后者是**重跑**，不是续跑，`app.js:560-565`）；人工确认材料（392，携带 `material_hash` 做乐观并发校验）；查看/复制 SQL 与回滚 | `agent/app.js` 上述行号 |
-| 明确不做 | 治理审批与通行证签发、隔离库演练、执行 SQL；模型建议不参与放行判定 | `renderGovernanceBoundary`(967)、`renderShadowNotice`(1132)、`renderAdvice`(851)、`renderConfirmation`(871) |
+| 布局 | 单页三栏：对话 / 草案 / 证据与检查；顶栏显示身份与健康 | `agent/index.html`；`agent/app.js` `render`(579) |
+| 已实现的操作 | 创建任务（387）；补充信息（434，含追问表单 `wireQuestionForm`(772) 与槽位预填 `suggestedValue`(688)）；停止（452）；`resumeTask`(473) 在有检查点时是「从检查点恢复」、没有检查点时按钮是「重新执行一次」（后者是**重跑**，不是续跑，`app.js:651-658`）；人工确认材料（489，携带 `material_hash` 做乐观并发校验）；查看/复制 SQL 与回滚；「补充说明」自由文本（`note`，写入任务记录并在下次执行时拼进需求） | `agent/app.js` 上述行号 |
+| 明确不做 | 治理审批与通行证签发、隔离库演练、执行 SQL；模型建议不参与放行判定 | `renderGovernanceBoundary`(1133)、`renderShadowNotice`(1297)、`renderAdvice`(1017)、`renderConfirmation`(1037) |
 | 只读边界 | 只调用 6 个 `/api/agent/*` 接口，不请求 `/provider`、`/tools`，不显示任何密钥 | 同上 |
-| 降级判别 | 只有 503 **且** `code === "SERVICE_UNAVAILABLE"` 才判为"未启用"并禁用创建按钮；其余 503 按可重试错误处理 | `agent/app.js:265-270,419-424`、`markAgentDisabled`(281) |
+| 降级判别 | 只有 503 **且** `code === \"SERVICE_UNAVAILABLE\"` 才判为\"未启用\"并禁用创建按钮；其余 503 按可重试错误处理。健康状态每 5 秒刷新一次，下游恢复后按钮与提示自动还原 | `agent/app.js:273-361`、`markAgentDisabled`(357)、`restoreAgentAvailability`(343) |
+| 预填边界 | 槽位预填值来自服务端 `suggest_slots()` 的确定性抽取，**不写入 slots**、不改变缺失判定；前端只把它填进控件并标注"建议值，不是已确认信息"，用户清空则不提交 | `agent/app.js` `suggestedValue`(688)；`agent-app/app/workflow/extract.py` |
 
 **工作台自身的边界（如实记录）**：
 
 - **单实例**：任务 JSON 与 SQLite 检查点都不支持多副本（§1.1）。
 - 页面里的 SQL 编辑**只影响本地显示**，不回写服务端；一旦本地改过，检查结果与确认都会被标为
-  对当前文本**已失效**（`app.js:729,1046`）。
+  对当前文本**已失效**（`markStale`(984)；中栏 `#staleNoticeMiddle`、右栏 `#staleNoticeRight`）。
+- 非槽位追问（`field="open_question"`：模型要求的补充说明、草案里的未解决问题）**不可提交**——
+  `ClarifyRequest` 没有对应字段，提交会被服务端丢弃。它们只作为"需要人工确认"的陈述展示；
+  自由文本请走追问卡片里的「补充说明」（`note`）。
 - 工作台的能力由**真实浏览器验收**证明，不由 CI 的 `e2e` 作业证明——CI 的 `e2e` 栈用
   `compose.e2e.yml`，其中不含 agent-app（§1.4）。
 
