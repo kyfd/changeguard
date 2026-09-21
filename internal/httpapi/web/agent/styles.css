@@ -32,6 +32,10 @@
 
 * { box-sizing: border-box; }
 
+/* `hidden` 属性必须能真的藏住元素。.card 等类选择器的 display 会覆盖 UA 的
+   `[hidden] { display: none }`，导致"常驻 DOM、只切显隐"的提示卡永远藏不掉。 */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
@@ -278,7 +282,7 @@ textarea.stale { border-color: #e0b060; background: #fffdf6; }
 
 .timeline { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 5px; }
 .timeline li { display: flex; gap: 8px; font-size: 12.5px; align-items: baseline; }
-.timeline .at { flex: none; color: var(--text-faint); font-family: var(--mono); font-size: 11px; min-width: 58px; }
+.timeline .at { flex: none; color: var(--text-faint); font-family: var(--mono); font-size: 11px; min-width: 104px; }
 .timeline .kind { flex: none; font-family: var(--mono); font-size: 11px; color: var(--accent); min-width: 84px; }
 .timeline .detail { color: var(--text-muted); word-break: break-word; }
 
@@ -288,9 +292,26 @@ textarea.stale { border-color: #e0b060; background: #fffdf6; }
 
 /* ---------- SQL 面板 ---------- */
 
-.sql-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.sql-actions { display: flex; gap: 6px; align-items: center; }
+.sql-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.sql-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .sql-block { display: flex; flex-direction: column; gap: 5px; }
+
+/* 追问表单里被服务端预填的字段：视觉上标出来，避免"建议值"被当成"已确认信息"。 */
+.field-suggested > span:first-child::after {
+  content: "已预填";
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.note-suggested { color: var(--accent); }
+
+/* 「本地编辑」复选框默认只有 13×13，太难点中；连同文字一起放大命中区。 */
+.sql-actions label.note-inline { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; padding: 3px 2px; }
+.sql-actions label.note-inline input[type="checkbox"] { width: 15px; height: 15px; margin: 0; cursor: pointer; }
 
 /* ---------- 证据 ---------- */
 

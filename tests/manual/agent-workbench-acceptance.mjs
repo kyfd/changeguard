@@ -164,6 +164,56 @@ async function main() {
     await page.screenshot({ path: path.join(OUT_DIR, "agent-workbench-desktop.png"), fullPage: true });
     check("保存桌面截图", true);
 
+    // ---- 4b. 槽位预填：服务端从需求原文抽取的候选值必须出现在表单里 ----
+    // 这条专门盯一个真实缺陷：suggested 一直在接口里下发，前端却从未读取，
+    // 用户要把刚写进需求原文的内容重新敲一遍。
+    await page.goto(`${BASE}/agent/`);
+    await page.getByRole("button", { name: "开始准备材料" }).waitFor({ timeout: 30000 });
+    await page.locator("#requirement").fill("给 order-service 的 orders 表按用户和创建时间准备索引变更，目标 postgresql 生产库，计划 2026-09-18 21:30。");
+    await openOptional(page);
+    await page.locator("#optSchema").fill(DEMO_SCHEMA);
+    await page.getByRole("button", { name: "开始准备材料" }).click();
+    await page.locator("#questionFields").waitFor({ timeout: 30000 });
+    const prefilled = await page.locator("#questionFields [data-field]").evaluateAll((nodes) =>
+      nodes.map((n) => [n.getAttribute("data-field"), (n.value || "").trim()])
+    );
+    const prefilledMap = Object.fromEntries(prefilled);
+    check("槽位预填：应用/环境/数据库/表名/计划时间都带上了建议值",
+      prefilledMap.application === "order-service"
+      && prefilledMap.environment === "生产"
+      && prefilledMap.database === "postgresql"
+      && prefilledMap.table === "orders"
+      && prefilledMap.planned_at === "2026-09-18T21:30",
+      JSON.stringify(prefilledMap));
+    check("预填被标注为建议值而非已确认信息",
+      (await page.locator("#questionFields .note-suggested").count()) >= 1
+      && (await page.getByText("这是建议值，不是已确认信息").count()) >= 1);
+    check("非槽位追问不渲染成可提交输入框",
+      (await page.locator('[data-field="open_question"]').count()) === 0);
+    await page.locator("#clarifyButton").click();
+    await page.getByText(/草案 v\d/).first().waitFor({ timeout: 60000 });
+    check("预填后直接提交即可产出草案", true);
+
+    // ---- 4c. 本地编辑：两栏失效提示都要出现，且右栏不被打回顶部 ----
+    const evidenceScroll = await page.evaluate(() => {
+      const el = document.getElementById("evidenceBody");
+      el.scrollTop = Math.min(400, el.scrollHeight - el.clientHeight);
+      return el.scrollTop;
+    });
+    await page.locator("#editToggle").check();
+    await page.locator("#sqlText").click();
+    await page.keyboard.type("X");
+    check("本地编辑后中栏出现“本地编辑未经验证”", (await page.locator("#staleNoticeMiddle:visible").count()) === 1);
+    check("本地编辑后右栏出现“结论已失效”", (await page.locator("#staleNoticeRight:visible").count()) === 1);
+    check("本地编辑不会把右栏滚动位置打回顶部", evidenceScroll === 0
+      || (await page.evaluate(() => document.getElementById("evidenceBody").scrollTop)) === evidenceScroll,
+      `before=${evidenceScroll}`);
+    await page.locator("#resetSql").click();
+    // 两张卡常驻 DOM、只切换 hidden，所以断言必须看可见性而不是存在性。
+    check("恢复生成版本后失效提示消失",
+      (await page.locator("#staleNoticeMiddle:visible").count()) === 0
+      && (await page.locator("#staleNoticeRight:visible").count()) === 0);
+
     // ---- 5. 取消运行中的任务 ----
     await page.goto(`${BASE}/agent/`);
     await page.getByRole("button", { name: "开始准备材料" }).waitFor({ timeout: 30000 });
