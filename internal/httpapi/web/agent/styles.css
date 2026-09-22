@@ -189,6 +189,7 @@ ul, ol { margin: 0; padding-left: 18px; }
   box-shadow: var(--shadow);
   max-height: calc(100vh - 132px);
   overflow: hidden;
+  min-width: 0;
 }
 
 .col-head {
@@ -203,9 +204,11 @@ ul, ol { margin: 0; padding-left: 18px; }
 
 .col-body {
   padding: 13px;
+  overflow-x: hidden;
   overflow-y: auto;
   display: flex; flex-direction: column; gap: 12px;
   min-height: 140px;
+  min-width: 0;
 }
 
 .col-chat { border-top: 2px solid var(--accent); }
@@ -222,6 +225,7 @@ ul, ol { margin: 0; padding-left: 18px; }
   background: var(--surface);
   padding: 11px 12px;
   display: flex; flex-direction: column; gap: 9px;
+  min-width: 0;
 }
 .card-flat { background: var(--surface-sunken); }
 .card-danger { border-color: #eec4c4; background: var(--danger-soft); }
@@ -234,11 +238,13 @@ ul, ol { margin: 0; padding-left: 18px; }
   text-transform: uppercase; letter-spacing: .4px;
 }
 
-.field { display: flex; flex-direction: column; gap: 4px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field > span { font-size: 12px; color: var(--text-muted); font-weight: 500; }
 
 input[type="text"], input[type="datetime-local"], select, textarea {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 7px 9px;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
@@ -253,10 +259,17 @@ textarea.mono { font-family: var(--mono); font-size: 12.5px; }
 textarea[readonly] { background: var(--surface-sunken); }
 textarea.stale { border-color: #e0b060; background: #fffdf6; }
 
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; min-width: 0; }
+.grid-2 > * { min-width: 0; }
 
-.details { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 9px; background: var(--surface-sunken); }
-.details summary { cursor: pointer; font-size: 12px; color: var(--text-muted); }
+.details { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 9px; background: var(--surface-sunken); min-width: 0; }
+.details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
 .details[open] { display: flex; flex-direction: column; gap: 9px; }
 .details[open] summary { margin-bottom: 2px; }
 
