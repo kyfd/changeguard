@@ -136,9 +136,13 @@ async function main() {
     check("连通性测试成功", test.status === 200 && test.body.ok === true, JSON.stringify(test.body).slice(0, 160));
     check("探测确实打到了上游 /v1/chat/completions", seen.some((s) => s.path.endsWith("/chat/completions")));
 
-    // ---- 7. 企业隔离 ----
+    // ---- 7. 权限与企业隔离 ----
+    // 演示数据里 developer / owner 同属 org_demo，所以"另一个企业读不到"不能在这里断言——
+    // 同组织成员本该看到同一份配置。跨组织隔离由 internal/store/llm_test.go 的
+    // TestModelConfigIsolatedPerOrganization 覆盖。这里验证权限边界。
     const other = await api(developer, "/api/enterprise/llm");
-    check("另一个企业读不到该配置", other.body.source !== "organization" && !other.body.base_url, JSON.stringify(other.body).slice(0, 160));
+    check("同组织成员可读同一配置", other.status === 200 && other.body.source === "organization",
+      JSON.stringify(other.body).slice(0, 120));
     const otherWrite = await api(developer, "/api/enterprise/llm", {
       method: "PUT",
       body: { enabled: true, provider: "openai_compatible", base_url: `http://127.0.0.1:${STUB_PORT}`, model: "deepseek-chat", api_key: "sk-other" },
