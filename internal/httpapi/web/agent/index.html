@@ -56,8 +56,8 @@
           <details class="details" id="knownInfo">
             <summary>可选：直接提供已知信息（缺什么会被追问）</summary>
             <div class="grid-2">
-              <label class="field"><span>应用</span><input id="optApplication" autocomplete="off" placeholder="order-service"></label>
-              <label class="field"><span>环境</span><input id="optEnvironment" autocomplete="off" placeholder="生产"></label>
+              <label class="field"><span>应用</span><input id="optApplication" type="text" autocomplete="off" placeholder="order-service"></label>
+              <label class="field"><span>环境</span><input id="optEnvironment" type="text" autocomplete="off" placeholder="生产"></label>
               <label class="field"><span>数据库</span>
                 <select id="optDatabase">
                   <option value="">未知</option>
@@ -65,10 +65,11 @@
                   <option value="mysql">MySQL</option>
                 </select>
               </label>
-              <label class="field"><span>表名</span><input id="optTable" autocomplete="off" placeholder="orders"></label>
+              <label class="field"><span>表名</span><input id="optTable" type="text" autocomplete="off" placeholder="orders"></label>
               <label class="field"><span>计划时间</span><input id="optPlannedAt" type="datetime-local"></label>
-              <label class="field"><span>时区</span><input id="optTimezone" autocomplete="off" placeholder="Asia/Shanghai"></label>
+              <label class="field"><span>时区</span><input id="optTimezone" type="text" autocomplete="off" placeholder="Asia/Shanghai"></label>
             </div>
+            <p class="note-inline" id="timeZoneHelp">计划时间按所填 IANA 时区解释；留空使用浏览器时区，并随请求发送。夏令时缺失或重复时刻会被拒绝。</p>
             <label class="field"><span>触发这次变更的查询 SQL</span><textarea id="optQuerySql" rows="3" placeholder="慢查询原文"></textarea></label>
             <label class="field"><span>表结构快照</span><textarea id="optSchema" rows="3" placeholder="粘贴字段列表或 CREATE TABLE。首版只使用上传快照，不接生产库实时探索。"></textarea></label>
           </details>

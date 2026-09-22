@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/unit/*.test.mjs",
+    "test:ui": "node --test tests/browser/*.test.mjs",
     "test:e2e": "playwright test"
   },
   "devDependencies": {

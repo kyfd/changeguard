@@ -141,6 +141,67 @@ function formatDate(value) {
   return parsed.toLocaleString("zh-CN", { hour12: false });
 }
 
+// 计划时间采用明确墙钟 + IANA 时区，绝不让 Date 按运行机器时区猜测。
+function plannedTimezone(value, fallback) {
+  const zone = (value || "").trim() || (fallback || "").trim();
+  if (!zone || /^[+-]/.test(zone)) throw new Error("请填写有效的 IANA 时区，例如 Asia/Shanghai 或 UTC。");
+  try {
+    return new Intl.DateTimeFormat("en", { timeZone: zone }).resolvedOptions().timeZone;
+  } catch (_) {
+    throw new Error(`时区「${zone}」无效，请填写 IANA 时区，例如 Asia/Shanghai 或 UTC。`);
+  }
+}
+
+function browserTimezone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+}
+
+function plannedTimePayload(wall, zone, fallback) {
+  const timeZone = plannedTimezone(zone, fallback);
+  if (!wall) return { planned_at_timezone: timeZone };
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/.exec(wall);
+  if (!match) throw new Error("计划时间格式无效，请填写完整日期和时分。");
+  const [, y, mo, d, h, mi, s = "0", fraction = ""] = match;
+  const year = Number(y);
+  // 现代 IANA 规则的 UTC 偏移为整分钟。限定范围，避免历史秒级偏移被误判。
+  if (year < 2000 || year > 2099) throw new Error("计划时间仅支持 2000—2099 年，请核对年份。");
+  const target = Date.UTC(year, Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s), Number(fraction.padEnd(3, "0")));
+  const date = new Date(target);
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() + 1 !== Number(mo) ||
+      date.getUTCDate() !== Number(d) || Number(h) > 23 || Number(mi) > 59 || Number(s) > 59) {
+    throw new Error("计划日期或时间不存在，请核对月份、日期和时分秒。");
+  }
+  const formatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone, calendar: "gregory", numberingSystem: "latn", hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const matches = [];
+  // 穷举现代时区的所有分钟偏移，并回验完整墙钟；不靠 DST 前后抽样猜偏移。
+  for (let offset = -1440; offset <= 1440; offset++) {
+    const instant = target + offset * 60000;
+    const parts = Object.fromEntries(formatter.formatToParts(instant).map((part) => [part.type, part.value]));
+    if (Number(parts.year) === year && Number(parts.month) === Number(mo) && Number(parts.day) === Number(d) &&
+        Number(parts.hour) === Number(h) && Number(parts.minute) === Number(mi) && Number(parts.second) === Number(s)) matches.push(instant);
+  }
+  if (!matches.length) throw new Error(`计划时间在 ${timeZone} 不存在（夏令时或时区跳时），请选择其他时间。`);
+  if (matches.length !== 1) throw new Error(`计划时间在 ${timeZone} 出现两次（夏令时回拨），无法唯一确定，请选择其他时间或用 UTC 明确填写。`);
+  return { planned_at: new Date(matches[0]).toISOString(), planned_at_timezone: timeZone };
+}
+
+function formatPlannedDate(value, zone) {
+  if (!value) return "未提供";
+  try {
+    const timeZone = plannedTimezone(zone, browserTimezone());
+    // 旧数据若无偏移，不把它偷偷解释成浏览器本地时刻。
+    if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) || Number.isNaN(Date.parse(value))) {
+      return `${value} · 时间缺少有效偏移，需核对`;
+    }
+    return new Date(value).toLocaleString("zh-CN", { timeZone, hour12: false }) + ` · ${timeZone}${zone ? "" : "（浏览器时区）"}`;
+  } catch (error) {
+    return `${value} · ${error.message}`;
+  }
+}
+
 function badgeClass(tone) {
   if (tone === "ok") return "ok";
   if (tone === "warn") return "warn";
@@ -276,33 +337,38 @@ async function refreshHealth(options) {
   const text = $("healthText");
   try {
     const health = await api("/api/agent/healthz");
+    const previousHealth = state.health;
     state.health = health;
+    const healthChanged = JSON.stringify(previousHealth) !== JSON.stringify(health);
+    if (healthChanged && state.task && $("evidenceBody")) {
+      preserveView($("evidenceBody"), renderEvidence);
+    }
     // 下游重新可达：撤掉"未启用"的判定，把创建按钮还回去。
     restoreAgentAvailability();
     // 健康检查里的键是 provider.provider（见 agent-app/app/llm/provider.py 的 describe()）。
-    const provider = health.provider || {};
-    const realModel = Boolean(provider.llm_configured);
-    const degraded = health.status === "degraded";
-    dot.className = "dot " + (degraded || !realModel ? "bad" : "ok");
-    if (degraded) {
-      text.textContent = "存储降级";
-    } else {
-      text.textContent = realModel
-        ? `${provider.model || "已配置模型"} · 语料 ${health.knowledge_chunks} 片`
-        : "确定性生成器（未配置模型）";
-    }
-    $("healthChip").title = [
-      `provider: ${provider.provider || "unknown"}`,
-      `模型: ${provider.model || "unknown"}`,
-      `模型已配置: ${realModel ? "是" : "否"}`,
-      `服务状态: ${health.status || "unknown"}`,
-      `检索: ${health.retriever || "unknown"}`,
-      `语料片段: ${health.knowledge_chunks}`,
-      `运行中任务: ${health.running_tasks}`,
-      `未落盘任务: ${(health.unpersisted_tasks || []).length}`,
-      health.degraded_reason ? `降级原因: ${health.degraded_reason}` : "降级原因: 无",
-      "未配置模型时使用确定性生成器：这是可运行状态，不是残缺状态，但也不是真实模型的起草质量。",
-    ].join("\n");
+     const provider = health.provider || {};
+     const realModel = Boolean(provider.llm_configured);
+     const degraded = health.status === "degraded";
+     dot.className = "dot " + (degraded || !realModel ? "bad" : "ok");
+     if (degraded) {
+       text.textContent = "存储降级";
+     } else {
+       text.textContent = realModel
+         ? `${provider.model || "已配置模型"} · 语料 ${health.knowledge_chunks} 片`
+         : "确定性生成器（未配置模型）";
+     }
+     $("healthChip").title = [
+       `provider: ${provider.provider || "unknown"}`,
+       `模型: ${provider.model || "unknown"}`,
+       `模型已配置: ${realModel ? "是" : "否"}`,
+       `服务状态: ${health.status || "unknown"}`,
+       `检索: ${health.retriever || "unknown"}`,
+       `语料片段: ${health.knowledge_chunks}`,
+       `运行中任务: ${health.running_tasks}`,
+       `未落盘任务: ${(health.unpersisted_tasks || []).length}`,
+       health.degraded_reason ? `降级原因: ${health.degraded_reason}` : "降级原因: 无",
+       "未配置模型时使用确定性生成器：这是可运行状态，不是残缺状态，但也不是真实模型的起草质量。",
+     ].join("\n");
   } catch (error) {
     dot.className = "dot bad";
     if (error.status === 401) {
@@ -415,7 +481,12 @@ async function createTask(event) {
   });
 
   const plannedAt = $("optPlannedAt").value;
-  if (plannedAt) payload.planned_at = new Date(plannedAt).toISOString();
+  try {
+    Object.assign(payload, plannedTimePayload(plannedAt, optional.planned_at_timezone, browserTimezone()));
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
 
   state.busy = true;
   $("createButton").disabled = true;
@@ -528,8 +599,16 @@ function handleActionError(error) {
 }
 
 function adoptTask(task) {
+  const previous = state.task;
+  const sameTask = previous && previous.task_id === task.task_id;
+  const sameDraft = sameTask && JSON.stringify(previous.draft || null) === JSON.stringify(task.draft || null);
+  if (!sameDraft) resetEdits();
   state.task = task;
-  render();
+  if (sameDraft) {
+    refreshTaskView(previous);
+  } else {
+    render();
+  }
   if (TERMINAL.has(task.status)) {
     stopPolling();
   } else {
@@ -558,17 +637,14 @@ function stopPolling() {
 
 async function pollOnce() {
   if (!state.task || state.busy) return;
+  const previous = state.task;
   try {
-    const task = await api(`/api/agent/tasks/${state.task.task_id}`);
-    const previous = state.task;
-    state.task = task;
-    // 只有状态或草案发生变化才整体重绘，避免打断正在阅读或编辑的人。
-    if (previous.status !== task.status || JSON.stringify(previous.draft || null) !== JSON.stringify(task.draft || null)) {
-      resetEdits();
-      render();
-    }
-    if (TERMINAL.has(task.status)) stopPolling();
+    const task = await api(`/api/agent/tasks/${previous.task_id}`);
+    // 切换任务或操作返回后，旧轮询响应不能覆盖当前视图。
+    if (state.task !== previous || state.busy) return;
+    adoptTask(task);
   } catch (error) {
+    if (state.task !== previous || state.busy) return;
     stopPolling();
     handleActionError(error);
   }
@@ -581,6 +657,82 @@ function render() {
   renderConversation();
   renderDraft();
   renderEvidence();
+}
+
+/** 同任务同草案只替换变化的展示区，不重建追问表单或 SQL 编辑器。 */
+function refreshTaskView(previous) {
+  const task = state.task;
+  renderPanel();
+  if (JSON.stringify(previous.events || []) !== JSON.stringify(task.events || [])) {
+    const timeline = $("taskTimeline");
+    if (timeline) preserveView(timeline, () => { timeline.innerHTML = renderTimeline(task); });
+  }
+  // 对话的其他数据发生变化时才刷新；保存正在填写的控件状态。
+  const conversationData = (value) => [value.requirement, value.error, value.planned_at_missing,
+    value.questions, value.awaiting_input, value.restart_policy, value.status];
+  if (JSON.stringify(conversationData(previous)) !== JSON.stringify(conversationData(task))) {
+    preserveView($("conversation"), renderConversation);
+  }
+  const evidenceData = (value) => [value.investigation, value.strategy, value.usage];
+  if (JSON.stringify(evidenceData(previous)) !== JSON.stringify(evidenceData(task))) {
+    preserveView($("evidenceBody"), renderEvidence);
+  }
+  if (!task.draft && previous.status !== task.status) {
+    preserveView($("draftBody"), renderDraft);
+  }
+  if (JSON.stringify([previous.confirmations, previous.material_hash]) !==
+      JSON.stringify([task.confirmations, task.material_hash])) {
+    const confirmation = $("taskConfirmation");
+    if (confirmation) preserveView(confirmation, () => { confirmation.innerHTML = renderConfirmation(task); });
+    const button = $("confirmButton");
+    if (button) button.addEventListener("click", confirmMaterial);
+  }
+}
+
+/** 局部内容更新时保留输入、焦点/选区以及面板和祖先的滚动位置。
+ * 追问控件按 data-field 匹配，避免问题重排后序号 ID 变化丢掉未提交的答案。 */
+function preserveView(host, update) {
+  const controls = Array.from(host.querySelectorAll("input, textarea, select"));
+  const values = controls.map((node) => ({
+    id: node.id,
+    field: node.getAttribute && node.getAttribute("data-field"),
+    value: node.value,
+    checked: node.checked,
+    start: node.selectionStart,
+    end: node.selectionEnd,
+    direction: node.selectionDirection,
+  }));
+  const active = document.activeElement;
+  const focusedID = host.contains(active) ? active.id : null;
+  const focusedField = host.contains(active) && active.getAttribute ? active.getAttribute("data-field") : null;
+  const scroll = [];
+  for (let node = host; node; node = node.parentElement) {
+    scroll.push([node, node.scrollTop, node.scrollLeft]);
+  }
+  update();
+  const restored = new Set();
+  const findControl = (value) => {
+    if (value.field && host.querySelector) {
+      const byField = host.querySelector(`[data-field="${CSS.escape(value.field)}"]`);
+      if (byField) return byField;
+    }
+    const byID = value.id && $(value.id);
+    return byID && host.contains(byID) ? byID : null;
+  };
+  values.forEach((value) => {
+    const node = findControl(value);
+    if (!node || restored.has(node)) return;
+    restored.add(node);
+    node.value = value.value;
+    node.checked = value.checked;
+    if (value.start !== null && value.start !== undefined && node.setSelectionRange) {
+      node.setSelectionRange(value.start, value.end, value.direction);
+    }
+  });
+  const focused = (focusedField && host.querySelector && host.querySelector(`[data-field="${CSS.escape(focusedField)}"]`))
+    || (focusedID && $(focusedID) && host.contains($(focusedID)) ? $(focusedID) : null);
+  if (focused) focused.focus({ preventScroll: true });
+  scroll.forEach(([node, top, left]) => { node.scrollTop = top; node.scrollLeft = left; });
 }
 
 function renderPanel() {
@@ -646,7 +798,7 @@ function renderConversation() {
     blocks.push(renderQuestions(task));
   }
 
-  blocks.push(renderTimeline(task));
+  blocks.push(`<div id="taskTimeline">${renderTimeline(task)}</div>`);
 
   const checkpointResumable = Boolean(task.awaiting_input) || task.restart_policy === "checkpoint_available";
   const actions = [];
@@ -753,12 +905,17 @@ function renderQuestions(task) {
       </label>
     `);
   });
+  if ((task.questions || []).some((item) => item.field === "planned_at") &&
+      !(task.questions || []).some((item) => item.field === "planned_at_timezone")) {
+    slotRows.push(`<label class="field"><span>计划时间的时区（IANA）</span><input id="q_planned_at_timezone" data-field="planned_at_timezone" type="text" placeholder="例如 Asia/Shanghai 或 UTC"></label>`);
+  }
 
   return `
     <article class="card">
       <div class="card-title"><span>需要你补充</span><span class="badge badge-warn">缺失信息不会被猜测</span></div>
       ${openNotes.length ? `<div class="stack">${openNotes.join("")}</div>` : ""}
       ${slotRows.length ? `<div class="stack" id="questionFields">${slotRows.join("")}</div>` : ""}
+      <p class="note-inline">计划时间按填写的时区解释；时区留空沿用任务时区 ${esc((task.slots || {}).planned_at_timezone || "（未提供）")}，否则使用浏览器时区 ${esc(browserTimezone())}，并随时间提交。夏令时缺失或重复时刻会被拒绝。仅改时区不改变已保存的时间点。</p>
       <label class="field">
         <span>补充说明（可选）</span>
         <textarea id="clarifyNote" rows="2" spellcheck="false" placeholder="例如：orders 表约 800 万行，写入高峰在白天。"></textarea>
@@ -778,19 +935,24 @@ function wireQuestionForm() {
       const field = node.getAttribute("data-field");
       const value = (node.value || "").trim();
       if (!value) return;
-      if (field === "planned_at") {
-        payload.planned_at = new Date(value).toISOString();
-      } else {
-        payload[field] = value;
-      }
+      payload[field] = value;
     });
+    if (payload.planned_at || payload.planned_at_timezone) {
+      try {
+        Object.assign(payload, plannedTimePayload(payload.planned_at, payload.planned_at_timezone,
+          (state.task && state.task.slots && state.task.slots.planned_at_timezone) || browserTimezone()));
+      } catch (error) {
+        showError(error.message);
+        return;
+      }
+    }
     const note = ($("clarifyNote") ? $("clarifyNote").value : "").trim();
     if (note) payload.note = note;
     if (!Object.keys(payload).length) {
       showError("请至少补充一项信息。");
       return;
     }
-    clarify(payload);
+    return clarify(payload);
   });
 }
 
@@ -869,7 +1031,7 @@ function renderDraft() {
         <dt>应用</dt><dd>${esc(draft.application || "未提供")}</dd>
         <dt>环境</dt><dd>${esc(draft.environment || "未提供")}</dd>
         <dt>数据库</dt><dd>${esc(draft.database || "unknown")}</dd>
-        <dt>计划时间</dt><dd>${esc(formatDate(draft.planned_at))}${draft.planned_at_timezone ? " · " + esc(draft.planned_at_timezone) : ""}</dd>
+        <dt>计划时间</dt><dd>${esc(formatPlannedDate(draft.planned_at, draft.planned_at_timezone))}</dd>
       </dl>
     </article>
   `);
@@ -918,7 +1080,7 @@ function renderDraft() {
 
   parts.push(renderAssumptions(draft));
   parts.push(renderAdvice(draft));
-  parts.push(renderConfirmation(task));
+  parts.push(`<div id="taskConfirmation">${renderConfirmation(task)}</div>`);
 
   if ((draft.revision_notes || []).length) {
     parts.push(`
@@ -1327,6 +1489,7 @@ let healthTimer = null;
 async function init() {
   $("createForm").addEventListener("submit", createTask);
   wireRequirementCounter();
+  $("timeZoneHelp").textContent = `计划时间是所填时区的墙钟时间；时区留空明确使用浏览器时区 ${browserTimezone() || "（无法识别，请手动填写）"}，并随请求发送。支持 2000—2099 年，夏令时缺失或重复时刻会被拒绝。`;
   $("healthChip").addEventListener("click", () => {
     window.alert($("healthChip").title || "无健康信息。");
   });
