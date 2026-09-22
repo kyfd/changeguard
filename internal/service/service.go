@@ -184,6 +184,14 @@ func (s *Service) ChangeFor(id, actorID string) (model.ChangeRequest, error) {
 	return change, nil
 }
 
+func (s *Service) OutcomeSignalsForChange(changeID, actorID string) ([]model.OutcomeSignal, error) {
+	change, err := s.ChangeFor(changeID, actorID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.OutcomeSignalsByChange(change.OrganizationID, change.ID), nil
+}
+
 func (s *Service) AuditsFor(actorID string, limit int) ([]model.AuditEvent, error) {
 	actor, err := s.activeActor(actorID)
 	if err != nil {

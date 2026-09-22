@@ -36,13 +36,19 @@ test("agent: responsive forms, long content, keyboard focus and reduced motion",
       const long = "demo_fixture_long_identifier_".repeat(12);
       state.task = {
         task_id: long, requirement: "演示布局测试 " + long, status: "CHECK_BLOCKED", error: long,
-        events: [{ at: "2020-01-01T12:34:56Z", kind: long, detail: long }],
+        events: [
+          { at: "2020-01-01T12:34:56Z", kind: long, detail: long },
+          // agent-app/app/service.py: RECOVERY_UNCERTAINTY_NOTE，经真实 renderTimeline 渲染。
+          { at: "2020-01-01T12:35:56Z", kind: "recovery_at_least_once",
+            detail: "恢复不宣称 exactly-once：被中断的节点可能已经开始执行，外部模型请求可能已经发出；" +
+              "重新执行该节点属于 at-least-once。已发生的消耗以调用账本（usage）为准，不当作没有发生过。" }
+        ],
         investigation: { tool_observations: [{ tool: long, kind: "generic", error: long }] },
         draft: { version: 1, application: long, sql: "-- demo SQL", rollback_sql: "-- demo rollback", ai_advice: { summary: long.repeat(8) } }
       };
       render();
     });
-    for (const width of [320, 375, 420, 768, 860, 1100, 1440, 1920]) {
+    for (const width of [320, 375, 420, 768, 860, 900, 1100, 1440, 1920]) {
       await page.setViewportSize({ width, height: 900 });
       const result = await page.evaluate(() => {
         const date = document.querySelector("#optPlannedAt");
@@ -56,13 +62,33 @@ test("agent: responsive forms, long content, keyboard focus and reduced motion",
         document.body.append(probe);
         const intrinsic = probe.getBoundingClientRect().width;
         probe.remove();
-        return { overflow, pageOverflow: document.documentElement.scrollWidth > innerWidth,
+        const timeline = [...document.querySelectorAll(".timeline li")].map(li => {
+          const at = li.querySelector(".at").getBoundingClientRect();
+          const kind = li.querySelector(".kind").getBoundingClientRect();
+          const detail = li.querySelector(".detail").getBoundingClientRect();
+          const box = li.getBoundingClientRect(), style = getComputedStyle(li);
+          const left = box.left + parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft);
+          const right = box.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
+          return { kind: li.querySelector(".kind").textContent, available: right - left,
+            detailWidth: detail.width, belowMetadata: detail.top >= Math.max(at.bottom, kind.bottom),
+            withinBounds: [at, kind, detail].every(rect => rect.left >= left - 1 && rect.right <= right + 1),
+            aligned: Math.abs(detail.left - left) <= 1 && Math.abs(detail.right - right) <= 1 };
+        });
+        return { timeline, overflow, pageOverflow: document.documentElement.scrollWidth > innerWidth,
           dateWidth: date.getBoundingClientRect().width, intrinsic,
           columns: getComputedStyle(grid).gridTemplateColumns.split(" ").length,
           radius: getComputedStyle(document.querySelector("#optApplication")).borderRadius };
       });
       assert.deepEqual(result.overflow, [], `${width}px local overflow`);
       assert.equal(result.pageOverflow, false, `${width}px page overflow`);
+      assert.ok(result.timeline.some(item => item.kind === "recovery_at_least_once"), `${width}px recovery event rendered`);
+      for (const item of result.timeline) {
+        const label = `${width}px ${item.kind}`;
+        assert.ok(Math.abs(item.detailWidth - item.available) <= 1, `${label}: detail ${item.detailWidth} != available ${item.available}`);
+        assert.ok(item.belowMetadata, `${label}: detail must be below time and event name`);
+        assert.ok(item.withinBounds, `${label}: timeline children overflow horizontally`);
+        assert.ok(item.aligned, `${label}: detail must span the content row`);
+      }
       assert.ok(result.dateWidth >= result.intrinsic, `${width}px date ${result.dateWidth} < intrinsic ${result.intrinsic}`);
       assert.equal(result.columns, width === 768 || width === 860 ? 2 : 1, `${width}px columns`);
       assert.equal(result.radius, "6px");

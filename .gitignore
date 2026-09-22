@@ -8,6 +8,7 @@ bin/
 *.log
 
 # Build and test outputs
+Temp/
 dist/
 coverage.out
 *.exe
