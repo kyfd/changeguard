@@ -2247,6 +2247,7 @@ async function exportPolicies() {
 
 function renderAuthGate(message = "") {
   const gate = document.querySelector("#authGate");
+  stopAuthParticles();
   const params = new URLSearchParams(location.search);
   const inviteToken = params.get("invite") || "";
   const errorMessage = params.get("auth_error") || message;
@@ -2318,7 +2319,12 @@ function renderAuthGate(message = "") {
 }
 
 // 登录页背景 canvas：粒子、连线、流星，跟随鼠标
-let __authParticlesRunning = false;
+let authParticlesCleanup = null;
+
+function stopAuthParticles() {
+  authParticlesCleanup?.();
+  authParticlesCleanup = null;
+}
 
 function ensureAuthCanvas(gate) {
   let canvas = gate.querySelector("#authCanvas");
@@ -2328,16 +2334,17 @@ function ensureAuthCanvas(gate) {
     canvas.setAttribute("aria-hidden", "true");
     gate.insertBefore(canvas, gate.firstChild);
   }
-  if (!__authParticlesRunning) {
-    __authParticlesRunning = true;
-    runAuthParticles(canvas, gate);
-  }
+  stopAuthParticles();
+  authParticlesCleanup = runAuthParticles(canvas, gate);
 }
 
 function runAuthParticles(canvas, gate) {
   const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   let w = 0, h = 0, dots = [], raf = 0;
+  let stopped = false;
   const mouse = { x: -1e4, y: -1e4 };
 
   function resize() {
@@ -2360,6 +2367,7 @@ function runAuthParticles(canvas, gate) {
   }
 
   function frame(now) {
+    if (gate.hidden || !canvas.isConnected) { cleanup(); return; }
     ctx.clearRect(0, 0, w, h);
     for (let i = 0; i < dots.length; i++) {
       const a = dots[i];
@@ -2402,24 +2410,39 @@ function runAuthParticles(canvas, gate) {
       ctx.lineWidth = 5;
       ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx - 60, sy + 34); ctx.stroke();
     }
-    if (!gate.hidden) {
-      raf = requestAnimationFrame(frame);
-    } else {
-      __authParticlesRunning = false;
-    }
+    if (!motion.matches) raf = requestAnimationFrame(frame);
   }
 
-  resize();
-  if (!canvas.dataset.bound) {
-    canvas.dataset.bound = "1";
-    window.addEventListener("resize", resize);
-    gate.addEventListener("mousemove", (e) => {
-      const r = gate.getBoundingClientRect();
-      mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top;
-    });
-    gate.addEventListener("mouseleave", () => { mouse.x = -1e4; mouse.y = -1e4; });
+  function moveMouse(e) {
+    const r = gate.getBoundingClientRect();
+    mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top;
   }
-  raf = requestAnimationFrame(frame);
+  function leaveMouse() { mouse.x = -1e4; mouse.y = -1e4; }
+  function redraw() {
+    cancelAnimationFrame(raf);
+    resize();
+    frame(performance.now());
+  }
+  function cleanup() {
+    if (stopped) return;
+    stopped = true;
+    cancelAnimationFrame(raf);
+    window.removeEventListener("resize", redraw);
+    gate.removeEventListener("mousemove", moveMouse);
+    gate.removeEventListener("mouseleave", leaveMouse);
+    motion.removeEventListener("change", redraw);
+    observer.disconnect();
+  }
+  const observer = new MutationObserver(() => {
+    if (gate.hidden || !canvas.isConnected) cleanup();
+  });
+  observer.observe(gate, { attributes: true, attributeFilter: ["hidden"], childList: true });
+  window.addEventListener("resize", redraw);
+  gate.addEventListener("mousemove", moveMouse);
+  gate.addEventListener("mouseleave", leaveMouse);
+  motion.addEventListener("change", redraw);
+  redraw();
+  return cleanup;
 }
 
 function switchAuthTab(tab) {
@@ -3832,6 +3855,7 @@ function connectEvents() {
 function hideAuthGate() {
   document.body.classList.remove("auth-required");
   const gate = document.querySelector("#authGate");
+  stopAuthParticles();
   if (gate) { gate.hidden = true; gate.innerHTML = ""; }
 }
 
@@ -4037,6 +4061,30 @@ async function saveManagedApplication(form) {
   }
 }
 
+const sidebarMedia = window.matchMedia("(max-width: 900px)");
+
+function setSidebarOpen(requested, restoreFocus = true) {
+  const sidebar = document.querySelector("#sidebar");
+  const button = document.querySelector("#menuButton");
+  if (!sidebar || !button) return;
+  const wasOpen = document.body.classList.contains("sidebar-open");
+  const open = sidebarMedia.matches && requested;
+  const focusInside = sidebar.contains(document.activeElement);
+  document.body.classList.toggle("sidebar-open", open);
+  sidebar.inert = sidebarMedia.matches && !open;
+  button.setAttribute("aria-expanded", String(open));
+  button.setAttribute("aria-label", open ? "关闭菜单" : "打开菜单");
+  if (open && !wasOpen) (sidebar.querySelector("#navList .nav-item, #navList a, #navList button") || sidebar.querySelector("button, a"))?.focus();
+  else if (!open && sidebarMedia.matches && restoreFocus && (wasOpen || focusInside)) button.focus();
+}
+
+function bindSidebar() {
+  setSidebarOpen(false);
+  sidebarMedia.addEventListener("change", () => setSidebarOpen(false));
+  document.querySelector("#menuButton")?.addEventListener("click", () => setSidebarOpen(!document.body.classList.contains("sidebar-open")));
+  document.querySelector("#mobileBackdrop")?.addEventListener("click", () => setSidebarOpen(false));
+}
+
 function closeAllOverlays() {
   closeCreate();
   closeReview();
@@ -4048,7 +4096,7 @@ function closeAllOverlays() {
   closeCITrustModal();
   if (document.querySelector("#passportTokenModal")?.classList.contains("open")) closePassportTokenModal(false);
   closeNotifyPanel();
-  document.body.classList.remove("sidebar-open");
+  setSidebarOpen(false);
 }
 
 function bindEvents() {
@@ -4327,8 +4375,7 @@ function bindEvents() {
   document.querySelector("#memberRole")?.addEventListener("change", event => updateMemberGrantMode(event.target.value));
   document.querySelector('#ciTrustForm [name="provider"]')?.addEventListener("change", event => updateCIProviderFields(event.currentTarget.form, true));
   document.querySelector('#ciTrustForm [name="application_id"]')?.addEventListener("change", event => applyCITrustApplicationDefaults(event.currentTarget.form, true));
-  document.querySelector("#menuButton")?.addEventListener("click", () => document.body.classList.toggle("sidebar-open"));
-  document.querySelector("#mobileBackdrop")?.addEventListener("click", () => document.body.classList.remove("sidebar-open"));
+  bindSidebar();
   document.querySelector("#createForm").addEventListener("submit", async event => {
     event.preventDefault();
     const button = document.querySelector("#saveChangeButton");

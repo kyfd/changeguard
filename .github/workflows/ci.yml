@@ -208,6 +208,9 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
+      - name: Run isolated UI regressions
+        run: npm run test:ui
+
       - name: Start isolated E2E stack
         env:
           COMPOSE_PROJECT_NAME: changeguard-e2e
