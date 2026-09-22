@@ -2919,7 +2919,8 @@ async function renderSettings(main) {
   setHeader("集成设置");
   const config = state.config || {};
   const capabilities = config.capabilities || {};
-  const enterpriseAPIAvailable = capabilities.enterprise_api === true;
+  const enterpriseAPIAvailable = capabilities.enterprise_llm_api === true;
+  const outboundAPIAvailable = capabilities.enterprise_outbound_api === true;
   const agentRuntimeAPIAvailable = capabilities.agent_runtime_api === true;
   const enterpriseUnavailableMessage = "当前核心服务未启用企业集成配置 API；规则检查、审批与 CI 信任不受影响。";
   const canManageCITrusts = Boolean(actor()?.enterprise_admin);
@@ -2953,12 +2954,14 @@ async function renderSettings(main) {
   let outboundStatus = {
     configured: !!config.outbound_webhook_configured,
     source: config.outbound_webhook_source || "none",
-    message: config.outbound_webhook_message || (enterpriseAPIAvailable ? "" : enterpriseUnavailableMessage),
+    message: config.outbound_webhook_message || (outboundAPIAvailable ? "" : enterpriseUnavailableMessage),
     url: config.outbound_webhook_url || "",
     enabled: !!config.outbound_webhook_configured,
   };
   if (enterpriseAPIAvailable) {
     try { llmStatus = await api("/api/enterprise/llm"); } catch (_) { /* keep config fallback */ }
+  }
+  if (outboundAPIAvailable) {
     try { outboundStatus = await api("/api/enterprise/outbound"); } catch (_) { /* keep config fallback */ }
   }
   let usage = config.llm_usage || null;
@@ -3013,7 +3016,8 @@ async function renderSettings(main) {
         </tr>`;
       }).join("")
     : `<tr><td colspan="5"><div class="table-empty">尚无 GitLab 事件</div></td></tr>`;
-  const canEdit = enterpriseAPIAvailable && !!(actor()?.enterprise_admin || actor()?.role === "技术负责人");
+  const canManageIntegrations = !!(actor()?.enterprise_admin || actor()?.role === "技术负责人");
+  const canEdit = enterpriseAPIAvailable && canManageIntegrations;
   let presets = [];
   if (enterpriseAPIAvailable) {
     try { presets = await api("/api/enterprise/llm/presets"); } catch (_) { presets = []; }
@@ -3029,7 +3033,7 @@ async function renderSettings(main) {
       <div class="usage-panel-head"><strong>当日 AI 用量</strong><span>${escapeHTML(usage.day || "今天")}</span></div>
       ${usageBarHTML("当前用户", usage.user_used, usage.user_limit)}
       ${usageBarHTML("本企业", usage.org_used, usage.org_limit)}
-      ${usageBarHTML("全站", usage.global_used, usage.global_limit)}
+      <p class="field-hint">全站用量不可观测（企业隔离）</p>
       <p class="field-hint">超出额度后回退到规则分析，不会阻断变更流程。</p>
     </div>` : "";
   const runtimeMetrics = agentRuntime?.metrics || {};
@@ -3142,7 +3146,7 @@ async function renderSettings(main) {
       <div class="config-row"><span>模型</span><code>${escapeHTML(llmStatus.model || "—")}</code></div>
       <div class="config-row"><span>Key</span><code>${escapeHTML(llmStatus.api_key_hint || "未配置")}</code></div>`;
 
-  const outboundForm = canEdit ? `
+  const outboundForm = outboundAPIAvailable && canManageIntegrations ? `
     <form id="orgOutboundForm" class="llm-connect-form">
       <label class="field field-check"><input type="checkbox" name="enabled" ${outboundStatus.enabled && outboundStatus.source === "organization" ? "checked" : ""}> 启用本企业出站 Webhook</label>
       <label class="field"><span>Webhook URL</span>

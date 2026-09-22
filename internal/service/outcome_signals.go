@@ -143,3 +143,103 @@ func validOutcomeWindow(start, end *time.Time, occurredAt time.Time) bool {
 	}
 	return start.Before(*end) && !end.After(occurredAt.Add(5*time.Minute))
 }
+
+// OutcomeSummaryForChange summarizes evidence only; it does not change governance state.
+func (s *Service) OutcomeSummaryForChange(changeID, actorID string) (string, []model.OutcomeSignal, error) {
+	signals, err := s.OutcomeSignalsForChange(changeID, actorID)
+	if err != nil {
+		return "", nil, err
+	}
+	return summarizeOutcomeSignals(signals), signals, nil
+}
+
+func summarizeOutcomeSignals(signals []model.OutcomeSignal) string {
+	status := "NOT_RUN"
+	for _, signal := range latestOutcomeSignals(signals) {
+		value := outcomeSignalStatus(signal)
+		if status == "BLOCK" || value == "BLOCK" {
+			status = "BLOCK"
+		} else if status == "WARN" || value == "WARN" {
+			status = "WARN"
+		} else {
+			status = value
+		}
+	}
+	return status
+}
+
+// Keep the source/change/entity identity used by governanceOutcomesForEvidence.
+// Unlike historical governance metrics, this view reflects each entity's latest
+// state, including pending states. Separate SLI observation windows are evidence
+// of separate comparisons, not updates to the same comparison.
+func latestOutcomeSignals(signals []model.OutcomeSignal) []model.OutcomeSignal {
+	type identity struct {
+		organization, source, change string
+		kind                         model.OutcomeSignalKind
+		entity, start, end           string
+	}
+	latest := make(map[identity]int)
+	result := make([]model.OutcomeSignal, 0, len(signals))
+	for _, signal := range signals {
+		key := identity{organization: signal.OrganizationID, source: signal.Source, change: signal.ChangeID, kind: signal.Kind}
+		switch signal.Kind {
+		case model.OutcomeSignalIncident:
+			key.entity = signal.IncidentID
+		case model.OutcomeSignalRollback:
+			key.entity = signal.OperationID
+		case model.OutcomeSignalBusinessSLI:
+			if signal.ObservationWindowStart != nil && signal.ObservationWindowEnd != nil && !signal.ObservationWindowStart.IsZero() && signal.ObservationWindowStart.Before(*signal.ObservationWindowEnd) {
+				key.entity = strings.ToLower(signal.MetricName)
+				key.start = signal.ObservationWindowStart.UTC().Format(time.RFC3339Nano)
+				key.end = signal.ObservationWindowEnd.UTC().Format(time.RFC3339Nano)
+			}
+		}
+		// Missing identities and unknown kinds must not erase unrelated evidence.
+		if strings.TrimSpace(key.source) == "" || strings.TrimSpace(key.entity) == "" {
+			result = append(result, signal)
+			continue
+		}
+		index, exists := latest[key]
+		if !exists {
+			latest[key] = len(result)
+			result = append(result, signal)
+			continue
+		}
+		current := result[index]
+		newer := signal.OccurredAt.After(current.OccurredAt)
+		if signal.OccurredAt.Equal(current.OccurredAt) {
+			newer = signal.ReceivedAt.After(current.ReceivedAt) || (signal.ReceivedAt.Equal(current.ReceivedAt) && signal.ID > current.ID)
+		}
+		if newer {
+			result[index] = signal
+		}
+	}
+	return result
+}
+
+func outcomeSignalStatus(signal model.OutcomeSignal) string {
+	switch signal.Kind {
+	case model.OutcomeSignalIncident:
+		switch signal.Status {
+		case "OPEN", "TRIGGERED", "ACKNOWLEDGED":
+			return "BLOCK"
+		case "RESOLVED", "CLOSED":
+			return "PASS"
+		}
+	case model.OutcomeSignalRollback:
+		switch signal.Status {
+		case "FAILED":
+			return "BLOCK"
+		case "SUCCEEDED":
+			return "PASS"
+		}
+	case model.OutcomeSignalBusinessSLI:
+		if validOutcomeSignal(signal) {
+			if businessSLIOutcome(signal) < 0 || (signal.ObjectiveValue != nil && !businessObjectiveMet(signal)) {
+				return "BLOCK"
+			}
+			return "PASS"
+		}
+	}
+	return "WARN"
+}

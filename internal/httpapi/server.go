@@ -147,6 +147,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/users", s.handleUsers)
 	mux.HandleFunc("/api/policies", s.handlePolicies)
 	mux.HandleFunc("/api/policies/", s.handlePolicy)
+	mux.HandleFunc("/api/enterprise/llm/usage", s.handleEnterpriseLLMUsage)
 	mux.HandleFunc("/api/changes", s.handleChanges)
 	mux.HandleFunc("/api/changes/", s.handleChange)
 	mux.HandleFunc("/api/passports", s.handlePassports)
@@ -324,9 +325,7 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 	configured := strings.TrimSpace(os.Getenv("DBGUARD_LLM_BASE_URL")) != "" &&
 		strings.TrimSpace(os.Getenv("DBGUARD_LLM_API_KEY")) != ""
 	writeJSON(w, http.StatusOK, map[string]any{
-		"llm_configured": configured,
-		// 企业自配 Key 需要主密钥。缺它时保存接口会失败关闭，
-		// 这里让界面能提前说明原因，而不是等用户填完表单才报错。
+		"llm_configured":                    configured,
 		"llm_secret_ready":                  s.modelSecretConfigured(),
 		"llm_provider":                      "OpenAI-compatible",
 		"llm_model":                         envValue("DBGUARD_LLM_MODEL", "deepseek-chat"),
@@ -349,6 +348,11 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 		"session_mode":                      s.auth.SessionMode(),
 		"prepare_agent_enabled":             AgentEnabled(),
 		"agent_tools_enabled":               AgentToolsEnabled(),
+		"capabilities": map[string]bool{
+			"enterprise_llm_api":      s.analyzer != nil,
+			"enterprise_outbound_api": false,
+			"agent_runtime_api":       false,
+		},
 	})
 }
 
@@ -1253,6 +1257,23 @@ func (s *Server) handleChange(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if action == "outcomes" && len(parts) == 2 {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		status, signals, err := s.service.OutcomeSummaryForChange(id, actorID(r))
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  status,
+			"signals": signals,
+			"source":  "recorded_outcome_signals",
+		})
+		return
+	}
 	if action == "report" {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
@@ -1725,6 +1746,35 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 func methodNotAllowed(w http.ResponseWriter) {
 	writeError(w, http.StatusMethodNotAllowed, "请求方法不支持")
+}
+
+func (s *Server) handleEnterpriseLLMUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if s.analyzer == nil {
+		writeError(w, http.StatusServiceUnavailable, "模型用量统计未启用")
+		return
+	}
+	user, organization, ok := s.currentEnterprise(w, r)
+	if !ok {
+		return
+	}
+	usage, err := s.analyzer.UsageSnapshotContext(r.Context(), organization.ID, user.ID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "模型用量统计暂不可用")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"day":               usage.Day,
+		"user_used":         usage.UserUsed,
+		"user_limit":        usage.UserLimit,
+		"org_used":          usage.OrgUsed,
+		"org_limit":         usage.OrgLimit,
+		"global_observable": false,
+		"source":            "recorded_runtime_counters",
+	})
 }
 
 func withRecover(next http.Handler, logger *log.Logger) http.Handler {

@@ -983,6 +983,18 @@ func (r *Runtime) reserve(userID string) bool {
 
 // UsageSnapshot 读取当日已用额度（内存或 Redis GET，不自增）。
 func (r *Runtime) UsageSnapshot(organizationID, userID string) UsageSnapshot {
+	snapshot, _ := r.UsageSnapshotContext(context.Background(), organizationID, userID)
+	return snapshot
+}
+
+// UsageSnapshotContext reads counters without concealing backend failures.
+func (r *Runtime) UsageSnapshotContext(ctx context.Context, organizationID, userID string) (UsageSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return UsageSnapshot{}, err
+	}
+	if r.limitRequired && r.limitClient == nil {
+		return UsageSnapshot{}, fmt.Errorf("usage backend unavailable")
+	}
 	if strings.TrimSpace(userID) == "" {
 		userID = "unknown"
 	}
@@ -1003,12 +1015,18 @@ func (r *Runtime) UsageSnapshot(organizationID, userID string) UsageSnapshot {
 	}
 	today := snap.Day
 	if r.limitClient != nil {
-		ctx := context.Background()
-		userN, _ := r.limitClient.Get(ctx, "dbguard:llm:"+today+":user:"+userID).Int()
-		orgN, _ := r.limitClient.Get(ctx, "dbguard:llm:"+today+":org:"+organizationID).Int()
-		globalN, _ := r.limitClient.Get(ctx, "dbguard:llm:"+today+":global").Int()
-		snap.UserUsed, snap.OrgUsed, snap.GlobalUsed = userN, orgN, globalN
-		return snap
+		for key, target := range map[string]*int{
+			"user:" + userID:        &snap.UserUsed,
+			"org:" + organizationID: &snap.OrgUsed,
+			"global":                &snap.GlobalUsed,
+		} {
+			value, err := r.limitClient.Get(ctx, "dbguard:llm:"+today+":"+key).Int()
+			if err != nil && err != redis.Nil {
+				return UsageSnapshot{}, fmt.Errorf("read usage: %w", err)
+			}
+			*target = value
+		}
+		return snap, nil
 	}
 	r.usageMu.Lock()
 	defer r.usageMu.Unlock()
@@ -1021,7 +1039,7 @@ func (r *Runtime) UsageSnapshot(organizationID, userID string) UsageSnapshot {
 	if g := r.usage["__global__"]; g.Day == today {
 		snap.GlobalUsed = g.Count
 	}
-	return snap
+	return snap, nil
 }
 
 var redisLLMReserveScript = redis.NewScript("local u=tonumber(redis.call('GET',KEYS[1]) or '0'); local o=tonumber(redis.call('GET',KEYS[2]) or '0'); local g=tonumber(redis.call('GET',KEYS[3]) or '0'); if u>=tonumber(ARGV[1]) or o>=tonumber(ARGV[2]) or g>=tonumber(ARGV[3]) then return 0 end; u=redis.call('INCR',KEYS[1]); o=redis.call('INCR',KEYS[2]); g=redis.call('INCR',KEYS[3]); if u==1 then redis.call('PEXPIRE',KEYS[1],ARGV[4]) end; if o==1 then redis.call('PEXPIRE',KEYS[2],ARGV[4]) end; if g==1 then redis.call('PEXPIRE',KEYS[3],ARGV[4]) end; return 1")
