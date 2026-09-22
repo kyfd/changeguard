@@ -2951,9 +2951,11 @@ async function renderSettings(main) {
     try { agentRuntimeEvents = await api("/api/agent-runtime/events?limit=20"); } catch (_) { /* compatible rolling upgrade */ }
   }
 
-  const modelState = llmStatus.configured
-    ? `<span class="status status-approved"><i></i>${llmStatus.source === "platform" ? "演示模型" : "已接入"}</span>`
-    : '<span class="status status-failed"><i></i>未接入</span>';
+  const modelState = llmStatus.source === "organization"
+    ? '<span class="status status-approved"><i></i>已接入企业模型</span>'
+    : llmStatus.has_api_key
+      ? '<span class="status status-waiting"><i></i>已保存 Key，尚未启用</span>'
+      : '<span class="status status-failed"><i></i>未接入</span>';
   const outboundState = outboundStatus.configured
     ? `<span class="status status-approved"><i></i>${outboundStatus.source === "platform" ? "平台配置" : "已配置"}</span>`
     : waiting;
@@ -3078,12 +3080,24 @@ async function renderSettings(main) {
     </div>
     <form id="orgLlmForm" class="llm-connect-form">
       <label class="field field-check"><input type="checkbox" name="enabled" ${llmStatus.enabled || llmStatus.source === "organization" ? "checked" : ""}> 启用本企业模型</label>
+      <label class="field"><span>接口形态</span>
+        <select name="provider" id="llmProvider">
+          <option value="openai_compatible"${(llmStatus.provider || "openai_compatible") !== "anthropic" ? " selected" : ""}>OpenAI 兼容（DeepSeek / OpenAI / 内网网关）</option>
+          <option value="anthropic"${llmStatus.provider === "anthropic" ? " selected" : ""}>Anthropic Messages</option>
+        </select>
+        <small class="field-hint">Anthropic 不提供模型列表，需手动填写模型名</small>
+      </label>
       <label class="field"><span>服务地址</span>
-        <input name="base_url" placeholder="https://api.deepseek.com" value="${escapeHTML(orgBase)}">
-        <small class="field-hint">OpenAI 兼容；DeepSeek 填 https://api.deepseek.com 即可</small>
+        <input name="base_url" id="llmBaseUrl" placeholder="https://api.deepseek.com" value="${escapeHTML(orgBase)}">
+        <small class="field-hint">OpenAI 兼容填 https://api.deepseek.com；Anthropic 填 https://api.anthropic.com</small>
       </label>
       <label class="field"><span>模型名</span>
-        <input name="model" placeholder="deepseek-chat" value="${escapeHTML(orgModel)}">
+        <div class="input-with-toggle">
+          <input name="model" id="llmModel" list="llmModelList" placeholder="deepseek-chat" value="${escapeHTML(orgModel)}">
+          <button type="button" class="button button-secondary button-small" id="llmModelsBtn">获取模型列表</button>
+        </div>
+        <datalist id="llmModelList"></datalist>
+        <small class="field-hint" id="llmModelsHint">填写服务地址与 API Key 后，可拉取上游实际可用的模型。</small>
       </label>
       <label class="field"><span>API Key</span>
         <div class="input-with-toggle">
@@ -3267,6 +3281,7 @@ async function renderSettings(main) {
     const data = new FormData(form);
     return {
       enabled: data.get("enabled") === "on",
+      provider: String(data.get("provider") || "openai_compatible"),
       base_url: String(data.get("base_url") || "").trim(),
       model: String(data.get("model") || "").trim() || "deepseek-chat",
       api_key: String(data.get("api_key") || "").trim(),
@@ -3279,14 +3294,49 @@ async function renderSettings(main) {
       const id = btn.getAttribute("data-llm-preset");
       const preset = (presets || []).find(item => item.id === id);
       if (!preset || !form) return;
-      form.elements.namedItem("enabled").checked = true;
       form.elements.namedItem("base_url").value = preset.base_url || "";
       form.elements.namedItem("model").value = preset.model || "";
+      const providerSelect = form.elements.namedItem("provider");
+      if (providerSelect && preset.provider) providerSelect.value = preset.provider;
       form.elements.namedItem("max_tokens").value = Number(preset.max_tokens || 700);
       const hint = document.querySelector("#llmFormHint");
       if (hint) hint.textContent = preset.hint || "请粘贴 API Key 后测试连接";
       toast("已填充 " + (preset.name || id), "success", "请填写 API Key");
     });
+  // 拉取上游模型列表。失败时把原因显示在提示位上，不弹 toast 打断。
+  document.querySelector("#llmModelsBtn")?.addEventListener("click", async () => {
+    const hint = document.querySelector("#llmModelsHint");
+    const body = readLlmForm();
+    if (!body.base_url) {
+      if (hint) hint.textContent = "请先填写服务地址。";
+      return;
+    }
+    if (!body.api_key && !llmStatus.api_key_hint) {
+      if (hint) hint.textContent = "请先填写 API Key（未保存过 Key 时无法拉取列表）。";
+      return;
+    }
+    if (hint) hint.textContent = "正在获取模型列表…";
+    try {
+      const result = await api("/api/enterprise/llm/models", { method: "POST", body: JSON.stringify(body) });
+      const models = Array.isArray(result.models) ? result.models : [];
+      const list = document.querySelector("#llmModelList");
+      if (list) {
+        list.innerHTML = models
+          .map(item => `<option value="${escapeHTML(item.id)}"></option>`)
+          .join("");
+      }
+      if (hint) {
+        hint.textContent = models.length
+          ? `上游返回 ${models.length} 个模型，可从下拉中选择或继续手输。`
+          : "上游没有返回可用模型。";
+      }
+      if (models.length && body.model && !models.some(item => item.id === body.model)) {
+        toast("注意", "warn", "当前填写的模型名不在上游返回的列表里");
+      }
+    } catch (error) {
+      if (hint) hint.textContent = error.message || "获取模型列表失败";
+    }
+  });
   });
   document.querySelectorAll("[data-toggle-key]").forEach(btn => {
     btn.addEventListener("click", event => {
