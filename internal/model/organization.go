@@ -135,3 +135,68 @@ type MemberAccess struct {
 	User              User               `json:"user"`
 	ApplicationGrants []ApplicationGrant `json:"application_grants"`
 }
+
+// ModelProviderKind 上游模型接口形态。
+//
+// 只支持两种：OpenAI 兼容（/chat/completions + /models）与 Anthropic Messages。
+// 不提供"自动探测"：猜错形态会把请求发到一个不存在的路径上，
+// 得到的错误信息反而更难排查。
+type ModelProviderKind string
+
+const (
+	ModelProviderOpenAI    ModelProviderKind = "openai_compatible"
+	ModelProviderAnthropic ModelProviderKind = "anthropic"
+)
+
+// OrganizationModelConfig 企业自配的模型接入。
+//
+// APIKeyCiphertext 是密文（见 internal/modelsecret）；明文只在解析给
+// Agent 运行时的那一瞬间存在，不落日志、不进响应、不缓存到前端。
+type OrganizationModelConfig struct {
+	OrganizationID string            `json:"organization_id"`
+	Enabled        bool              `json:"enabled"`
+	Provider       ModelProviderKind `json:"provider"`
+	BaseURL        string            `json:"base_url"`
+	Model          string            `json:"model"`
+	MaxTokens      int               `json:"max_tokens"`
+	APIKeyCipher   string            `json:"api_key_ciphertext,omitempty"`
+	// APIKeyHint 只用于界面展示"已保存哪个 Key"，不含可重放内容。
+	APIKeyHint   string    `json:"api_key_hint,omitempty"`
+	ConfiguredBy string    `json:"configured_by"`
+	ConfiguredAt time.Time `json:"configured_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	// LastTestOK / LastTestAt / LastTestError 记录最近一次连通性探测结果，
+	// 让"配过但连不上"和"没配过"在界面上可区分。
+	LastTestOK    bool       `json:"last_test_ok"`
+	LastTestAt    *time.Time `json:"last_test_at,omitempty"`
+	LastTestError string     `json:"last_test_error,omitempty"`
+}
+
+// ModelConfigInput 保存模型接入的请求体。与存储结构的区别是：
+// APIKey 是明文（只在请求体内），ClearAPIKey 支持"保留原 Key 但改别的字段"。
+type ModelConfigInput struct {
+	Enabled     bool              `json:"enabled"`
+	Provider    ModelProviderKind `json:"provider"`
+	BaseURL     string            `json:"base_url"`
+	Model       string            `json:"model"`
+	MaxTokens   int               `json:"max_tokens"`
+	APIKey      string            `json:"api_key"`
+	ClearAPIKey bool              `json:"clear_api_key"`
+}
+
+// ModelConnectionTest 连通性探测请求。可以带一个尚未保存的 Key，
+// 这样"先测再存"成立，不必为了测试先把 Key 写进去。
+type ModelConnectionTest struct {
+	Provider  ModelProviderKind `json:"provider"`
+	BaseURL   string            `json:"base_url"`
+	Model     string            `json:"model"`
+	APIKey    string            `json:"api_key"`
+	MaxTokens int               `json:"max_tokens"`
+}
+
+// UpstreamModel 上游返回的模型条目。/models 只取 id 与所有者，
+// 不把上游的完整元数据透传给前端。
+type UpstreamModel struct {
+	ID      string `json:"id"`
+	OwnedBy string `json:"owned_by,omitempty"`
+}

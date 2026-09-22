@@ -1,5 +1,45 @@
 # Changelog
 
+## 3.0.4 - 2026-09-22
+
+新增**企业自配模型接入**：管理员可在「集成设置 → 接入 AI」填写 OpenAI 兼容或 Anthropic 接口地址、API Key 与模型名，直接拉取上游可用模型列表，并先测试连通再保存。
+
+### 新增能力
+
+- 四个接口：`GET/PUT /api/enterprise/llm`（读状态/保存）、`POST /api/enterprise/llm/test`（连通性探测）、`POST /api/enterprise/llm/models`（拉取上游模型列表）、`GET /api/enterprise/llm/presets`（DeepSeek / OpenAI / Anthropic 预设）。
+- 按企业隔离：每个组织各配各的，`OrganizationModelConfig` 落在 `store.state.model_configs`，读写都带 organizationID。
+- 保存前强制探测：连不上的配置不会被保存，避免事后变成一个难以定位的故障。
+- 已保存的配置接入 `agent.Runtime` 的 `SetResolver` 钩子（该钩子自 #14 起就存在但一直没有调用方）。解析不到企业配置时返回 false，Agent 走本地规则归纳，**不会**回退到平台 env 里的 Key。
+- Anthropic Messages 形态使用 `x-api-key` + `anthropic-version`；它没有公开的模型列表端点，界面明确要求手动填写模型名，而不是发一个必然 404 的请求。
+
+### 安全边界
+
+- **API Key 永不回显**：落盘的是 AES-256-GCM 密文（`v1:` 前缀，随机 nonce），接口只返回一个用于辨认的尾缀提示。测试断言密文不含明文、两次加密结果不同、改动一个字节即解密失败。
+- **主密钥缺失时整体失败关闭**：未配置 `CHANGEGUARD_SECRETS_MASTER_KEY` 时不加密、不保存、不返回明文，界面说明"要配什么、配在哪"。不会退化成明文存储。
+- **主密钥更换后旧密文明确解不开**：返回 409 要求重新填写，而不是静默当成"没有 Key"。
+- **SSRF 防护**：服务地址只允许 http/https，默认拒绝环回、私网、链路本地与云元数据端点（含 169.254.169.254、`.internal`、`.local`、CGNAT、TEST-NET）。不跟随跳转。内网部署可用 `CHANGEGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM=1` 显式放行私网，但链路本地**永远**拒绝。
+- **上游错误不回显响应体**：4xx 的 body 常把 Authorization 头回显出来，透出等于泄露 Key；只按状态码分类成一句可读的话。
+- 权限：仅企业管理员（`enterprise_admin` 或技术负责人）可写，其他人只读状态。每次保存/测试写审计，不记录 Key。
+
+### 升级
+
+1. 备份主库与文件状态（`deploy/production/changeguard-backup.sh`），**并单独备份 `CHANGEGUARD_SECRETS_MASTER_KEY`**——丢失它会导致所有已保存的企业 Key 无法解密。
+2. 在 `/etc/changeguard/core.env` 增加 `CHANGEGUARD_SECRETS_MASTER_KEY=<至少 32 字节随机串>`。不配置则功能不可用（失败关闭），治理功能不受影响。
+3. 用 Release 中的 `changeguard-3-0-4.tar.gz` 和 `.sha256` 配合 `deploy/upgrade/changeguard-upgrade.sh`（需 root）。
+4. 存储变更：`store.state` 新增 `model_configs` 字段（`omitempty`）。旧数据文件加载时该字段为零值，已用生产数据副本验证可正常加载、既有 47 条变更记录完整。
+5. 若模型网关在内网，额外设置 `CHANGEGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM=1`。
+
+健康检查失败时，升级脚本仍会把 `current` 软链切回上一版本。回滚窗口内不要碰 `dbguard_state`。
+
+### 已知限制
+
+- 企业模型接入**不改变治理判定**：模型只提供参考建议，静态规则、审批状态、制品摘要与通行证签发仍由治理服务决定。
+- Anthropic 形态**不参与 Agent 分析**：`internal/agent.Runtime` 目前只实现 OpenAI 兼容调用，因此界面可以保存 Anthropic 配置并测试连通，但分析不会用它（ resolver 对该形态返回 false）。这是显式边界，不是静默失败。
+- 主密钥轮换**没有自动化**：更换后需每个企业重新填写 Key。后续可加"用旧密钥解密、用新密钥重加密"的迁移工具。
+- 模型列表上限 200 条，超出部分截断。
+- `COMPLETED` 只表示通行证已消费，不代表生产部署成功。
+- 外部模型请求**不保证 exactly-once**：恢复是 at-least-once，消耗以调用账本为准。
+
 ## 3.0.3 - 2026-09-21
 
 修复变更准备工作台（`/agent/`）的若干界面缺陷。治理侧行为不变：Agent 仍然只准备材料，不审批、不执行。

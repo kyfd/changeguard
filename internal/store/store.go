@@ -28,22 +28,23 @@ var demoCredentials = []model.UserCredential{
 }
 
 type state struct {
-	Organizations      []model.Organization       `json:"organizations"`
-	Invites            []model.OrganizationInvite `json:"invites"`
-	Credentials        []model.UserCredential     `json:"credentials"`
-	Applications       []model.Application        `json:"applications"`
-	Users              []model.User               `json:"users"`
-	Changes            []model.ChangeRequest      `json:"changes"`
-	Audits             []model.AuditEvent         `json:"audits"`
-	Policies           []model.RiskPolicy         `json:"policies"`
-	ApplicationGrants  []model.ApplicationGrant   `json:"application_grants"`
-	Outbox             []model.OutboxEvent        `json:"outbox"`
-	Passports          []model.StoredPassport     `json:"passports"`
-	IntegrationEvents  []model.IntegrationEvent   `json:"integration_events"`
-	OutcomeSignals     []model.OutcomeSignal      `json:"outcome_signals"`
-	AgentConversations []model.AgentConversation  `json:"agent_conversations,omitempty"`
-	AgentMessages      []model.AgentMessage       `json:"agent_messages,omitempty"`
-	IdempotencyRecords []model.IdempotencyRecord  `json:"idempotency_records,omitempty"`
+	Organizations      []model.Organization            `json:"organizations"`
+	Invites            []model.OrganizationInvite      `json:"invites"`
+	Credentials        []model.UserCredential          `json:"credentials"`
+	Applications       []model.Application             `json:"applications"`
+	Users              []model.User                    `json:"users"`
+	Changes            []model.ChangeRequest           `json:"changes"`
+	Audits             []model.AuditEvent              `json:"audits"`
+	Policies           []model.RiskPolicy              `json:"policies"`
+	ApplicationGrants  []model.ApplicationGrant        `json:"application_grants"`
+	Outbox             []model.OutboxEvent             `json:"outbox"`
+	Passports          []model.StoredPassport          `json:"passports"`
+	IntegrationEvents  []model.IntegrationEvent        `json:"integration_events"`
+	OutcomeSignals     []model.OutcomeSignal           `json:"outcome_signals"`
+	AgentConversations []model.AgentConversation       `json:"agent_conversations,omitempty"`
+	AgentMessages      []model.AgentMessage            `json:"agent_messages,omitempty"`
+	IdempotencyRecords []model.IdempotencyRecord       `json:"idempotency_records,omitempty"`
+	ModelConfigs       []model.OrganizationModelConfig `json:"model_configs,omitempty"`
 }
 
 type Store struct {

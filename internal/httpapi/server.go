@@ -19,10 +19,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kyfd/changeguard/internal/agent"
 	"github.com/kyfd/changeguard/internal/auth"
 	"github.com/kyfd/changeguard/internal/buildinfo"
 	"github.com/kyfd/changeguard/internal/integration"
 	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/modelprobe"
+	"github.com/kyfd/changeguard/internal/modelsecret"
 	"github.com/kyfd/changeguard/internal/observability"
 	"github.com/kyfd/changeguard/internal/report"
 	"github.com/kyfd/changeguard/internal/service"
@@ -40,6 +43,16 @@ type Server struct {
 	collectors   []MetricsCollector
 	integrations integration.Config
 	handler      http.Handler
+	// store 与 analyzer 由 New 从 collectors 里识别出来。它们同时也是
+	// MetricsCollector，但这里需要具体类型：模型接入配置写在 store 上，
+	// 而 Agent 运行时的按企业解析器需要读回同一份数据。
+	store    *store.Store
+	analyzer *agent.Runtime
+	// secrets 封装企业模型 Key。未配置主密钥时为 nil，接口据此失败关闭。
+	secrets *modelsecret.Box
+	probe   *modelprobe.Client
+	// allowPrivateUpstream 是否放行内网模型网关。默认 false，由环境显式打开。
+	allowPrivateUpstream bool
 }
 
 type MetricsCollector interface {
@@ -50,6 +63,30 @@ func New(svc *service.Service, authManager *auth.Manager, logger *log.Logger, co
 	server := &Server{
 		service: svc, auth: authManager, logger: logger,
 		metrics: observability.New(), collectors: collectors, integrations: integration.FromEnvironment(),
+	}
+	for _, collector := range collectors {
+		switch typed := collector.(type) {
+		case *store.Store:
+			server.store = typed
+		case *agent.Runtime:
+			server.analyzer = typed
+		}
+	}
+	// 主密钥缺失时 secrets 保持 nil：所有模型接入接口都会明确报"未配置主密钥"，
+	// 而不是退化成明文存储。
+	if box, err := modelsecret.New(strings.TrimSpace(os.Getenv("DBGUARD_SECRETS_MASTER_KEY"))); err == nil {
+		server.secrets = box
+	} else if !errors.Is(err, modelsecret.ErrNotConfigured) {
+		logger.Printf("model secret box unavailable: %v", err)
+	}
+	server.allowPrivateUpstream = modelprobe.AllowPrivateUpstream()
+	server.probe = modelprobe.New(server.allowPrivateUpstream)
+	// 把企业自配模型接进 Agent 运行时。缺主密钥时不注入 resolver，
+	// 让 Runtime 保持原有 env 行为，而不是注入一个必然失败的解析器。
+	if configured := server.wireModelConfigResolver(); configured > 0 {
+		logger.Printf("enterprise model config active for %d organization(s)", configured)
+	} else if !server.modelSecretConfigured() {
+		logger.Printf("enterprise model config unavailable: set DBGUARD_SECRETS_MASTER_KEY to enable per-organization model keys")
 	}
 	server.handler = securityHeaders(server.routes())
 	return server
@@ -96,6 +133,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/enterprise/members/", s.auth.HandleMember)
 	mux.HandleFunc("/api/enterprise/invites", s.auth.HandleInvites)
 	mux.HandleFunc("/api/enterprise/invites/", s.auth.HandleInvite)
+	// 企业自配模型接入。浏览器只经本服务访问上游；Key 加密落盘、永不回显。
+	mux.HandleFunc("/api/enterprise/llm", s.handleEnterpriseLLM)
+	mux.HandleFunc("/api/enterprise/llm/test", s.handleEnterpriseLLMTest)
+	mux.HandleFunc("/api/enterprise/llm/models", s.handleEnterpriseLLMModels)
+	mux.HandleFunc("/api/enterprise/llm/presets", s.handleEnterpriseLLMPresets)
 	mux.HandleFunc("/api/config/status", s.handleConfigStatus)
 	mux.HandleFunc("/api/dashboard", s.handleDashboard)
 	mux.HandleFunc("/api/governance/outcomes", s.handleGovernanceOutcomes)
@@ -282,7 +324,10 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 	configured := strings.TrimSpace(os.Getenv("DBGUARD_LLM_BASE_URL")) != "" &&
 		strings.TrimSpace(os.Getenv("DBGUARD_LLM_API_KEY")) != ""
 	writeJSON(w, http.StatusOK, map[string]any{
-		"llm_configured":                    configured,
+		"llm_configured": configured,
+		// 企业自配 Key 需要主密钥。缺它时保存接口会失败关闭，
+		// 这里让界面能提前说明原因，而不是等用户填完表单才报错。
+		"llm_secret_ready":                  s.modelSecretConfigured(),
 		"llm_provider":                      "OpenAI-compatible",
 		"llm_model":                         envValue("DBGUARD_LLM_MODEL", "deepseek-chat"),
 		"daily_analysis_limit":              envValue("DBGUARD_LLM_DAILY_ANALYSIS_LIMIT", "20"),
