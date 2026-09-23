@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -109,7 +110,7 @@ func (b *postgresBackend) Load(ctx context.Context) ([]byte, int64, error) {
 	var version int64
 	err := b.pool.QueryRow(ctx, "SELECT payload, version FROM dbguard_state WHERE id = 1").Scan(&payload, &version)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "no rows") {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, 0, ErrNotFound
 		}
 		return nil, 0, err

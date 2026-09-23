@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/kyfd/changeguard/internal/envx"
 	"net"
 	"net/url"
 	"os"
@@ -48,15 +49,15 @@ func ConfigFromEnvironment() (Config, error) {
 		AuditKey:        auditKey,
 		MetricsFile:     envString("CHANGEGUARD_AGENT_METRICS_FILE", "/opt/changeguard-agent/data/metrics.json"),
 		MetricsToken:    strings.TrimSpace(os.Getenv("CHANGEGUARD_AGENT_METRICS_TOKEN")),
-		MaxBodyBytes:    int64(envInt("CHANGEGUARD_AGENT_MAX_BODY_BYTES", 128<<10)),
-		MaxResponse:     int64(envInt("CHANGEGUARD_AGENT_MAX_RESPONSE_BYTES", 4<<20)),
-		RatePerMinute:   envInt("CHANGEGUARD_AGENT_RATE_PER_MINUTE", 12),
-		RateBurst:       envInt("CHANGEGUARD_AGENT_RATE_BURST", 4),
-		UpstreamTimeout: envDuration("CHANGEGUARD_AGENT_UPSTREAM_TIMEOUT", 120*time.Second),
-		ReadyTimeout:    envDuration("CHANGEGUARD_AGENT_READY_TIMEOUT", 2*time.Second),
-		SLOP95Target:    envDuration("CHANGEGUARD_AGENT_SLO_P95_TARGET", 30*time.Second),
+		MaxBodyBytes:    int64(envx.Int("CHANGEGUARD_AGENT_MAX_BODY_BYTES", 128<<10)),
+		MaxResponse:     int64(envx.Int("CHANGEGUARD_AGENT_MAX_RESPONSE_BYTES", 4<<20)),
+		RatePerMinute:   envx.Int("CHANGEGUARD_AGENT_RATE_PER_MINUTE", 12),
+		RateBurst:       envx.Int("CHANGEGUARD_AGENT_RATE_BURST", 4),
+		UpstreamTimeout: envx.Duration("CHANGEGUARD_AGENT_UPSTREAM_TIMEOUT", 120*time.Second),
+		ReadyTimeout:    envx.Duration("CHANGEGUARD_AGENT_READY_TIMEOUT", 2*time.Second),
+		SLOP95Target:    envx.Duration("CHANGEGUARD_AGENT_SLO_P95_TARGET", 30*time.Second),
 		SLOAvailability: envFloat("CHANGEGUARD_AGENT_SLO_AVAILABILITY_TARGET", 99.0),
-		SLOWindow:       envDuration("CHANGEGUARD_AGENT_SLO_WINDOW", 24*time.Hour),
+		SLOWindow:       envx.Duration("CHANGEGUARD_AGENT_SLO_WINDOW", 24*time.Hour),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -132,30 +133,6 @@ func envString(key, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func envInt(key string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func envDuration(key string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil || parsed <= 0 {
-		return fallback
-	}
-	return parsed
 }
 
 func envFloat(key string, fallback float64) float64 {

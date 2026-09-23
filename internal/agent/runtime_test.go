@@ -284,7 +284,7 @@ func TestAgentEvidenceReferencesMustExist(t *testing.T) {
 		Experiment: &model.ExperimentReport{Evidence: []model.Evidence{{ID: "ev_exp"}}},
 	}
 	ok := model.AgentAnalysis{EvidenceIDs: []string{"ev_rule", "ev_exp"}}
-	if err := validateEvidenceReferences(ok, change); err != nil {
+	if err := normalizeEvidenceReferences(&ok, change); err != nil {
 		t.Fatalf("valid evidence was rejected: %v", err)
 	}
 	// 幻觉 ID 会被过滤并回填可用证据，不应整体失败

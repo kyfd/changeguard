@@ -593,6 +593,12 @@ func (s *Store) UpdatePolicy(id string, update func(*model.RiskPolicy) error, au
 }
 
 func (s *Store) RecordPolicyHits(codes []string) error {
+	return s.recordPolicyHits(codes, func(model.RiskPolicy) bool { return true })
+}
+
+// recordPolicyHits increments hit counters of policies whose code is in codes
+// and which satisfy include, then persists the state.
+func (s *Store) recordPolicyHits(codes []string, include func(model.RiskPolicy) bool) error {
 	if len(codes) == 0 {
 		return nil
 	}
@@ -604,9 +610,10 @@ func (s *Store) RecordPolicyHits(codes []string) error {
 	}
 	now := time.Now()
 	for index := range s.data.Policies {
-		if unique[s.data.Policies[index].Code] {
-			s.data.Policies[index].HitCount++
-			s.data.Policies[index].LastHitAt = &now
+		policy := &s.data.Policies[index]
+		if unique[policy.Code] && include(*policy) {
+			policy.HitCount++
+			policy.LastHitAt = &now
 		}
 	}
 	return s.saveLocked()
@@ -814,7 +821,11 @@ func (s *Store) IntegrationEvents(organizationID string, limit int) []model.Inte
 }
 
 func (s *Store) Dashboard() model.Dashboard {
-	changes := s.Changes()
+	return buildDashboard(s.Changes())
+}
+
+// buildDashboard aggregates dashboard metrics from changes sorted newest first.
+func buildDashboard(changes []model.ChangeRequest) model.Dashboard {
 	dashboard := model.Dashboard{
 		RiskDistribution: map[model.RiskLevel]int{
 			model.RiskLow: 0, model.RiskMedium: 0, model.RiskHigh: 0, model.RiskUnknown: 0,
@@ -887,20 +898,34 @@ func (s *Store) appendAuditsLocked(events ...model.AuditEvent) {
 			event.CreatedAt = time.Now().UTC()
 		}
 		event = s.enrichAuditLocked(event)
-		var previous *model.AuditEvent
-		for index := len(s.data.Audits) - 1; index >= 0; index-- {
-			if s.data.Audits[index].OrganizationID == event.OrganizationID {
-				candidate := s.data.Audits[index]
-				previous = &candidate
-				break
-			}
-		}
-		linked, err := audit.Link(event, previous)
-		if err != nil {
+		if _, err := linkAuditInState(&s.data, event); err != nil {
 			panic("canonical audit payload cannot fail: " + err.Error())
 		}
-		s.data.Audits = append(s.data.Audits, linked)
 	}
+}
+
+// linkAuditInState assigns a missing ID/CreatedAt, links event to the latest
+// audit of the same organization in data, and appends it on success.
+func linkAuditInState(data *state, event model.AuditEvent) (model.AuditEvent, error) {
+	if event.ID == "" {
+		event.ID = NewID("audit_")
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	var previous *model.AuditEvent
+	for i := len(data.Audits) - 1; i >= 0; i-- {
+		if data.Audits[i].OrganizationID == event.OrganizationID {
+			candidate := data.Audits[i]
+			previous = &candidate
+			break
+		}
+	}
+	linked, err := audit.Link(event, previous)
+	if err == nil {
+		data.Audits = append(data.Audits, linked)
+	}
+	return linked, err
 }
 
 func (s *Store) VerifyAuditChain(organizationID string) error {

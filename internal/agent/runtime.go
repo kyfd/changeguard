@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kyfd/changeguard/internal/envx"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +73,8 @@ type Runtime struct {
 	dataSource    DataSource
 	maxRounds     int
 	mode          string // loop | oneshot
+	// totalTimeout 约束一次 Analyze 的全部模型往返；0 表示不额外限制（测试构造的 Runtime）。
+	totalTimeout time.Duration
 
 	circuitMu               sync.Mutex
 	circuitFailureThreshold int
@@ -127,36 +129,43 @@ type dailyUsage struct {
 }
 
 func NewFromEnvironment() *Runtime {
-	dailyLimit := envInt("DBGUARD_LLM_DAILY_ANALYSIS_LIMIT", 20)
-	mode := strings.ToLower(envOr("DBGUARD_AGENT_MODE", "loop"))
+	dailyLimit := envx.Int("DBGUARD_LLM_DAILY_ANALYSIS_LIMIT", 20)
+	mode := strings.ToLower(envx.String("DBGUARD_AGENT_MODE", "loop"))
 	if mode != "oneshot" {
 		mode = "loop"
 	}
 	timeout := 45 * time.Second
 	if mode == "loop" {
-		timeout = time.Duration(envInt("DBGUARD_AGENT_TOTAL_TIMEOUT_MS", 90000)) * time.Millisecond
+		timeout = time.Duration(envx.Int("DBGUARD_AGENT_TOTAL_TIMEOUT_MS", 90000)) * time.Millisecond
 		if timeout < 30*time.Second {
 			timeout = 90 * time.Second
 		}
 	}
+	// loop 模式多轮共享总时限：单次调用只占一半，避免一次慢调用耗尽整轮预算、让后续轮次与重试形同虚设。
+	// oneshot 只调用一次模型，单次超时即总时限。
+	callTimeout := timeout
+	if mode == "loop" {
+		callTimeout = max(timeout/2, 20*time.Second)
+	}
 	runtime := &Runtime{
 		baseURL:                 strings.TrimSpace(os.Getenv("DBGUARD_LLM_BASE_URL")),
 		apiKey:                  strings.TrimSpace(os.Getenv("DBGUARD_LLM_API_KEY")),
-		model:                   envOr("DBGUARD_LLM_MODEL", "deepseek-chat"),
-		maxTokens:               envInt("DBGUARD_LLM_MAX_TOKENS", 700),
-		maxRetries:              clampInt(envInt("DBGUARD_LLM_MAX_RETRIES", 1), 0, 3),
-		retryBackoff:            envDuration("DBGUARD_LLM_RETRY_BACKOFF", 200*time.Millisecond),
+		model:                   envx.String("DBGUARD_LLM_MODEL", "deepseek-chat"),
+		maxTokens:               envx.Int("DBGUARD_LLM_MAX_TOKENS", 700),
+		maxRetries:              clampInt(envx.Int("DBGUARD_LLM_MAX_RETRIES", 1), 0, 3),
+		retryBackoff:            envx.Duration("DBGUARD_LLM_RETRY_BACKOFF", 200*time.Millisecond),
 		dailyLimit:              dailyLimit,
-		orgLimit:                envInt("DBGUARD_LLM_DAILY_ORG_LIMIT", maxInt(dailyLimit*5, 50)),
-		globalLimit:             envInt("DBGUARD_LLM_DAILY_GLOBAL_LIMIT", maxInt(dailyLimit*10, 100)),
-		client:                  &http.Client{Timeout: timeout},
-		callSlots:               make(chan struct{}, maxInt(envInt("DBGUARD_LLM_MAX_CONCURRENCY", 4), 1)),
+		orgLimit:                envx.Int("DBGUARD_LLM_DAILY_ORG_LIMIT", maxInt(dailyLimit*5, 50)),
+		globalLimit:             envx.Int("DBGUARD_LLM_DAILY_GLOBAL_LIMIT", maxInt(dailyLimit*10, 100)),
+		client:                  &http.Client{Timeout: callTimeout},
+		totalTimeout:            timeout,
+		callSlots:               make(chan struct{}, maxInt(envx.Int("DBGUARD_LLM_MAX_CONCURRENCY", 4), 1)),
 		usage:                   make(map[string]dailyUsage),
 		registry:                DefaultToolRegistry(),
-		maxRounds:               maxInt(envInt("DBGUARD_AGENT_MAX_ROUNDS", 5), 1),
+		maxRounds:               maxInt(envx.Int("DBGUARD_AGENT_MAX_ROUNDS", 5), 1),
 		mode:                    mode,
-		circuitFailureThreshold: clampInt(envInt("DBGUARD_LLM_CIRCUIT_FAILURES", 3), 0, 20),
-		circuitCooldown:         envDuration("DBGUARD_LLM_CIRCUIT_COOLDOWN", time.Minute),
+		circuitFailureThreshold: clampInt(envx.Int("DBGUARD_LLM_CIRCUIT_FAILURES", 3), 0, 20),
+		circuitCooldown:         envx.Duration("DBGUARD_LLM_CIRCUIT_COOLDOWN", time.Minute),
 	}
 	limitMode := strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_LLM_LIMIT_MODE")))
 	if limitMode == "" && strings.EqualFold(strings.TrimSpace(os.Getenv("DBGUARD_SESSION_MODE")), "redis") {
@@ -211,6 +220,13 @@ func (r *Runtime) Analyze(ctx context.Context, change model.ChangeRequest) model
 	}
 	if !r.reserveContext(ctx, change.OrganizationID, change.SubmitterID) {
 		return fallbackResult("已达到当前提交人的每日智能分析次数限制，未调用付费模型")
+	}
+	// 整轮 Agent（多轮模型调用 + 工具）共享一个总时限；单次 HTTP 超时只约束一次调用，
+	// 不足以阻止 submit 请求被多轮调用拖到超过 HTTP WriteTimeout（线上表现为 502）。
+	if r.totalTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.totalTimeout)
+		defer cancel()
 	}
 	result, err := r.analyzeWithTools(ctx, change, cfg)
 	if err != nil {
@@ -351,6 +367,8 @@ func (r *Runtime) analyzeAgentLoop(ctx context.Context, change model.ChangeReque
 			extraEvidence[f.ID] = true
 		}
 	}
+	// 工具返回过的背景引用（pol_ 策略、chg_ 历史变更）；不能充当证据，但也不算伪造。
+	contextRefs := map[string]bool{}
 
 	for round := 1; round <= maxRounds; round++ {
 		if err := ctx.Err(); err != nil {
@@ -373,13 +391,9 @@ func (r *Runtime) analyzeAgentLoop(ctx context.Context, change model.ChangeReque
 			if err != nil {
 				return model.AgentAnalysis{}, err
 			}
-			// 合并 scan_sql 等额外证据 id
-			for id := range extraEvidence {
-				if !containsString(analysis.EvidenceIDs, id) {
-					// only keep if already in allowed set via normalize
-					_ = id
-				}
-			}
+			// 策略 id / 历史变更单号是工具真实返回的背景引用，不是可追溯证据：
+			// 从 evidenceIds 中剔除后再严格校验，凭空编造的编号仍然 fail closed。
+			analysis.EvidenceIDs = dropContextReferences(analysis.EvidenceIDs, contextRefs)
 			if err := validateEvidenceReferencesStrict(&analysis, change, extraEvidence); err != nil {
 				return model.AgentAnalysis{}, err
 			}
@@ -470,6 +484,7 @@ func (r *Runtime) analyzeAgentLoop(ctx context.Context, change model.ChangeReque
 							}
 						}
 					}
+					collectContextReferences(m, contextRefs)
 				}
 			}
 			callLog = append(callLog, rec)
@@ -593,6 +608,11 @@ func (r *Runtime) completeOnce(ctx context.Context, messages []map[string]any, t
 		"temperature": 0.1, "max_tokens": maxTokens,
 		"response_format": map[string]any{"type": "json_object"},
 	}
+	// 推理模型（GLM/DeepSeek 等 OpenAI 兼容端点）默认先长链思考，单轮 15s+，多轮 Agent 会整体超时。
+	// 结构化证据归纳不需要长推理；通过环境变量显式开启，不兼容的上游保持默认不发送。
+	if effort := strings.TrimSpace(os.Getenv("DBGUARD_LLM_REASONING_EFFORT")); effort != "" {
+		payload["reasoning_effort"] = effort
+	}
 	if len(tools) > 0 {
 		payload["tools"] = tools
 		payload["tool_choice"] = "auto"
@@ -673,10 +693,9 @@ func anyToInt(v any) int {
 	}
 }
 
-// buildEvidencePack 本地执行只读工具并压缩字段，减少 prompt tokens。
+// buildEvidencePack 本地组装只读证据并压缩字段，减少 prompt tokens。
+// 返回的工具数与 oneshot 模式等价的三个基础工具一致（规则命中、演练报告、变更上下文）。
 func buildEvidencePack(change model.ChangeRequest) (map[string]any, int) {
-	findingsRaw, _ := runTool("get_rule_findings", change)
-	experimentRaw, _ := runTool("get_experiment_report", change)
 	contextRaw, _ := runTool("get_change_context", change)
 
 	compactFindings := make([]map[string]any, 0, len(change.Findings))
@@ -707,22 +726,11 @@ func buildEvidencePack(change model.ChangeRequest) (map[string]any, int) {
 	if ctxMap != nil {
 		delete(ctxMap, "planned_at") // 动态时间戳会打断前缀；时间信息非必须
 	}
-	_ = findingsRaw
-	_ = experimentRaw
 	return map[string]any{
 		"rule_findings":     map[string]any{"risk": change.Risk, "findings": compactFindings},
 		"experiment_report": exp,
 		"change_context":    ctxMap,
 	}, 3
-}
-
-func toolDefinitions() []map[string]any {
-	emptySchema := map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
-	return []map[string]any{
-		{"type": "function", "function": map[string]any{"name": "get_rule_findings", "description": "读取代码、配置、Kubernetes、API 与 SQL 的确定性规则命中项", "parameters": emptySchema}},
-		{"type": "function", "function": map[string]any{"name": "get_experiment_report", "description": "读取预发布验证、数据库演练、发布策略和回滚证据", "parameters": emptySchema}},
-		{"type": "function", "function": map[string]any{"name": "get_change_context", "description": "读取服务资产、代码版本、变更制品和发布计划，不返回生产凭据", "parameters": emptySchema}},
-	}
 }
 
 func runTool(name string, change model.ChangeRequest) (any, error) {
@@ -791,20 +799,13 @@ func syncAdvisoryRisk(analysis *model.AgentAnalysis) {
 	analysis.Risk = analysis.AdvisoryRisk
 }
 
-func validateEvidenceReferences(analysis model.AgentAnalysis, change model.ChangeRequest) error {
-	return normalizeEvidenceReferences(&analysis, change)
-}
-
 // normalizeEvidenceReferences 过滤幻觉 ID；若模型漏引证据，则回填全部可用证据编号。
+// 仅 oneshot 模式使用：证据包在本地组装，模型漏引时回填是有意的恢复行为；loop 模式走 validateEvidenceReferencesStrict。
 func normalizeEvidenceReferences(analysis *model.AgentAnalysis, change model.ChangeRequest) error {
-	return normalizeEvidenceReferencesExt(analysis, change, nil)
-}
-
-func normalizeEvidenceReferencesExt(analysis *model.AgentAnalysis, change model.ChangeRequest, extra map[string]bool) error {
 	if analysis == nil {
 		return errors.New("分析结论为空")
 	}
-	allowed, ordered := allowedEvidenceReferences(change, extra)
+	allowed, ordered := allowedEvidenceReferences(change, nil)
 	filtered := make([]string, 0, len(analysis.EvidenceIDs))
 	seen := map[string]bool{}
 	for _, evidenceID := range analysis.EvidenceIDs {
@@ -1218,33 +1219,41 @@ func clampInt(value, minimum, maximum int) int {
 	return value
 }
 
-func envInt(key string, fallbackValue int) int {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallbackValue
+// collectContextReferences 记录 query_policies（hits[].id）与 search_historical_changes
+// （items[].id）真实返回过的背景 id。它们用于解释，不属于可追溯证据。
+func collectContextReferences(output map[string]any, refs map[string]bool) {
+	for _, key := range []string{"hits", "items"} {
+		switch list := output[key].(type) {
+		case []map[string]any:
+			for _, item := range list {
+				if id, _ := item["id"].(string); id != "" {
+					refs[id] = true
+				}
+			}
+		case []any:
+			for _, raw := range list {
+				if item, ok := raw.(map[string]any); ok {
+					if id, _ := item["id"].(string); id != "" {
+						refs[id] = true
+					}
+				}
+			}
+		}
 	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return fallbackValue
-	}
-	return parsed
 }
 
-func envOr(key, fallbackValue string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
+// dropContextReferences 从 evidenceIds 中剔除工具真实返回过的背景引用；
+// 未出现在任何工具输出中的编号原样保留，交给严格校验按伪造处理。
+func dropContextReferences(ids []string, refs map[string]bool) []string {
+	if len(refs) == 0 {
+		return ids
 	}
-	return fallbackValue
-}
-
-func envDuration(key string, fallbackValue time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallbackValue
+	kept := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if refs[strings.TrimSpace(id)] {
+			continue
+		}
+		kept = append(kept, id)
 	}
-	parsed, err := time.ParseDuration(value)
-	if err != nil || parsed <= 0 {
-		return fallbackValue
-	}
-	return parsed
+	return kept
 }

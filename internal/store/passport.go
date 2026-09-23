@@ -200,8 +200,13 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 			audit.Detail += "；变更状态已原子更新为 COMPLETED"
 			s.appendAuditsLocked(audit)
 			if err := s.saveLocked(); err != nil {
-				s.data.Passports[index] = oldItem
-				s.data.Changes[changeIndex] = oldChange
+				// saveLocked 失败时可能已从持久层重载 s.data；只在下标仍有效且指向同一对象时回写快照，避免越界 panic。
+				if index < len(s.data.Passports) && s.data.Passports[index].ID == oldItem.ID {
+					s.data.Passports[index] = oldItem
+				}
+				if changeIndex < len(s.data.Changes) && s.data.Changes[changeIndex].ID == oldChange.ID {
+					s.data.Changes[changeIndex] = oldChange
+				}
 				s.data.Audits = oldAudits
 				return model.Passport{}, err
 			}

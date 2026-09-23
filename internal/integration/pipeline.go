@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kyfd/changeguard/internal/envx"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,11 +49,11 @@ func FromEnvironment() Config {
 	return Config{
 		GitLabSigningToken:     strings.TrimSpace(os.Getenv("DBGUARD_GITLAB_SIGNING_TOKEN")),
 		GitLabSecretToken:      strings.TrimSpace(os.Getenv("DBGUARD_GITLAB_WEBHOOK_SECRET")),
-		GitLabOrganization:     envOr("DBGUARD_GITLAB_ORGANIZATION_ID", "org_demo"),
+		GitLabOrganization:     envx.String("DBGUARD_GITLAB_ORGANIZATION_ID", "org_demo"),
 		JenkinsToken:           strings.TrimSpace(os.Getenv("DBGUARD_JENKINS_WEBHOOK_TOKEN")),
-		JenkinsOrganization:    envOr("DBGUARD_JENKINS_ORGANIZATION_ID", "org_demo"),
+		JenkinsOrganization:    envx.String("DBGUARD_JENKINS_ORGANIZATION_ID", "org_demo"),
 		OperationsToken:        strings.TrimSpace(os.Getenv("DBGUARD_OPERATIONS_WEBHOOK_TOKEN")),
-		OperationsOrganization: envOr("DBGUARD_OPERATIONS_ORGANIZATION_ID", "org_demo"),
+		OperationsOrganization: envx.String("DBGUARD_OPERATIONS_ORGANIZATION_ID", "org_demo"),
 		MaxWebhookAge:          maxAge,
 	}
 }
@@ -287,11 +288,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func envOr(key, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
-	}
-	return fallback
 }

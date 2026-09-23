@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kyfd/changeguard/internal/envx"
 	"io"
 	"log"
 	"math/big"
@@ -129,7 +130,7 @@ func FromEnvironment() Config {
 		// fall back to local session authentication instead of trusting headers.
 		mode = "local"
 	}
-	redirectURL := envOr("DBGUARD_OIDC_REDIRECT_URL", "http://localhost:8080/auth/callback")
+	redirectURL := envx.String("DBGUARD_OIDC_REDIRECT_URL", "http://localhost:8080/auth/callback")
 	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("DBGUARD_PUBLIC_URL")), "/")
 	secureCookie := strings.HasPrefix(strings.ToLower(redirectURL), "https://") ||
 		strings.HasPrefix(strings.ToLower(publicURL), "https://")
@@ -145,13 +146,13 @@ func FromEnvironment() Config {
 		ClientSecret:         strings.TrimSpace(os.Getenv("DBGUARD_OIDC_CLIENT_SECRET")),
 		RedirectURL:          redirectURL,
 		PublicURL:            publicURL,
-		Scopes:               splitValues(envOr("DBGUARD_OIDC_SCOPES", "openid profile email groups")),
-		RoleClaim:            envOr("DBGUARD_OIDC_ROLE_CLAIM", "groups"),
+		Scopes:               splitValues(envx.String("DBGUARD_OIDC_SCOPES", "openid profile email groups")),
+		RoleClaim:            envx.String("DBGUARD_OIDC_ROLE_CLAIM", "groups"),
 		OwnerValues:          splitValues(os.Getenv("DBGUARD_OIDC_OWNER_VALUES")),
 		ReviewerValues:       splitValues(os.Getenv("DBGUARD_OIDC_REVIEWER_VALUES")),
 		AllowedValues:        splitValues(os.Getenv("DBGUARD_OIDC_ALLOWED_VALUES")),
 		AllowedDomains:       splitValues(os.Getenv("DBGUARD_OIDC_ALLOWED_DOMAINS")),
-		TokenAuthMethod:      envOr("DBGUARD_OIDC_TOKEN_AUTH_METHOD", "client_secret_post"),
+		TokenAuthMethod:      envx.String("DBGUARD_OIDC_TOKEN_AUTH_METHOD", "client_secret_post"),
 		SessionTTL:           durationOr("DBGUARD_AUTH_SESSION_TTL", 12*time.Hour),
 		HTTPTimeout:          durationOr("DBGUARD_OIDC_HTTP_TIMEOUT", 8*time.Second),
 		SecureCookie:         secureCookie,
@@ -897,13 +898,6 @@ func durationOr(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return duration
-}
-
-func envOr(key, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
-	}
-	return fallback
 }
 
 func boolOr(key string, fallback bool) bool {

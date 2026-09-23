@@ -192,66 +192,11 @@ func (s *Store) PolicyByCodeForOrganization(organizationID, code string) (model.
 }
 
 func (s *Store) RecordPolicyHitsForOrganization(organizationID string, codes []string) error {
-	if len(codes) == 0 {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	unique := make(map[string]bool, len(codes))
-	for _, code := range codes {
-		unique[code] = true
-	}
-	now := time.Now()
-	for index := range s.data.Policies {
-		policy := &s.data.Policies[index]
-		if policy.OrganizationID == organizationID && unique[policy.Code] {
-			policy.HitCount++
-			policy.LastHitAt = &now
-		}
-	}
-	return s.saveLocked()
+	return s.recordPolicyHits(codes, func(policy model.RiskPolicy) bool { return policy.OrganizationID == organizationID })
 }
 
 func (s *Store) DashboardByOrganization(organizationID string) model.Dashboard {
-	changes := s.ChangesByOrganization(organizationID)
-	dashboard := model.Dashboard{
-		RiskDistribution: map[model.RiskLevel]int{
-			model.RiskLow: 0, model.RiskMedium: 0, model.RiskHigh: 0, model.RiskUnknown: 0,
-		},
-	}
-	var experimentCount, experimentPass int
-	var durationTotal int64
-	for _, item := range changes {
-		dashboard.RiskDistribution[item.Risk]++
-		if item.Risk == model.RiskHigh {
-			dashboard.HighRiskCount++
-		}
-		switch item.Status {
-		case model.StatusDraft, model.StatusChecking, model.StatusReadyForExperiment,
-			model.StatusExperimentQueued, model.StatusExperimentRunning, model.StatusWaitingApproval:
-			dashboard.PendingCount++
-		}
-		if item.Status == model.StatusWaitingApproval {
-			dashboard.PendingApprovals = append(dashboard.PendingApprovals, item)
-		}
-		if item.Experiment != nil {
-			experimentCount++
-			durationTotal += item.Experiment.DurationMS
-			if item.Experiment.Status == "PASSED" {
-				experimentPass++
-			}
-		}
-	}
-	if len(changes) > 6 {
-		dashboard.RecentChanges = changes[:6]
-	} else {
-		dashboard.RecentChanges = changes
-	}
-	if experimentCount > 0 {
-		dashboard.ExperimentPassRate = float64(experimentPass) / float64(experimentCount) * 100
-		dashboard.AverageExperimentSec = float64(durationTotal) / float64(experimentCount) / 1000
-	}
-	return dashboard
+	return buildDashboard(s.ChangesByOrganization(organizationID))
 }
 
 func (s *Store) UserByEmail(email string) (model.User, error) {

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/kyfd/changeguard/internal/audit"
 	"github.com/kyfd/changeguard/internal/changegate"
 	"github.com/kyfd/changeguard/internal/model"
 )
@@ -187,10 +186,9 @@ func (b *postgresBackend) migrateNormalized(ctx context.Context) error {
 	if _, err = tx.Exec(ctx, postgresNormalizedExpirePassports); err != nil {
 		return err
 	}
+	// The backfill applies the same expiry rule while copying passports, and
+	// now() is fixed for the whole transaction, so one expiry pass suffices.
 	if _, err = tx.Exec(ctx, postgresNormalizedBackfill); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, postgresNormalizedExpirePassports); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, postgresNormalizedPassportIndexMigration); err != nil {
@@ -561,25 +559,10 @@ func (b *postgresBackend) appendAudit(ctx context.Context, event model.AuditEven
 	if err != nil {
 		return model.AuditEvent{}, nil, 0, err
 	}
-	if event.ID == "" {
-		event.ID = NewID("audit_")
-	}
-	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now().UTC()
-	}
-	var previous *model.AuditEvent
-	for i := len(data.Audits) - 1; i >= 0; i-- {
-		if data.Audits[i].OrganizationID == event.OrganizationID {
-			candidate := data.Audits[i]
-			previous = &candidate
-			break
-		}
-	}
-	linked, err := audit.Link(event, previous)
+	linked, err := linkAuditInState(&data, event)
 	if err != nil {
 		return model.AuditEvent{}, nil, 0, err
 	}
-	data.Audits = append(data.Audits, linked)
 	if err = insertAuditRow(ctx, tx, linked); err != nil {
 		return model.AuditEvent{}, nil, 0, err
 	}
@@ -732,27 +715,6 @@ func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, cons
 	return publicPassport(*item, false), payload, newVersion, nil
 }
 
-func linkAuditInState(data *state, event model.AuditEvent) (model.AuditEvent, error) {
-	if event.ID == "" {
-		event.ID = NewID("audit_")
-	}
-	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now().UTC()
-	}
-	var previous *model.AuditEvent
-	for i := len(data.Audits) - 1; i >= 0; i-- {
-		if data.Audits[i].OrganizationID == event.OrganizationID {
-			candidate := data.Audits[i]
-			previous = &candidate
-			break
-		}
-	}
-	linked, err := audit.Link(event, previous)
-	if err == nil {
-		data.Audits = append(data.Audits, linked)
-	}
-	return linked, err
-}
 func insertAuditRow(ctx context.Context, tx pgx.Tx, event model.AuditEvent) error {
 	encoded, err := json.Marshal(event)
 	if err != nil {
