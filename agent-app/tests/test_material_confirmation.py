@@ -62,7 +62,7 @@ def prepared(settings: Settings) -> tuple[AgentService, str]:
 def test_confirm_records_who_when_and_which_material(settings: Settings) -> None:
     service, task_id = prepared(settings)
 
-    confirmed = run(service.confirm(task_id, CONTEXT, ConfirmRequest(note="已核对 SQL 与回滚")))
+    confirmed = run(service.confirm(task_id, CONTEXT, ConfirmRequest(note="已核对 SQL 与回滚", material_hash=run(service.get_task(task_id, CONTEXT)).material_hash)))
 
     assert len(confirmed.confirmations) == 1
     record = confirmed.confirmations[0]
@@ -79,8 +79,8 @@ def test_confirm_is_idempotent_for_the_same_material(settings: Settings) -> None
     """同一人 + 同一版本 + 同一内容重复确认：不新增记录、不重复写事件。"""
     service, task_id = prepared(settings)
 
-    first = run(service.confirm(task_id, CONTEXT))
-    second = run(service.confirm(task_id, CONTEXT))
+    first = run(service.confirm(task_id, CONTEXT, ConfirmRequest(material_hash=run(service.get_task(task_id, CONTEXT)).material_hash)))
+    second = run(service.confirm(task_id, CONTEXT, ConfirmRequest(material_hash=run(service.get_task(task_id, CONTEXT)).material_hash)))
 
     assert len(first.confirmations) == 1
     assert len(second.confirmations) == 1, "重复确认不得新增记录"
@@ -92,7 +92,7 @@ def test_confirm_does_not_approve_or_grant_execution(settings: Settings) -> None
     """确认不是审批、也不是执行许可：状态不变，也没有放行语义。"""
     service, task_id = prepared(settings)
 
-    confirmed = run(service.confirm(task_id, CONTEXT))
+    confirmed = run(service.confirm(task_id, CONTEXT, ConfirmRequest(material_hash=run(service.get_task(task_id, CONTEXT)).material_hash)))
 
     assert confirmed.status is TaskStatus.DRAFT_READY, "材料确认不得改变任务状态"
     detail = " ".join(item.detail for item in confirmed.events if item.kind == "confirmed")
@@ -128,7 +128,7 @@ def test_confirm_requires_the_creator(settings: Settings) -> None:
 
 def test_a_changed_draft_invalidates_the_previous_confirmation(settings: Settings) -> None:
     service, task_id = prepared(settings)
-    first = run(service.confirm(task_id, CONTEXT))
+    first = run(service.confirm(task_id, CONTEXT, ConfirmRequest(material_hash=run(service.get_task(task_id, CONTEXT)).material_hash)))
     assert len(first.confirmations) == 1
 
     # 模拟"重新生成了一份内容不同的草案"。
@@ -136,7 +136,7 @@ def test_a_changed_draft_invalidates_the_previous_confirmation(settings: Setting
     record["draft"]["sql"] = record["draft"]["sql"] + "\n-- 重新生成"
     service._repository.save(record)
 
-    second = run(service.confirm(task_id, CONTEXT, ConfirmRequest(note="看过修订版")))
+    second = run(service.confirm(task_id, CONTEXT, ConfirmRequest(note="看过修订版", material_hash=run(service.get_task(task_id, CONTEXT)).material_hash)))
 
     invalidated = [item for item in second.confirmations if not item.active]
     active = [item for item in second.confirmations if item.active]
@@ -192,7 +192,7 @@ def test_changing_input_invalidates_the_previous_confirmation(settings: Settings
     created, _ = run(service.create_task(complete_request(), CONTEXT))
     assert created.status is TaskStatus.CHECK_BLOCKED, created.error
 
-    confirmed = run(service.confirm(created.task_id, CONTEXT))
+    confirmed = run(service.confirm(created.task_id, CONTEXT, ConfirmRequest(material_hash=created.material_hash)))
     assert len(confirmed.confirmations) == 1 and confirmed.confirmations[0].active
 
     # 补充信息改变了槽位 → 输入版本变化 → 旧确认不再适用。

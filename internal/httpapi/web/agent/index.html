@@ -46,6 +46,10 @@
         <span class="col-hint">提需求 · 补信息 · 进度</span>
       </header>
       <div class="col-body" id="chatBody">
+        <section class="card" aria-label="历史任务">
+          <label class="field"><span>我的历史任务</span><select id="taskHistory"><option value="">选择任务…</option></select></label>
+          <button type="button" class="button button-small" id="refreshTasks">刷新任务列表</button>
+        </section>
         <form class="card" id="createForm">
           <label class="field">
             <span>需求</span>

@@ -96,7 +96,9 @@ services:
       # 变更准备 Agent（内部后端）。不配置也能运行：/api/agent/* 会显式返回 503，
       # 治理、审批与发布门禁完全不受影响。
       CHANGEGUARD_AGENT_BASE_URL: ${CHANGEGUARD_AGENT_BASE_URL:-http://agent-app:8091}
-      # 与 agent-app 的 AGENT_UPSTREAM_TOKEN 必须一致；留空表示不校验（仅限内网部署）。
+      # 与 agent-app 的 AGENT_UPSTREAM_TOKEN 必须一致。留空即失败关闭：
+      # agent-app 开启了头身份，缺密钥时全部 /api/agent/* 返回 503（内网也不例外），
+      # 但核心治理服务照常启动与放行，这属于可接受的独立启动状态。
       CHANGEGUARD_AGENT_UPSTREAM_TOKEN: ${CHANGEGUARD_AGENT_UPSTREAM_TOKEN:-}
     depends_on:
       primary-postgres:
@@ -122,7 +124,9 @@ services:
     environment:
       # 身份由 dbguard 在服务端解析会话后注入；本服务只应被 dbguard 调用。
       AGENT_ALLOW_HEADER_IDENTITY: "1"
+      # 缺密钥时 Agent 路由返回 503；不阻断核心治理服务启动。
       AGENT_UPSTREAM_TOKEN: ${CHANGEGUARD_AGENT_UPSTREAM_TOKEN:-}
+      AGENT_GOVERNANCE_BASE_URL: http://dbguard:8080
       AGENT_EXECUTION_MODE: background
       AGENT_MAX_REVISIONS: ${CHANGEGUARD_AGENT_MAX_REVISIONS:-2}
       AGENT_TASK_TIMEOUT: ${CHANGEGUARD_AGENT_TASK_TIMEOUT:-120}

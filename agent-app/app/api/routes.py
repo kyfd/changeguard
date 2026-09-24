@@ -16,6 +16,7 @@ from __future__ import annotations
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from app.schemas.drafts import ClarifyRequest, ConfirmRequest, CreateTaskRequest, TaskView
 from app.service import (
@@ -29,11 +30,32 @@ from app.service import (
 from app.tools.registry import TrustedContext
 from app.usage import QuotaExceeded
 
+#: 机器可读错误码：与治理服务 `writeError` 的响应形状（`error`/`code`/`message`）保持一致，
+#: 工作台 `app.js` 靠它区分"功能未启用"（不可重试）与"应用层 503"（可重试）。
+SERVICE_UNAVAILABLE_CODE = "SERVICE_UNAVAILABLE"
+
+
+class AgentNotConfigured(HTTPException):
+    """头身份模式缺少上游密钥：功能**未启用**，不是可重试的瞬时故障。
+
+    刻意用独立异常类：只有这一种 503 会带上 `SERVICE_UNAVAILABLE` 错误码。
+    应用层的 503（例如状态没能落盘、取消尚未生效）**故意不带**该码，
+    否则前端会把一次存储抖动显示成"功能未启用"并禁用整个面板。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="头身份模式必须配置 AGENT_UPSTREAM_TOKEN",
+        )
+
 
 def verify_upstream(request: Request) -> None:
-    """校验上游共享密钥。未配置时不启用该检查（仅适用于本机开发）。"""
+    """头身份模式必须有上游共享密钥；缺失时失败关闭（含本地开发）。"""
     expected = request.app.state.settings.upstream_token
     if not expected:
+        if request.app.state.settings.allow_header_identity:
+            raise AgentNotConfigured()
         return
     provided = (request.headers.get("X-Agent-Upstream-Token") or "").strip()
     if not provided or not secrets.compare_digest(provided, expected):
@@ -41,6 +63,24 @@ def verify_upstream(request: Request) -> None:
 
 
 router = APIRouter(prefix="/api/agent", tags=["agent"], dependencies=[Depends(verify_upstream)])
+
+
+async def agent_not_configured_handler(_request: Request, error: AgentNotConfigured) -> JSONResponse:
+    """给"未启用"这一种 503 补上治理服务约定形状的机器可读错误码。
+
+    治理服务原样透传下游响应体，工作台靠 `code === "SERVICE_UNAVAILABLE"` 判定
+    "功能未启用"（app.js）。只有 `detail` 时它会显示"可稍后重试"，
+    把配置缺失误诊成瞬时故障，用户会一直重试而不去配密钥。
+
+    响应同时保留 `detail`，不破坏既有依赖该字段的调用方。
+    """
+    message = error.detail if isinstance(error.detail, str) else str(error.detail)
+    return JSONResponse(
+        status_code=error.status_code,
+        content={"error": message, "code": SERVICE_UNAVAILABLE_CODE, "message": message, "detail": message},
+        headers=error.headers,
+    )
+
 
 IDENTITY_HINT = (
     "未配置身份来源：默认拒绝。"
@@ -124,8 +164,9 @@ async def get_task(task_id: str, request: Request) -> TaskView:
 async def clarify(task_id: str, payload: ClarifyRequest, request: Request) -> TaskView:
     context = await resolve_context(request)
     # clarify 会恢复工作流并再次调用模型，所以与 create 共用同一套用量闸门。
-    _enforce_usage(request, context)
     try:
+        await _service(request).get_task(task_id, context)
+        _enforce_usage(request, context)
         return await _service(request).clarify(task_id, payload, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
@@ -160,6 +201,8 @@ async def resume(task_id: str, request: Request, payload: ClarifyRequest | None 
     """
     context = await resolve_context(request)
     try:
+        await _service(request).get_task(task_id, context)
+        _enforce_usage(request, context)
         return await _service(request).resume(task_id, context, payload)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error

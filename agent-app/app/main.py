@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.routes import router
+from app.api.routes import AgentNotConfigured, agent_not_configured_handler, router
 from app.config import Settings
 from app.service import AgentService
 from app.usage import UsageLimits, UsageLimiter
@@ -107,6 +107,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
     )
     application.include_router(router)
+
+    @application.exception_handler(AgentNotConfigured)
+    async def _agent_not_configured(request: Request, error: AgentNotConfigured) -> JSONResponse:
+        """"未启用"的 503 需要机器可读错误码；其它异常走 FastAPI 默认处理。"""
+        return await agent_not_configured_handler(request, error)
 
     @application.exception_handler(RequestValidationError)
     async def _validation_error(_request: Request, error: RequestValidationError) -> JSONResponse:

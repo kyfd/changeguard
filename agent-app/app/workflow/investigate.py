@@ -596,7 +596,8 @@ class BoundedInvestigation:
             )
             if not result.ok:
                 notes.append(f"{action.tool} 失败：{result.error}")
-                continue
+                report.stop_reason = StopReason.TOOL_FAILED.value
+                break
             fresh = evidence_from_tool_result(result)
             if fresh:
                 evidence.extend(fresh)

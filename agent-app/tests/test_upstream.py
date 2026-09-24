@@ -66,10 +66,36 @@ def test_correct_upstream_token_is_accepted(tmp_path: Path) -> None:
     assert health.json()["status"] == "ok"
 
 
-def test_token_check_is_off_when_not_configured(tmp_path: Path) -> None:
-    """本机开发不配密钥时不启用该检查——这是显式选择，不是遗漏。"""
+def test_header_identity_without_secret_fails_closed(tmp_path: Path) -> None:
     client = build_client(tmp_path, upstream_token="")
-    assert client.get("/api/agent/healthz").status_code == 200
+    assert client.get("/api/agent/healthz").status_code == 503
+    assert client.get("/api/agent/tasks", headers={"X-Actor-Id": "alice", "X-Org-Id": "org_demo"}).status_code == 503
+
+
+def test_missing_secret_503_carries_machine_readable_code(tmp_path: Path) -> None:
+    """工作台靠 `code` 区分"功能未启用"与"可重试的 503"。
+
+    治理服务原样透传响应体，所以机器可读标识必须在**响应体**里；
+    缺了它，前端会把"没配密钥"显示成"稍后重试"，用户会一直重试。
+    """
+    client = build_client(tmp_path, upstream_token="")
+
+    for method, path in (("GET", "/api/agent/healthz"), ("GET", "/api/agent/tasks")):
+        response = client.request(method, path, headers=IDENTITY_HEADERS)
+        assert response.status_code == 503
+        payload = response.json()
+        assert payload["code"] == "SERVICE_UNAVAILABLE", f"{method} {path} 的 503 必须带可识别错误码"
+        # 兼容既有调用方：detail 仍然在。
+        assert "AGENT_UPSTREAM_TOKEN" in payload["detail"]
+
+
+def test_other_error_statuses_keep_the_fastapi_default_body(tmp_path: Path) -> None:
+    """只有 503 需要补 code；401 沿用默认体，避免顺手改掉既有契约。"""
+    client = build_client(tmp_path, upstream_token=UPSTREAM_HEADERS["X-Agent-Upstream-Token"])
+
+    response = client.get("/api/agent/tasks", headers=IDENTITY_HEADERS)
+    assert response.status_code == 401
+    assert "code" not in response.json()
 
 
 def test_identity_is_still_required_even_with_upstream_token(tmp_path: Path) -> None:
