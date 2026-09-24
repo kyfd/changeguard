@@ -12,14 +12,13 @@ import re
 from datetime import datetime, timezone
 
 from app.schemas.drafts import CheckItem, DeterministicCheck
+from app.tools.sqllex import has_opaque_procedural_body, tokens, unconditional_dml
 
 _DDL = re.compile(r"(?is)\b(create|alter|drop|truncate|reindex|cluster|vacuum)\b")
 _CREATE_INDEX = re.compile(r"(?is)\bcreate\s+(unique\s+)?index\s+(concurrently\s+)?", re.IGNORECASE)
 _DROP_INDEX = re.compile(r"(?is)\bdrop\s+index\s+(concurrently\s+)?", re.IGNORECASE)
-_TRANSACTION = re.compile(r"(?is)^\s*(begin|start\s+transaction)\b", re.MULTILINE)
+_TRANSACTION = re.compile(r"(?is)(?:^|;)\s*(begin|start\s+transaction)\b")
 _LOCK_TIMEOUT = re.compile(r"(?is)\block_timeout\b")
-_UPDATE_WITHOUT_WHERE = re.compile(r"(?is)\bupdate\s+[A-Za-z_][\w.]*\s+set\b(?![^;]*\bwhere\b)")
-_DELETE_WITHOUT_WHERE = re.compile(r"(?is)\bdelete\s+from\s+[A-Za-z_][\w.]*\s*(?:;|$)(?![^;]*\bwhere\b)")
 _DROP_TABLE = re.compile(r"(?is)\bdrop\s+table\b")
 _TRUNCATE = re.compile(r"(?is)\btruncate\b")
 
@@ -34,6 +33,33 @@ def scan_sql(sql: str, rollback_sql: str = "", schema_snapshot: str = "") -> Det
     items: list[CheckItem] = []
     text = sql or ""
     rollback = rollback_sql or ""
+    try:
+        parts = tokens(text)
+        text = ' '.join(parts)
+        rollback = ' '.join(tokens(rollback))
+    except ValueError:
+        return DeterministicCheck(
+            status="FAILED", source="local_scan", checked_at=datetime.now(timezone.utc),
+            items=[CheckItem(code="SQL_LEXICAL_ERROR", severity="HIGH", blocking=True,
+                             title="SQL 词法边界无法解析", suggestion="修复未闭合引号、注释或括号后重新检查。")],
+            blocking_count=1,
+        )
+
+    # 失败关闭：DO / CREATE FUNCTION / CREATE PROCEDURE / BEGIN ATOMIC 的过程体
+    # 对词法扫描不透明（dollar-quoted 内容只是一个 literal_value）。旧版正则能拦住的
+    # `DO $$ ... UPDATE ... $$;` 在换成词法分析后会被漏检，因此这里要求人工复核，
+    # 而不是宣称一个看不见的过程体已经通过检查。
+    if has_opaque_procedural_body(parts):
+        items.append(
+            CheckItem(
+                code="PROCEDURAL_BODY_REQUIRES_REVIEW",
+                severity="HIGH",
+                blocking=True,
+                title="过程体对静态扫描不透明",
+                suggestion="DO / CREATE FUNCTION / CREATE PROCEDURE / BEGIN ATOMIC 的过程体不参与静态扫描，"
+                "无法确认其中是否含无条件 UPDATE/DELETE；请人工复核过程体内的全部 DML 后再放行。",
+            )
+        )
 
     if not text.strip():
         items.append(
@@ -118,7 +144,7 @@ def scan_sql(sql: str, rollback_sql: str = "", schema_snapshot: str = "") -> Det
             )
         )
 
-    if _UPDATE_WITHOUT_WHERE.search(text):
+    if unconditional_dml(parts, 'update'):
         items.append(
             CheckItem(
                 code="UPDATE_WITHOUT_WHERE",
@@ -129,7 +155,7 @@ def scan_sql(sql: str, rollback_sql: str = "", schema_snapshot: str = "") -> Det
             )
         )
 
-    if _DELETE_WITHOUT_WHERE.search(text):
+    if unconditional_dml(parts, 'delete'):
         items.append(
             CheckItem(
                 code="DELETE_WITHOUT_WHERE",

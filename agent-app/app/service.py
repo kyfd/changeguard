@@ -387,7 +387,7 @@ class AgentService:
 
         # 所见即所确认：调用方声明的材料哈希必须与当前材料一致，否则要求刷新。
         claimed = (request.material_hash if request else None) or ""
-        if claimed.strip() and claimed.strip() != digest:
+        if not claimed.strip() or claimed.strip() != digest:
             raise TaskNotConfirmable("材料已更新，当前页面看到的内容不是最新版本；请刷新后重新确认")
 
         # 幂等：同一人 + 同一版本 + 同一内容已经确认过，就直接返回，不新增记录。

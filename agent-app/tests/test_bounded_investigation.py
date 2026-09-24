@@ -233,7 +233,7 @@ def test_failed_tool_is_recorded_and_does_not_become_success() -> None:
     outcome = run(investigate(build(planner, registry)))
 
     assert outcome.evidence == []
-    assert outcome.report.stop_reason == StopReason.INSUFFICIENT_EVIDENCE.value
+    assert outcome.report.stop_reason == StopReason.TOOL_FAILED.value
     assert any("注入的工具失败" in note for note in outcome.report.notes)
 
 

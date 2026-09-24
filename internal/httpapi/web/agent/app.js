@@ -488,6 +488,7 @@ async function createTask(event) {
     return;
   }
 
+  ++taskSelectionGeneration; // New task intent invalidates any pending history selection.
   state.busy = true;
   $("createButton").disabled = true;
   clearError();
@@ -559,6 +560,10 @@ async function resumeTask() {
 /** 人工确认材料：只记录"谁确认了哪一版材料"，不构成审批，也不授予执行许可。 */
 async function confirmMaterial() {
   if (!state.task || state.busy) return;
+  if (isLocallyEdited()) {
+    showError("本地 SQL 已修改。请恢复服务端原稿后再确认；本地编辑不能确认原稿。");
+    return;
+  }
   state.busy = true;
   clearError();
   try {
@@ -604,6 +609,12 @@ function adoptTask(task) {
   const sameDraft = sameTask && JSON.stringify(previous.draft || null) === JSON.stringify(task.draft || null);
   if (!sameDraft) resetEdits();
   state.task = task;
+  // Only the opaque task id is persisted in the URL, never SQL or evidence.
+  if (typeof window !== "undefined" && window.history?.replaceState && window.location?.href) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("task", task.task_id);
+    window.history.replaceState(null, "", url);
+  }
   if (sameDraft) {
     refreshTaskView(previous);
   } else {
@@ -1155,6 +1166,11 @@ function markStale() {
   });
   const reset = $("resetSql");
   if (reset) reset.disabled = !stale;
+  const confirm = $("confirmButton");
+  if (confirm) {
+    confirm.disabled = stale || confirm.dataset.confirmed === "true";
+    confirm.title = stale ? "请恢复服务端原稿后再确认" : "";
+  }
 }
 
 function renderAssumptions(draft) {
@@ -1223,8 +1239,8 @@ function renderConfirmation(task) {
     : `<p class="note-inline">还没有人工确认记录。确认只表示"有人看过这一版材料"，不构成审批。</p>`;
 
   const button = confirmedCurrent
-    ? '<button class="button button-small" type="button" id="confirmButton" disabled>当前材料已确认</button>'
-    : '<button class="button button-small button-primary" type="button" id="confirmButton">确认这一版材料</button>';
+    ? '<button class="button button-small" type="button" id="confirmButton" data-confirmed="true" disabled>当前材料已确认</button>'
+    : `<button class="button button-small button-primary" type="button" id="confirmButton" ${isLocallyEdited() ? "disabled" : ""}>确认这一版材料</button>`;
 
   return `
     <article class="card">
@@ -1486,6 +1502,37 @@ function renderProvenance() {
 const HEALTH_REFRESH_MS = 5000;
 let healthTimer = null;
 
+let taskSelectionGeneration = 0;
+
+async function openHistoricalTask(id) {
+  if (!id || state.busy) return;
+  const generation = ++taskSelectionGeneration;
+  stopPolling();
+  try {
+    const task = await api(`/api/agent/tasks/${encodeURIComponent(id)}`);
+    if (generation !== taskSelectionGeneration) return;
+    resetEdits();
+    adoptTask(task);
+  } catch (error) {
+    if (generation === taskSelectionGeneration) {
+      handleActionError(error);
+      if (state.task && !TERMINAL.has(state.task.status)) startPolling();
+    }
+  }
+}
+
+async function refreshTaskHistory() {
+  const select = $("taskHistory");
+  if (!select) return;
+  try {
+    const tasks = await api("/api/agent/tasks");
+    select.innerHTML = '<option value="">选择任务…</option>' + tasks.map(task =>
+      `<option value="${esc(task.task_id)}">${esc(task.task_id)} · ${esc(task.status)}</option>`
+    ).join("");
+    select.value = state.task?.task_id || "";
+  } catch (error) { handleActionError(error); }
+}
+
 async function init() {
   $("createForm").addEventListener("submit", createTask);
   wireRequirementCounter();
@@ -1510,6 +1557,11 @@ async function init() {
   }
 
   await refreshHealth();
+  $("refreshTasks")?.addEventListener("click", refreshTaskHistory);
+  $("taskHistory")?.addEventListener("change", event => openHistoricalTask(event.target.value));
+  await refreshTaskHistory();
+  const restoredId = new URL(window.location.href).searchParams.get("task");
+  if (restoredId) await openHistoricalTask(restoredId);
   // 健康状态只读一次是不够的：页面打开后下游才恢复（或才降级）时，
   // 右上角状态、右栏的降级卡片和创建按钮会一直停在加载时的那一帧上。
   healthTimer = setInterval(() => { refreshHealth({ quiet: true }); }, HEALTH_REFRESH_MS);

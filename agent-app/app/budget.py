@@ -66,6 +66,7 @@ class CallRecord:
     completion_tokens: int | None
     model: str
     failure_type: str | None = None
+    execution_id: str = ""
 
 
 @dataclass
@@ -136,6 +137,7 @@ class UsageLedger:
             ),
             model=model or self.model,
             failure_type=failure_type,
+            execution_id=self.execution_id,
         )
         self.calls.append(record)
         if len(self.calls) > MAX_CALL_RECORDS:
@@ -149,6 +151,39 @@ class UsageLedger:
             except Exception as error:  # noqa: BLE001 - 统一转成显式的账本故障
                 raise LedgerPersistError(f"调用账本未能落盘：{type(error).__name__}: {error}") from error
         return record
+
+    def reserve(self, phase: str, model: str) -> int:
+        """Durably reserve an uncertain request BEFORE network I/O.
+
+        A crash leaves pending consumption; recovery never assumes it was free.
+        """
+        return self.add_call(phase=phase, outcome="pending", requests=1,
+                             duration_ms=0, usage=None, model=model).sequence
+
+    def settle(self, sequence: int, *, outcome: str, duration_ms: int,
+               usage: Mapping[str, Any] | None, failure_type: str | None = None) -> None:
+        from dataclasses import replace
+        for index, record in enumerate(self.calls):
+            if record.sequence != sequence or record.outcome != "pending":
+                continue
+            known = isinstance(usage, Mapping)
+            prompt = int(usage.get("prompt_tokens") or 0) if known else None
+            completion = int(usage.get("completion_tokens") or 0) if known else None
+            if known:
+                self.reported += 1
+                self.prompt_tokens += prompt or 0
+                self.completion_tokens += completion or 0
+                self.charged_unknown_tokens -= max(0, int(self.unknown_charge_tokens))
+            self.calls[index] = replace(record, outcome=outcome, duration_ms=duration_ms,
+                                       usage_known=known, prompt_tokens=prompt,
+                                       completion_tokens=completion, failure_type=failure_type)
+            if self.on_update:
+                try:
+                    self.on_update(self.as_dict())
+                except Exception as error:
+                    raise LedgerPersistError("请求结算未能落盘") from error
+            return
+        raise LedgerPersistError("找不到待结算请求")
 
     # -- 汇总 ---------------------------------------------------------------
 
@@ -268,6 +303,12 @@ class UsageLedger:
         self.prompt_tokens += int(prior.get("prompt_tokens") or 0)
         self.completion_tokens += int(prior.get("completion_tokens") or 0)
         self.charged_unknown_tokens += int(prior.get("charged_unknown_tokens") or 0)
+        for raw in list(prior.get("calls") or [])[-MAX_CALL_RECORDS:]:
+            if isinstance(raw, Mapping):
+                fields = {key: value for key, value in raw.items() if key in CallRecord.__dataclass_fields__}
+                fields.setdefault("execution_id", str(prior.get("execution_id") or ""))
+                self.calls.append(CallRecord(**fields))
+        self.calls = self.calls[-MAX_CALL_RECORDS:]
 
 
 _ACTIVE_LEDGERS: contextvars.ContextVar[tuple[UsageLedger, ...]] = contextvars.ContextVar(

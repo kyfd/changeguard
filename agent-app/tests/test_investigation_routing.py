@@ -67,6 +67,25 @@ def bounded(settings: Settings, provider: Any, **overrides: Any) -> AgentService
     return AgentService(scoped, provider=provider)
 
 
+@pytest.mark.parametrize('failure', ['planner', 'tool'])
+def test_failure_after_sufficient_evidence_never_generates(settings, monkeypatch, failure):
+    from app.workflow.investigate import PlannerDecisionError
+    class FailingPlanner(ScriptedPlanner):
+        async def plan(self, *, round_index, **kwargs):
+            if round_index == 1:
+                return CallTool('search_norms', {'query': '索引', 'limit': 3})
+            if failure == 'planner':
+                raise PlannerDecisionError('invalid decision')
+            return CallTool('get_change_context', {'change_id': 'missing'})
+    use_planner(monkeypatch, FailingPlanner([]))
+    provider = CountingProvider()
+    service = bounded(settings, provider)
+    view, _ = run(service.create_task(complete_request(), CONTEXT))
+    assert view.status is TaskStatus.FAILED
+    assert view.draft is None
+    assert provider.generate_calls == 0
+
+
 def use_planner(monkeypatch: pytest.MonkeyPatch, planner: Any) -> None:
     """替换决策者的构造，其余流程保持真实。"""
     monkeypatch.setattr(graph_module, "build_planner", lambda *_args, **_kwargs: planner)

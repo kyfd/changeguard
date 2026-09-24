@@ -438,60 +438,26 @@ class OpenAICompatibleProvider:
             if reason:
                 raise TaskBudgetExceeded(reason)
 
-    def _record_call(
-        self, *, outcome: str, duration_ms: int, usage: Any, failure_type: str | None = None
-    ) -> None:
-        """把**这一次请求**的结构化记录提交给当前账本。
-
-        缺失 usage 时显式记一笔缺失，绝不复用上一次的值；共享的 provider 实例不持有累计量，
-        累计发生在调用方提供的账本上，因此并发任务不会互相串账。
-
-        **这里不做预算检查**：预算的判定点是"要不要发下一次请求"（见 `_post` 开头）。
-        以前在这里复查，会让**已经被允许、并且已经付过钱**的那次响应在拿到之后被拒绝丢弃
-        （max_requests=1 时第一次调用必定失败）。
-        """
-        parsed: dict[str, int] | None = None
-        if (
-            isinstance(usage, Mapping)
-            and usage.get("prompt_tokens") is not None
-            and usage.get("completion_tokens") is not None
-        ):
-            parsed = {
-                "prompt_tokens": int(usage["prompt_tokens"]),
-                "completion_tokens": int(usage["completion_tokens"]),
-            }
-        self.last_usage = parsed
-        for ledger in active_ledgers():
-            ledger.add_call(
-                phase=active_phase(),
-                outcome=outcome,
-                requests=1,
-                duration_ms=duration_ms,
-                usage=parsed,
-                model=self._settings.llm_model,
-                failure_type=failure_type,
-            )
-
-    def _record_cancelled_call(self, duration_ms: int) -> None:
-        """记下被取消的那次请求，然后**不打断取消**。
-
-        取消不能成为漏记的理由：请求已经发出去了（`requests_sent` 已经加过），
-        它到底有没有到达模型、有没有被计费，我们并不知道——所以按"算它花过"记账，
-        而不是当作没发生过。这与"不宣称 exactly-once"是同一口径。
-
-        记账失败（例如执行已被取消/接管，落盘钩子按设计拒绝写入）不能顶掉取消语义：
-        把一次取消变成一次执行失败，比少一条账目更糟。此时调用方的降级路径会报告
-        状态不可确定。
-        """
-        try:
-            self._record_call(outcome="cancelled", duration_ms=duration_ms, usage=None, failure_type="cancelled")
-        except LedgerPersistError:
-            pass
-
     async def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """发一次请求并返回解析后的响应体。供 generate 与 decide 共用。"""
         # 预算检查在**发请求之前**：超出上限就不再打模型，而不是打完再报。
         self._guard_budget()
+        # Synchronous durable reservation happens before opening the HTTP client.
+        # A cancelled/stale owner cannot erase this pending, conservatively charged call.
+        reservations = [(ledger, ledger.reserve(active_phase(), self._settings.llm_model))
+                        for ledger in active_ledgers()]
+
+        def record_call(*, outcome: str, duration_ms: int, usage: Any,
+                        failure_type: str | None = None) -> None:
+            parsed = None
+            if isinstance(usage, Mapping) and usage.get("prompt_tokens") is not None and usage.get("completion_tokens") is not None:
+                parsed = {"prompt_tokens": int(usage["prompt_tokens"]),
+                          "completion_tokens": int(usage["completion_tokens"])}
+            self.last_usage = parsed
+            for ledger, sequence in reservations:
+                ledger.settle(sequence, outcome=outcome, duration_ms=duration_ms,
+                              usage=parsed, failure_type=failure_type)
+
         self.requests_sent += 1
         started = time.perf_counter()
         try:
@@ -503,14 +469,18 @@ class OpenAICompatibleProvider:
                 )
         except asyncio.CancelledError:
             self.model_seconds += time.perf_counter() - started
-            self._record_cancelled_call(int((time.perf_counter() - started) * 1000))
+            try:
+                record_call(outcome="cancelled", duration_ms=int((time.perf_counter() - started) * 1000),
+                            usage=None, failure_type="cancelled")
+            except LedgerPersistError:
+                pass  # Durable pending reservation remains; stale owners cannot overwrite it.
             raise
         except Exception as error:  # noqa: BLE001 - 网络抖动与超时值得重试
             elapsed = int((time.perf_counter() - started) * 1000)
             self.model_seconds += time.perf_counter() - started
             timed_out = isinstance(error, (httpx.TimeoutException, asyncio.TimeoutError))
             # 失败的请求同样要入账（且 usage 未知）：否则"打出去但没回来的钱"会被漏掉。
-            self._record_call(
+            record_call(
                 outcome="timeout" if timed_out else "error",
                 duration_ms=elapsed,
                 usage=None,
@@ -525,7 +495,7 @@ class OpenAICompatibleProvider:
         self.model_seconds += time.perf_counter() - started
 
         if response.status_code != 200:
-            self._record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="status")
+            record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="status")
             raise ModelCallError(
                 f"模型返回状态码 {response.status_code}: {response.text[:200]}",
                 retryable=response.status_code in _RETRYABLE_STATUS,
@@ -534,13 +504,13 @@ class OpenAICompatibleProvider:
         try:
             body = response.json()
         except Exception as error:  # noqa: BLE001 - 网关返回非 JSON 可能是暂时性的
-            self._record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="malformed_body")
+            record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="malformed_body")
             raise ModelCallError("模型返回的不是合法 JSON", retryable=True, failure_type="malformed_body") from error
         if not isinstance(body, dict):
-            self._record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="malformed_body")
+            record_call(outcome="error", duration_ms=elapsed, usage=None, failure_type="malformed_body")
             raise ModelCallError("模型返回的不是 JSON 对象", retryable=True, failure_type="malformed_body")
         # 每次响应都记一笔（含"没有 usage"这一事实）。
-        self._record_call(outcome="ok", duration_ms=elapsed, usage=body.get("usage"))
+        record_call(outcome="ok", duration_ms=elapsed, usage=body.get("usage"))
         return body
 
     async def _call_once(self, url: str, payload: dict[str, Any]) -> str:

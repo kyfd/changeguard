@@ -30,8 +30,9 @@ def build_client(tmp_path: Path, *, allow_identity: bool = True) -> TestClient:
         checkpoint_path=str(tmp_path / "agent-checkpoints.sqlite"),
         execution_mode="inline",
         allow_header_identity=allow_identity,
+        upstream_token="unit-test-secret",
     )
-    return TestClient(create_app(settings))
+    return TestClient(create_app(settings), headers={"X-Agent-Upstream-Token": "unit-test-secret"})
 
 
 def test_identity_is_denied_by_default(tmp_path: Path) -> None:
@@ -183,7 +184,7 @@ def test_confirm_endpoint_records_material_confirmation(tmp_path: Path) -> None:
     assert body["material_hash"], "存在材料时视图必须给出材料内容摘要"
     task_id = body["task_id"]
 
-    confirmed = client.post(f"/api/agent/tasks/{task_id}/confirm", headers=HEADERS, json={"note": "已核对"})
+    confirmed = client.post(f"/api/agent/tasks/{task_id}/confirm", headers=HEADERS, json={"note": "已核对", "material_hash": body["material_hash"]})
     assert confirmed.status_code == 200
     records = confirmed.json()["confirmations"]
     assert len(records) == 1
@@ -192,7 +193,8 @@ def test_confirm_endpoint_records_material_confirmation(tmp_path: Path) -> None:
     assert confirmed.json()["status"] == "DRAFT_READY", "确认不改变任务状态"
 
     # 幂等：重复确认不新增记录。
-    again = client.post(f"/api/agent/tasks/{task_id}/confirm", headers=HEADERS)
+    assert client.post(f"/api/agent/tasks/{task_id}/confirm", headers=HEADERS).status_code == 409
+    again = client.post(f"/api/agent/tasks/{task_id}/confirm", headers=HEADERS, json={"material_hash": body["material_hash"]})
     assert again.status_code == 200
     assert len(again.json()["confirmations"]) == 1
 

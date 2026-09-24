@@ -559,6 +559,13 @@ class DraftWorkflow:
                 }
             )
             notes.append("任务 token 预算用尽，未继续生成草案")
+        elif report.stop_reason in {StopReason.PLANNER_FAILED.value, StopReason.TOOL_FAILED.value}:
+            investigation.update({
+                "blocked": True, "status": TaskStatus.FAILED.value,
+                "block_reason": "调查失败，未继续生成草案：" + report.stop_reason,
+                "questions": [],
+            })
+            notes.append("调查失败，未继续生成草案")
         elif report.missing_required:
             # 必需证据缺失不得进入草稿生成——那会产出一份看起来可用的草案。
             investigation.update(

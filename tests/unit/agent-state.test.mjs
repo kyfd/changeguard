@@ -25,10 +25,62 @@ function setup() {
     $: (id) => document.getElementById(id),
     CSS: { escape: (value) => String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&') },
   });
-  vm.runInContext(source + '\n globalThis.agent = { state, adoptTask, pollOnce, preserveView, draftSql, isLocallyEdited, refreshHealth };', context);
+  vm.runInContext(source + '\n globalThis.agent = { state, adoptTask, pollOnce, preserveView, draftSql, isLocallyEdited, refreshHealth, confirmMaterial, openHistoricalTask, refreshTaskHistory, createTask };', context);
   vm.runInContext('render = () => { globalThis.fullRenders = (globalThis.fullRenders || 0) + 1; };', context);
   return { ...context.agent, context, nodes, document, node };
 }
+test('local edits cannot confirm the server draft', async () => {
+  const h = setup();
+  h.adoptTask(task({ status: 'DRAFT_READY' }));
+  h.state.edits.sql = 'changed';
+  vm.runInContext('api = async () => { throw new Error("must not request"); }; showError = message => { globalThis.warning = message; };', h.context);
+  await h.confirmMaterial();
+  assert.match(h.context.warning, /本地/);
+});
+
+test('historical task restores authorized server response and URL id only', async () => {
+  const h = setup();
+  h.context.URL = URL;
+  h.context.window = { location: { href: 'http://localhost/agent/' }, history: { replaceState(_a, _b, url) { h.context.savedURL = String(url); } } };
+  h.context.nextTask = task({ task_id: 'restored', status: 'DRAFT_READY' });
+  vm.runInContext('api = async path => { globalThis.requested = path; return nextTask; };', h.context);
+  await h.openHistoricalTask('restored');
+  assert.equal(h.state.task.task_id, 'restored');
+  assert.equal(h.context.requested, '/api/agent/tasks/restored');
+  assert.equal(h.context.savedURL, 'http://localhost/agent/?task=restored');
+});
+
+test('history fetches list and escapes returned ids', async () => {
+  const h = setup();
+  h.node('taskHistory');
+  vm.runInContext('api = async path => { globalThis.requested = path; return [{ task_id: "<unsafe>", status: "FAILED" }]; };', h.context);
+  await h.refreshTaskHistory();
+  assert.equal(h.context.requested, '/api/agent/tasks');
+  assert.match(h.nodes.get('taskHistory').innerHTML, /&lt;unsafe&gt;/);
+});
+
+test('new task creation invalidates an in-flight history response', async () => {
+  const h = setup();
+  for (const id of ['requirement', 'optApplication', 'optEnvironment', 'optDatabase', 'optTable', 'optQuerySql', 'optTimezone', 'optSchema', 'optPlannedAt', 'createButton']) h.node(id);
+  h.nodes.get('requirement').value = 'new task';
+  h.context.created = task({ task_id: 'new' });
+  vm.runInContext('clearError = () => {}; browserTimezone = () => "UTC"; api = path => path === "/api/agent/tasks" ? Promise.resolve(created) : new Promise(resolve => { globalThis.resolveHistory = resolve; });', h.context);
+  const old = h.openHistoricalTask('old');
+  await h.createTask({ preventDefault() {} });
+  h.context.resolveHistory(task({ task_id: 'old' }));
+  await old;
+  assert.equal(h.state.task.task_id, 'new');
+});
+
+test('failed history selection resumes polling the existing task', async () => {
+  const h = setup();
+  h.adoptTask(task());
+  vm.runInContext('handleActionError = () => {}; api = async () => { throw new Error("404"); };', h.context);
+  await h.openHistoricalTask('missing');
+  assert.equal(h.state.task.task_id, 'A');
+  assert.equal(h.state.timer, 1);
+});
+
 const task = (extra = {}) => ({ task_id: 'A', status: 'RUNNING', draft: { sql: 'select 1', rollback_sql: '', version: 1 }, ...extra });
 
 test('switching task clears local SQL, rollback and edit mode even for identical drafts', () => {

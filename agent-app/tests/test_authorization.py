@@ -38,8 +38,9 @@ def build_client(tmp_path: Path, *, store_path: Path | None = None) -> TestClien
         task_store_path=str(store_path or (tmp_path / "agent-tasks.json")),
         execution_mode="inline",
         allow_header_identity=True,
+        upstream_token="unit-test-secret",
     )
-    return TestClient(create_app(settings))
+    return TestClient(create_app(settings), headers={"X-Agent-Upstream-Token": "unit-test-secret"})
 
 
 def create_task(client: TestClient, headers: dict[str, str]) -> str:

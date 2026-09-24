@@ -317,6 +317,8 @@ def test_resume_continues_the_task_budget(settings: Settings, monkeypatch: pytes
 
     assert usage_of(resumed)["requests"] >= 1
     assert usage_of(resumed)["prompt_tokens"] >= 100, "恢复后累计预算被清零了"
+    assert usage_of(resumed)["calls"][0] == usage_of(failed)["calls"][0], "恢复丢失历史请求明细"
+    assert usage_of(resumed)["calls"][0]["execution_id"], "明细必须保留原执行身份"
 
 
 def test_call_records_carry_phase_outcome_and_retries(

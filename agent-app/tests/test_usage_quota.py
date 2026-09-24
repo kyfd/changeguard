@@ -41,6 +41,19 @@ def test_quota_is_counted_per_identity(tmp_path: Path) -> None:
     assert bob.status_code == 202, bob.text
 
 
+def test_resume_quota_and_authorization_order(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    created = client.post('/api/agent/tasks', json={'requirement': REQUIREMENT}, headers=HEADERS).json()
+    client.app.state.usage = UsageLimiter(UsageLimits(per_minute=1, per_user_daily=0, global_daily=0))
+    path = f"/api/agent/tasks/{created['task_id']}/resume"
+    # Wrong owner must not consume the caller's single quota slot.
+    bob = {'X-Actor-Id': 'bob', 'X-Org-Id': 'org_demo'}
+    assert client.post(path, headers=bob).status_code == 404
+    assert client.post('/api/agent/tasks', json={'requirement': REQUIREMENT}, headers=bob).status_code == 202
+    client.app.state.usage.check('alice')
+    assert client.post(path, headers=HEADERS).status_code == 429
+
+
 def test_disabled_limits_do_not_block(tmp_path: Path) -> None:
     """三层限额全为 0 时闸门关闭，行为与上游一致（不会误伤）。"""
     client = build_client(tmp_path)
