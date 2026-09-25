@@ -504,3 +504,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   /* grid-2 自行依据容器宽度折列，宽的单栏布局仍可并排。 */
   .topbar { padding: 10px 12px; }
 }
+
+/* Chromium on Linux gives native datetime-local controls a slightly wider
+   intrinsic width than Windows. Recover four pixels at tiny phone widths. */
+@media (max-width: 360px) {
+  .details { padding-inline: 8px; }
+}
