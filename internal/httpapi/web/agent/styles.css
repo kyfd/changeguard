@@ -308,7 +308,7 @@ ul, ol { margin: 0; padding-left: 18px; }
 .field > span { font-size: 12px; color: var(--text-muted); font-weight: 500; }
 .field > .requirement-label { color: var(--text); font-size: 13px; font-weight: 600; margin-bottom: 4px; }
 .task-history { display: flex; flex-direction: column; gap: 7px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.task-history .button { align-self: flex-end; border: 0; color: var(--accent); background: transparent; box-shadow: none; padding: 2px 0; }
+.task-history .button { align-self: flex-end; min-height: 28px; border: 0; color: var(--accent); background: transparent; box-shadow: none; padding: 4px 8px; }
 #createForm { padding: 0; border: 0; border-radius: 0; gap: 12px; }
 #requirement { min-height: 116px; }
 .optional-label { font-size: 11px; color: var(--text-muted); padding-left: 6px; }
