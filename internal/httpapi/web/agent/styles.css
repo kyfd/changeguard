@@ -2,10 +2,10 @@
    独立文档，只加载这一份样式，和控制台的 styles.css 互不影响。 */
 
 :root {
-  --bg: #f7f9fc;
+  --bg: #f4f4f1;
   --surface: #ffffff;
-  --surface-sunken: #f2f5fa;
-  --border: #dde4ee;
+  --surface-sunken: #f5f6f7;
+  --border: #dfe3e7;
   --border-strong: #c6d1e2;
   --text: #1b2434;
   --text-muted: #64718a;
@@ -23,12 +23,12 @@
      否则最需要人做决定的那个状态会和其他状态混在一起。 */
   --confirm: #6b46c1;
   --confirm-soft: #f1ebfd;
-  --radius: 12px;
+  --radius: 8px;
   --radius-sm: 8px;
   --radius-lg: 16px;
   --shadow-xs: 0 1px 2px rgba(20, 34, 61, .06);
   --shadow: 0 1px 2px rgba(20, 34, 61, .05), 0 6px 18px rgba(20, 34, 61, .05);
-  --shadow-card: 0 1px 3px rgba(20, 34, 61, .05), 0 10px 28px rgba(20, 34, 61, .07);
+  --shadow-card: 0 2px 5px rgba(20, 34, 61, .035);
   --shadow-lift: 0 2px 6px rgba(20, 34, 61, .07), 0 18px 44px rgba(20, 34, 61, .10);
   --shadow-focus: 0 0 0 3px rgba(47, 109, 246, .14);
   --shadow-glow-accent: 0 8px 24px rgba(47, 109, 246, .24);
@@ -49,12 +49,7 @@ html, body { height: 100%; }
 
 body {
   margin: 0;
-  background:
-    radial-gradient(circle at 10% 4%, rgba(47, 109, 246, .06), transparent 40%),
-    radial-gradient(circle at 90% 92%, rgba(21, 127, 75, .045), transparent 36%),
-    radial-gradient(circle at 55% 108%, rgba(107, 70, 193, .05), transparent 34%),
-    var(--bg);
-  background-attachment: fixed;
+  background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
   font-size: 14px;
@@ -79,11 +74,9 @@ ul, ol { margin: 0; padding-left: 18px; }
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
   flex-wrap: wrap;
   padding: 12px 20px;
-  background: rgba(255, 255, 255, .86);
-  -webkit-backdrop-filter: saturate(1.15) blur(14px);
-  backdrop-filter: saturate(1.15) blur(14px);
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
-  box-shadow: 0 1px 0 rgba(20, 34, 61, .03), 0 6px 20px rgba(20, 34, 61, .05);
+  box-shadow: none;
   position: sticky; top: 0; z-index: 20;
 }
 
@@ -92,16 +85,17 @@ ul, ol { margin: 0; padding-left: 18px; }
 .brand-mark {
   width: 36px; height: 36px; flex: none;
   display: grid; place-items: center;
-  border-radius: 10px;
-  background: var(--grad-accent);
+  border-radius: 8px;
+  background: #20334f;
   color: #fff;
-  box-shadow: var(--shadow-glow-accent);
+  box-shadow: none;
 }
 .brand-mark svg { width: 21px; height: 21px; }
 
 .brand-text { display: flex; flex-direction: column; min-width: 0; }
 .brand-text strong { font-size: 15.5px; letter-spacing: .2px; font-weight: 700; }
 .brand-text span { color: var(--text-muted); font-size: 12px; }
+.brand-text .brand-product { color: #20334f; font-size: 15.5px; letter-spacing: -.3px; margin-right: 8px; }
 
 .topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
@@ -130,16 +124,16 @@ ul, ol { margin: 0; padding-left: 18px; }
 .button:disabled { opacity: .55; cursor: not-allowed; box-shadow: none; }
 
 .button-primary {
-  background: var(--grad-accent);
+  background: var(--accent);
   border-color: transparent;
   color: #fff;
   width: 100%;
-  box-shadow: var(--shadow-glow-accent);
+  box-shadow: none;
 }
 .button-primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #245cd9 0%, #3f74e6 55%, #2f8fe8 100%);
+  background: #245cd9;
   border-color: transparent;
-  box-shadow: 0 10px 28px rgba(47, 109, 246, .32);
+  box-shadow: 0 2px 5px rgba(47, 109, 246, .16);
 }
 .button-primary:active:not(:disabled) { transform: translateY(.5px); }
 
@@ -151,7 +145,7 @@ ul, ol { margin: 0; padding-left: 18px; }
 .chip {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 11px;
-  border-radius: 999px;
+  border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--surface);
   box-shadow: var(--shadow-xs);
@@ -252,23 +246,27 @@ ul, ol { margin: 0; padding-left: 18px; }
   display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
   padding: 13px 16px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(248, 250, 253, .9), rgba(255, 255, 255, .9));
+  background: var(--surface);
   flex: none;
   position: relative;
 }
-.col-head h2 { font-size: 13px; letter-spacing: .6px; text-transform: uppercase; color: var(--text); font-weight: 700; }
+.col-head h2 { font-size: 15px; letter-spacing: .2px; color: var(--text); font-weight: 700; }
+.col-heading { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.col-step { color: var(--text-muted); font: 10px/1.3 var(--mono); letter-spacing: 1px; }
+.col-draft { border-color: #bcc9db; }
+.col-draft .col-head { background: #f6f8fc; }
 .col-hint { font-size: 11.5px; color: var(--text-faint); text-align: right; }
 
-/* 每栏顶部一条彩色渐变身份条，对应 对话 / 草案 / 证据 的语义色。 */
+/* 实色顶线标记工作阶段，确认与验证状态仍由各自徽标表达。 */
 .col::before {
   content: "";
   position: absolute; top: 0; left: 0; right: 0;
   height: 3px;
   border-radius: var(--radius) var(--radius) 0 0;
 }
-.col-chat::before { background: linear-gradient(90deg, #2f6df6, #3ba0ff); }
-.col-draft::before { background: linear-gradient(90deg, #6b46c1, #8a5cf6); }
-.col-evidence::before { background: linear-gradient(90deg, #157f4b, #34b37e); }
+.col-chat::before { background: #8b9db5; }
+.col-draft::before { background: #20334f; }
+.col-evidence::before { background: #568574; }
 
 .col-body {
   padding: 14px;
@@ -291,10 +289,9 @@ ul, ol { margin: 0; padding-left: 18px; }
   padding: 12px 13px;
   display: flex; flex-direction: column; gap: 9px;
   min-width: 0;
-  box-shadow: var(--shadow-xs);
-  transition: box-shadow .16s var(--ease);
+  box-shadow: none;
 }
-.card:hover { box-shadow: var(--shadow); }
+.card:hover { box-shadow: none; }
 .card-flat { background: var(--surface-sunken); box-shadow: none; }
 .card-flat:hover { box-shadow: none; }
 .card-danger { border-color: #eec4c4; background: var(--danger-soft); }
@@ -309,6 +306,12 @@ ul, ol { margin: 0; padding-left: 18px; }
 
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .field > span { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.field > .requirement-label { color: var(--text); font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.task-history { display: flex; flex-direction: column; gap: 7px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.task-history .button { align-self: flex-end; border: 0; color: var(--accent); background: transparent; box-shadow: none; padding: 2px 0; }
+#createForm { padding: 0; border: 0; border-radius: 0; gap: 12px; }
+#requirement { min-height: 116px; }
+.optional-label { font-size: 11px; color: var(--text-muted); padding-left: 6px; }
 
 input:not([type]), input[type="text"], input[type="datetime-local"], select, textarea {
   width: 100%;
@@ -472,10 +475,10 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .check-suggestion { color: var(--text-muted); font-size: 12px; }
 
 .empty {
-  color: var(--text-faint); font-size: 12.5px; text-align: center;
-  padding: 26px 14px;
-  border: 1.5px dashed var(--border-strong); border-radius: var(--radius-sm);
-  background: var(--surface-sunken);
+  color: var(--text-muted); font-size: 13px; text-align: left; line-height: 1.8;
+  padding: 24px 18px;
+  border: 1px dashed var(--border-strong); border-radius: 6px;
+  background: #fafbfc;
 }
 
 /* 滚动条：与内容层级匹配的细滚动条，不抢注意力。 */
