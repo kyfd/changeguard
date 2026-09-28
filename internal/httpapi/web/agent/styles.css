@@ -240,7 +240,9 @@ ul, ol { margin: 0; padding-left: 18px; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-card);
-  max-height: min(calc(100vh - 132px), 100%);
+  /* 不引用自动高度网格的百分比：循环依赖会使轨道按完整内容占高，
+     即使栏目随后缩短，页面底部仍留下几屏空白。 */
+  max-height: calc(100vh - 132px);
   /* 内容由 col-body 滚动；不要裁掉进度、焦点或长文本。 */
   min-width: 0;
   position: relative;
