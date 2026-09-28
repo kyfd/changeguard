@@ -20,7 +20,7 @@
         </svg>
       </span>
       <div class="brand-text">
-        <strong>变更准备</strong>
+        <strong><span class="brand-product">ChangeGuard</span> 变更准备</strong>
         <span>材料准备与静态检查；审批与发布仍由 ChangeGuard 控制</span>
       </div>
     </div>
@@ -42,23 +42,24 @@
   <main class="workbench" id="workbench">
     <section class="col col-chat" aria-labelledby="chatTitle">
       <header class="col-head">
-        <h2 id="chatTitle">对话</h2>
+        <div class="col-heading"><span class="col-step">01 / INTAKE</span><h2 id="chatTitle">需求与对话</h2></div>
         <span class="col-hint">提需求 · 补信息 · 进度</span>
       </header>
       <div class="col-body" id="chatBody">
-        <section class="card" aria-label="历史任务">
+        <section class="task-history" aria-label="历史任务">
           <label class="field"><span>我的历史任务</span><select id="taskHistory"><option value="">选择任务…</option></select></label>
           <button type="button" class="button button-small" id="refreshTasks">刷新任务列表</button>
         </section>
         <form class="card" id="createForm">
           <label class="field">
-            <span>需求</span>
+            <span class="requirement-label">这次需要准备什么变更？</span>
             <textarea id="requirement" rows="4" placeholder="例如：给订单表按用户和创建时间准备一个索引变更，目标 PostgreSQL，安排在周五晚上。"></textarea>
             <span class="note-inline" id="requirementCount"></span>
           </label>
 
           <details class="details" id="knownInfo">
-            <summary>可选：直接提供已知信息（缺什么会被追问）</summary>
+            <summary>补充已知信息 <span class="optional-label">可选</span></summary>
+            <p class="note-inline">应用、环境和表结构等信息可以稍后补充，缺失项会继续追问。</p>
             <div class="grid-2">
               <label class="field"><span>应用</span><input id="optApplication" type="text" autocomplete="off" placeholder="order-service"></label>
               <label class="field"><span>环境</span><input id="optEnvironment" type="text" autocomplete="off" placeholder="生产"></label>
@@ -88,7 +89,7 @@
 
     <section class="col col-draft" aria-labelledby="draftTitle">
       <header class="col-head">
-        <h2 id="draftTitle">草案</h2>
+        <div class="col-heading"><span class="col-step">02 / DRAFT</span><h2 id="draftTitle">变更草案</h2></div>
         <span class="col-hint" id="draftMeta">尚未生成</span>
       </header>
       <div class="col-body" id="draftBody"></div>
@@ -96,7 +97,7 @@
 
     <section class="col col-evidence" aria-labelledby="evidenceTitle">
       <header class="col-head">
-        <h2 id="evidenceTitle">证据与检查</h2>
+        <div class="col-heading"><span class="col-step">03 / EVIDENCE</span><h2 id="evidenceTitle">证据与检查</h2></div>
         <span class="col-hint">确定性结论 · 引用来源</span>
       </header>
       <div class="col-body" id="evidenceBody"></div>
