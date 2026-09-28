@@ -95,6 +95,17 @@ test("agent: responsive forms, long content, keyboard focus and reduced motion",
       if (process.env.AGENT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.AGENT_LAYOUT_SCREENSHOTS}/agent-layout-${width}.png`, fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
+    const documentBounds = await page.evaluate(() => {
+      window.scrollTo(0, 0);
+      const main = document.querySelector('.workbench').getBoundingClientRect();
+      const contentBottom = Math.max(...[...document.querySelectorAll('.col')].map(col => col.getBoundingClientRect().bottom));
+      return { mainBottom: main.bottom, contentBottom, pageHeight: document.documentElement.scrollHeight, viewport: innerHeight };
+    });
+    console.log('desktop vertical bounds', JSON.stringify(documentBounds));
+    assert.ok(documentBounds.mainBottom - documentBounds.contentBottom <= 25,
+      `grid reserves blank space below columns: ${JSON.stringify(documentBounds)}`);
+    assert.ok(documentBounds.pageHeight <= Math.max(documentBounds.viewport, documentBounds.contentBottom + 25),
+      `document has excess trailing whitespace: ${JSON.stringify(documentBounds)}`);
     const desktop = await page.locator('.col').evaluateAll(cols => cols.map(col => {
       const body = col.querySelector('.col-body');
       return { height: col.getBoundingClientRect().height, scrollHeight: body.scrollHeight, clientHeight: body.clientHeight };
