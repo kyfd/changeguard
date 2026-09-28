@@ -47,11 +47,7 @@ type Client struct {
 // 不是自动探测——默认锁死，需要的人自己开，并且为此负责。
 func New(allowPrivate bool) *Client {
 	return &Client{
-		http: &http.Client{
-			Timeout: probeTimeout,
-			// 不跟随跳转：一个公网地址 302 到 169.254.169.254 就绕过了上面的校验。
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		http:     NewHTTPClient(probeTimeout, allowPrivate),
 		validate: func(raw string) error { return ValidateBaseURL(raw, allowPrivate) },
 	}
 }

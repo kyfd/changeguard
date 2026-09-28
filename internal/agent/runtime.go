@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/modelprobe"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -149,7 +150,7 @@ func NewFromEnvironment() *Runtime {
 		dailyLimit:              dailyLimit,
 		orgLimit:                envInt("DBGUARD_LLM_DAILY_ORG_LIMIT", maxInt(dailyLimit*5, 50)),
 		globalLimit:             envInt("DBGUARD_LLM_DAILY_GLOBAL_LIMIT", maxInt(dailyLimit*10, 100)),
-		client:                  &http.Client{Timeout: timeout},
+		client:                  modelprobe.NewHTTPClient(timeout, modelprobe.AllowPrivateUpstream()),
 		callSlots:               make(chan struct{}, maxInt(envInt("DBGUARD_LLM_MAX_CONCURRENCY", 4), 1)),
 		usage:                   make(map[string]dailyUsage),
 		registry:                DefaultToolRegistry(),
@@ -621,7 +622,7 @@ func (r *Runtime) completeOnce(ctx context.Context, messages []map[string]any, t
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	client := r.client
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		client = modelprobe.NewHTTPClient(15*time.Second, modelprobe.AllowPrivateUpstream())
 	}
 	r.addMetric(func(metrics *RuntimeMetrics) { metrics.ModelCallsTotal++ })
 	resp, err := client.Do(req)

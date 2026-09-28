@@ -3101,6 +3101,7 @@ async function renderSettings(main) {
     </article>` : "";
 
   const llmForm = canEdit ? `
+    <p class="setting-callout">此配置仅用于 Go 核心的变更辅助分析；/agent/ 变更准备工作台由管理员通过 AGENT_LLM_* 单独配置，不自动使用本企业 Key。</p>
     <div class="llm-preset-row">
       <span>快捷填充</span>
       <div class="llm-preset-actions">${presetButtons || '<span class="muted">DeepSeek / OpenAI / 内网</span>'}</div>
@@ -3112,7 +3113,7 @@ async function renderSettings(main) {
           <option value="openai_compatible"${(llmStatus.provider || "openai_compatible") !== "anthropic" ? " selected" : ""}>OpenAI 兼容（DeepSeek / OpenAI / 内网网关）</option>
           <option value="anthropic"${llmStatus.provider === "anthropic" ? " selected" : ""}>Anthropic Messages</option>
         </select>
-        <small class="field-hint">Anthropic 不提供模型列表，需手动填写模型名</small>
+        <small class="field-hint">Anthropic 目前仅支持保存与连接测试，不参与变更分析；不提供模型列表，需手动填写模型名。</small>
       </label>
       <label class="field"><span>服务地址</span>
         <input name="base_url" id="llmBaseUrl" placeholder="https://api.deepseek.com" value="${escapeHTML(orgBase)}">
@@ -3330,10 +3331,17 @@ async function renderSettings(main) {
       if (hint) hint.textContent = preset.hint || "请粘贴 API Key 后测试连接";
       toast("已填充 " + (preset.name || id), "success", "请填写 API Key");
     });
+  });
   // 拉取上游模型列表。失败时把原因显示在提示位上，不弹 toast 打断。
-  document.querySelector("#llmModelsBtn")?.addEventListener("click", async () => {
+  document.querySelector("#llmModelsBtn")?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    if (button.disabled) return;
     const hint = document.querySelector("#llmModelsHint");
     const body = readLlmForm();
+    if (body.provider === "anthropic") {
+      if (hint) hint.textContent = "Anthropic 不提供模型列表，请手动填写模型名。";
+      return;
+    }
     if (!body.base_url) {
       if (hint) hint.textContent = "请先填写服务地址。";
       return;
@@ -3343,6 +3351,7 @@ async function renderSettings(main) {
       return;
     }
     if (hint) hint.textContent = "正在获取模型列表…";
+    button.disabled = true;
     try {
       const result = await api("/api/enterprise/llm/models", { method: "POST", body: JSON.stringify(body) });
       const models = Array.isArray(result.models) ? result.models : [];
@@ -3362,8 +3371,9 @@ async function renderSettings(main) {
       }
     } catch (error) {
       if (hint) hint.textContent = error.message || "获取模型列表失败";
+    } finally {
+      button.disabled = false;
     }
-  });
   });
   document.querySelectorAll("[data-toggle-key]").forEach(btn => {
     btn.addEventListener("click", event => {
@@ -3412,9 +3422,10 @@ async function renderSettings(main) {
           }
         }
         const saved = await api("/api/enterprise/llm", { method: "PUT", body: JSON.stringify(body) });
-        toast("模型接入已保存", "success", saved.configured ? "提交变更时可生成模型辅助分析" : "已关闭企业模型");
+        const configured = !!(saved.enabled && saved.has_api_key && saved.provider === "openai_compatible");
+        toast("模型接入已保存", "success", configured ? "提交变更时可生成模型辅助分析" : saved.enabled ? "此接口仅支持连接测试，分析仍使用本地规则" : "已关闭企业模型");
         if (state.config) {
-          state.config.llm_configured = !!saved.configured;
+          state.config.llm_configured = configured;
           state.config.llm_source = saved.source;
           state.config.llm_message = saved.message;
           state.config.llm_model = saved.model;
