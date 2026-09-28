@@ -17,7 +17,25 @@ function setup() {
       return { ok: true, text: async () => JSON.stringify({ task_id: 'T', status: 'NEEDS_INFO' }) };
     } });
   vm.runInContext(source + '\nglobalThis.agent = { plannedTimePayload, formatPlannedDate, browserTimezone, createTask, wireQuestionForm, renderQuestions, state }; adoptTask = () => {};', context);
-  return { ...context.agent, nodes, fields, requests };
+  return { ...context.agent, nodes, fields, requests, context };
+}
+
+for (const failure of ['unavailable', 'unauthenticated']) {
+  test(`create failure keeps button disabled when ${failure}`, async () => {
+    const h = setup();
+    h.nodes.get('requirement').value = '准备索引变更';
+    h.nodes.set('identityBanner', { hidden: true, innerHTML: '' });
+    h.state.authStatus = { enabled: true };
+    h.state.session = { user: {} };
+    h.context.fetch = async () => ({ ok: false, status: failure === 'unavailable' ? 503 : 401,
+      text: async () => JSON.stringify({ error: 'not available', code: 'SERVICE_UNAVAILABLE' }) });
+    await h.createTask({ preventDefault() {} });
+    assert.equal(h.nodes.get('createButton').disabled, true);
+    if (failure === 'unauthenticated') {
+      vm.runInContext('restoreAgentAvailability()', h.context);
+      assert.equal(h.nodes.get('createButton').disabled, true, 'health success must not undo login gate');
+    }
+  });
 }
 
 test('wall clock conversion is independent of browser timezone', () => {

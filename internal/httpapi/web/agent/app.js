@@ -414,7 +414,7 @@ function restoreAgentAvailability() {
     renderIdentityBanner(null);
   }
   const button = $("createButton");
-  if (button && button.disabled && !state.busy) {
+  if (button && button.disabled && !state.busy && !(state.authStatus?.enabled && !state.session)) {
     button.disabled = false;
     button.textContent = "开始准备材料";
   }
@@ -452,7 +452,7 @@ function wireRequirementCounter() {
 
 async function createTask(event) {
   event.preventDefault();
-  if (state.busy || !state.agentEnabled) return;
+  if (state.busy || !state.agentEnabled || (state.authStatus?.enabled && !state.session)) return;
 
   const requirement = $("requirement").value.trim();
   if (!requirement) {
@@ -499,7 +499,7 @@ async function createTask(event) {
     handleActionError(error);
   } finally {
     state.busy = false;
-    $("createButton").disabled = false;
+    $("createButton").disabled = !state.agentEnabled || Boolean(state.authStatus?.enabled && !state.session);
   }
 }
 
@@ -584,6 +584,7 @@ async function confirmMaterial() {
 function handleActionError(error) {
   if (error.status === 401) {
     state.session = null;
+    disableCreateButton("请先登录");
     renderIdentityBanner('登录状态已失效。请先回到 <a href="/">控制台</a> 登录。');
     return;
   }
