@@ -20,6 +20,13 @@ def _default_repo_root() -> Path:
 class Settings:
     """服务配置。"""
 
+    # 来源由部署/评测器决定，不接受浏览器或模型声明。旧记录保持 legacy。
+    task_source: str = "production"
+
+    def __post_init__(self) -> None:
+        if self.task_source not in {"production", "evaluation", "demo"}:
+            raise ValueError("AGENT_TASK_SOURCE 必须为 production/evaluation/demo")
+
     # 治理后端（Go）。Agent 的所有业务证据都必须经过它。
     governance_base_url: str = "http://127.0.0.1:8080"
     governance_timeout_seconds: float = 10.0
@@ -141,6 +148,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         defaults = cls()
         return cls(
+            task_source=os.getenv("AGENT_TASK_SOURCE", defaults.task_source).strip(),
             governance_base_url=os.getenv("AGENT_GOVERNANCE_BASE_URL", defaults.governance_base_url).rstrip("/"),
             governance_timeout_seconds=float(os.getenv("AGENT_GOVERNANCE_TIMEOUT", "10")),
             llm_base_url=os.getenv("AGENT_LLM_BASE_URL", "").strip(),

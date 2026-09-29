@@ -59,6 +59,27 @@ test('history fetches list and escapes returned ids', async () => {
   assert.match(h.nodes.get('taskHistory').innerHTML, /&lt;unsafe&gt;/);
 });
 
+test('late history list never replaces newer filter results', async () => {
+  const h = setup();
+  h.node('taskHistory');
+  h.node('historyFeedback');
+  vm.runInContext('globalThis.pending = []; api = () => new Promise(resolve => pending.push(resolve));', h.context);
+  const first = h.refreshTaskHistory();
+  const second = h.refreshTaskHistory();
+  h.context.pending[1]([{ task_id: 'new-result', status: 'FAILED' }]);
+  await second;
+  h.context.pending[0]([{ task_id: 'old-result', status: 'FAILED' }]);
+  await first;
+  assert.match(h.nodes.get('taskHistory').innerHTML, /new-result/);
+  assert.doesNotMatch(h.nodes.get('taskHistory').innerHTML, /old-result/);
+});
+
+test('archived task stops polling even if legacy status is nonterminal', () => {
+  const h = setup();
+  h.adoptTask(task({ status: 'NEEDS_INFO', archived_at: '2030-01-01' }));
+  assert.equal(h.state.timer, null);
+});
+
 test('new task creation invalidates an in-flight history response', async () => {
   const h = setup();
   for (const id of ['requirement', 'optApplication', 'optEnvironment', 'optDatabase', 'optTable', 'optQuerySql', 'optTimezone', 'optSchema', 'optPlannedAt', 'createButton']) h.node(id);

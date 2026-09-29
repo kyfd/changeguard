@@ -14,11 +14,15 @@
 from __future__ import annotations
 
 import secrets
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
-from app.schemas.drafts import ClarifyRequest, ConfirmRequest, CreateTaskRequest, TaskView
+from app.schemas.drafts import (
+    ClarifyRequest, ConfirmRequest, CreateTaskRequest, DeleteTaskPreview,
+    DeleteTaskRequest, TaskStatus, TaskView,
+)
 from app.service import (
     AgentService,
     TaskCancelRejected,
@@ -145,10 +149,51 @@ async def create_task(payload: CreateTaskRequest, request: Request) -> TaskView:
 
 
 @router.get("/tasks", response_model=list[TaskView])
-async def list_tasks(request: Request) -> list[TaskView]:
+async def list_tasks(
+    request: Request, q: str = Query(default="", max_length=200),
+    status: TaskStatus | None = None,
+    source: Literal["default", "all", "production", "evaluation", "demo", "legacy"] = "default",
+    workspace: Literal["active", "archived", "trash", "all"] = "active",
+) -> list[TaskView]:
     # 上下文必须传进 service：过滤在那里生效，路由层不做业务过滤。
     context = await resolve_context(request)
-    return await _service(request).list_tasks(context)
+    return await _service(request).list_tasks(context, q=q, status=status, source=source, workspace=workspace)
+
+
+@router.get("/tasks/{task_id}/delete-preview", response_model=DeleteTaskPreview)
+async def delete_preview(task_id: str, request: Request) -> DeleteTaskPreview:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).delete_preview(task_id, context)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+
+
+@router.post("/tasks/{task_id}/archive", response_model=TaskView)
+async def archive_task(task_id: str, request: Request) -> TaskView:
+    return await _manage_task(task_id, request, "archive_task")
+
+
+@router.post("/tasks/{task_id}/restore", response_model=TaskView)
+async def restore_task(task_id: str, request: Request) -> TaskView:
+    return await _manage_task(task_id, request, "restore_task")
+
+
+@router.post("/tasks/{task_id}/delete", response_model=TaskView)
+async def delete_task(task_id: str, payload: DeleteTaskRequest, request: Request) -> TaskView:
+    return await _manage_task(task_id, request, "delete_task", record_version=payload.record_version)
+
+
+async def _manage_task(task_id: str, request: Request, operation: str, **kwargs: str) -> TaskView:
+    context = await resolve_context(request)
+    try:
+        return await getattr(_service(request), operation)(task_id, context, **kwargs)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+    except TaskNotResumable as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except TaskStateUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.get("/tasks/{task_id}", response_model=TaskView)
@@ -184,6 +229,8 @@ async def cancel(task_id: str, request: Request) -> TaskView:
         return await _service(request).cancel(task_id, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
+    except TaskNotResumable as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except (TaskCancelRejected, TaskStateUnavailable) as error:
         # 取消未生效、任务仍在运行：明确告诉调用方可以重试，
         # 而不是返回一个"看起来已取消"的结果。
