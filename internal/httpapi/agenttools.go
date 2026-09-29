@@ -26,9 +26,10 @@ import (
 // 该接口只读、只暴露三个窄投影，且**不复用会话中间件**——浏览器拿不到共享密钥，
 // 因此这个入口对浏览器不可达。
 const (
-	agentToolsPrefix       = "/api/agent-tools/"
-	agentToolsChangePrefix = "/api/agent-tools/changes/"
-	agentToolsSecretEnv    = "DBGUARD_AGENT_UPSTREAM_TOKEN"
+	agentToolsPrefix            = "/api/agent-tools/"
+	agentToolsChangePrefix      = "/api/agent-tools/changes/"
+	agentToolsApplicationPrefix = "/api/agent-tools/applications/"
+	agentToolsSecretEnv         = "DBGUARD_AGENT_UPSTREAM_TOKEN"
 
 	agentProjectionContext    = "context"
 	agentProjectionFindings   = "findings"
@@ -90,24 +91,6 @@ func (s *Server) handleAgentTools(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	if !strings.HasPrefix(r.URL.Path, agentToolsChangePrefix) {
-		writeError(w, http.StatusNotFound, "接口不存在")
-		return
-	}
-	changeID := strings.TrimPrefix(r.URL.Path, agentToolsChangePrefix)
-	if changeID == "" || strings.Contains(changeID, "/") {
-		writeError(w, http.StatusNotFound, "接口不存在")
-		return
-	}
-
-	projection := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("projection")))
-	switch projection {
-	case agentProjectionContext, agentProjectionFindings, agentProjectionExperiment:
-	default:
-		// 未知投影直接拒绝，不做"默认返回全部"的兜底。
-		writeError(w, http.StatusBadRequest, "projection 必须是 context / findings / experiment 之一")
-		return
-	}
 
 	actorID := strings.TrimSpace(r.Header.Get("X-Actor-Id"))
 	declaredOrganization := strings.TrimSpace(r.Header.Get("X-Org-Id"))
@@ -124,6 +107,42 @@ func (s *Server) handleAgentTools(w http.ResponseWriter, r *http.Request) {
 	if actor.OrganizationID != declaredOrganization {
 		// 声明的组织与成员真实归属不一致，说明调用方在冒充另一个组织。
 		writeError(w, http.StatusForbidden, "委托组织与成员归属不一致")
+		return
+	}
+
+	// 应用授权核对：Agent 在"按应用访问项目知识"之前必须先在这里确认调用方确实拥有该应用。
+	// 应用 ID 是声明，不是权限；不存在、跨组织或没有授权一律 403，不区分，避免探测。
+	if strings.HasPrefix(r.URL.Path, agentToolsApplicationPrefix) {
+		applicationID := strings.TrimPrefix(r.URL.Path, agentToolsApplicationPrefix)
+		if applicationID == "" || strings.Contains(applicationID, "/") {
+			writeError(w, http.StatusNotFound, "接口不存在")
+			return
+		}
+		application, allowed := s.service.ApplicationAccess(applicationID, actorID)
+		if !allowed {
+			writeError(w, http.StatusForbidden, "无权访问该应用")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": application.ID, "name": application.Name})
+		return
+	}
+
+	if !strings.HasPrefix(r.URL.Path, agentToolsChangePrefix) {
+		writeError(w, http.StatusNotFound, "接口不存在")
+		return
+	}
+	changeID := strings.TrimPrefix(r.URL.Path, agentToolsChangePrefix)
+	if changeID == "" || strings.Contains(changeID, "/") {
+		writeError(w, http.StatusNotFound, "接口不存在")
+		return
+	}
+
+	projection := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("projection")))
+	switch projection {
+	case agentProjectionContext, agentProjectionFindings, agentProjectionExperiment:
+	default:
+		// 未知投影直接拒绝，不做"默认返回全部"的兜底。
+		writeError(w, http.StatusBadRequest, "projection 必须是 context / findings / experiment 之一")
 		return
 	}
 

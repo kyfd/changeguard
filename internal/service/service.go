@@ -146,6 +146,23 @@ func (s *Service) ApplicationsFor(actorID string) ([]model.Application, error) {
 	return visible, nil
 }
 
+// ApplicationAccess 判断某个成员是否可以使用（view）指定应用。
+//
+// 供 Agent 后端在"按应用访问项目知识"前做**服务端授权核对**：应用 ID 由调用方声明，
+// 声明本身不产生权限，必须回查成员是否存在、组织是否一致、以及应用授权。
+// 返回 (应用, 是否允许)；不存在或跨组织时返回 false，不区分，避免探测。
+func (s *Service) ApplicationAccess(applicationID, actorID string) (model.Application, bool) {
+	actor, err := s.activeActor(actorID)
+	if err != nil {
+		return model.Application{}, false
+	}
+	application, err := s.store.Application(strings.TrimSpace(applicationID))
+	if err != nil || application.OrganizationID != actor.OrganizationID {
+		return model.Application{}, false
+	}
+	return application, s.canUseApplication(actor, application.ID, "view")
+}
+
 func (s *Service) UsersFor(actorID string) ([]model.User, error) {
 	actor, err := s.activeActor(actorID)
 	if err != nil {
@@ -446,11 +463,22 @@ func (s *Service) UpdateApplication(id string, input model.SaveApplicationInput,
 }
 
 // Create 创建一个正式变更单（无幂等键）。兼容既有调用方；需要幂等请用 CreateIdempotent。
+//
+// 它**不接受**输入里的 agent_task_id：可信的 Agent 关联只能由 CreateIdempotent 在服务端
+// 核对通过后传入。这样"来源标记"就不会退化成客户端可以自己填的字段。
 func (s *Service) Create(input model.CreateChangeInput, actorID string) (model.ChangeRequest, error) {
-	return s.create(input, actorID, "")
+	return s.create(input, actorID, "", "")
 }
 
-func (s *Service) create(input model.CreateChangeInput, actorID, requestKey string) (model.ChangeRequest, error) {
+// CreateVerified 用**服务端已核对通过**的 Agent 任务 ID 创建变更单（无幂等键）。
+// 与 Create 的区别只有一点：它允许携带可信的 agent_task_id。
+func (s *Service) CreateVerified(input model.CreateChangeInput, actorID, verifiedAgentTaskID string) (model.ChangeRequest, error) {
+	return s.create(input, actorID, "", verifiedAgentTaskID)
+}
+
+// create 是所有创建路径的唯一实现。agentTaskID 是**服务端核对通过**的任务 ID（可为空）；
+// 客户端在请求体里声明的 agent_task_id 必须与它一致，否则拒绝。
+func (s *Service) create(input model.CreateChangeInput, actorID, requestKey, agentTaskID string) (model.ChangeRequest, error) {
 	actor, err := s.activeActor(actorID)
 	if err != nil {
 		return model.ChangeRequest{}, ErrForbidden
@@ -489,7 +517,11 @@ func (s *Service) create(input model.CreateChangeInput, actorID, requestKey stri
 		(hasArtifactKind(artifacts, model.ArtifactDatabase) && sqlText == "") {
 		return model.ChangeRequest{}, fmt.Errorf("%w：标题、环境、仓库信息或变更证据不符合要求", ErrValidation)
 	}
-	agentTaskID := strings.TrimSpace(input.AgentTaskID)
+	// 可信关联只认服务端核对过的值：客户端声明的 ID 必须与它一致，否则拒绝。
+	agentTaskID = strings.TrimSpace(agentTaskID)
+	if declared := strings.TrimSpace(input.AgentTaskID); declared != agentTaskID {
+		return model.ChangeRequest{}, fmt.Errorf("%w：agent_task_id 必须先通过服务端核对，不能由请求直接声明", ErrValidation)
+	}
 	if !validAgentTaskID(agentTaskID) {
 		return model.ChangeRequest{}, fmt.Errorf("%w：agent_task_id 不合法（仅允许字母、数字、下划线和连字符，最长 128 字符）", ErrValidation)
 	}

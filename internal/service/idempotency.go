@@ -33,10 +33,12 @@ type PassportIssueResult struct {
 // 语义：同一 (组织, 提交人, 幂等键) 上的重复请求——重复点击、并发到达、超时重试、
 // 进程重启后的重试——都只会得到**同一个**变更单，不会产生第二条。
 // 返回的 bool 表示本次调用是否是一次重放（没有新建）。
-func (s *Service) CreateIdempotent(input model.CreateChangeInput, actorID, key, digest string) (model.ChangeRequest, bool, error) {
+// verifiedAgentTaskID 是**服务端已核对通过**的 Agent 任务 ID（可为空）。它由 HTTP 层在
+// 核对了任务存在性、归属、来源、应用与材料之后传入；调用方不能靠请求体里的字段获得它。
+func (s *Service) CreateIdempotent(input model.CreateChangeInput, actorID, key, digest, verifiedAgentTaskID string) (model.ChangeRequest, bool, error) {
 	return executeIdempotent(s, actorID, "CREATE_CHANGE", "change", key, digest, http.StatusCreated,
 		func() (model.ChangeRequest, error) {
-			return s.create(input, actorID, key)
+			return s.create(input, actorID, key, verifiedAgentTaskID)
 		},
 		// 对账：进程可能在"变更已落库、幂等结果未落盘"之间崩溃。只认由**同一提交人**、
 		// 用**同一幂等键**创建的变更单，绝不把别人或别的请求的产物当成自己的重放。

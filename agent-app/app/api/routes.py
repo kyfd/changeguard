@@ -36,6 +36,7 @@ from app.service import (
     EvalInvalid,
     EvalNotFound,
     EvalStateUnavailable,
+    KnowledgeForbidden,
     KnowledgeInvalid,
     KnowledgeNotFound,
     KnowledgeStateUnavailable,
@@ -362,6 +363,8 @@ async def import_knowledge(payload: KnowledgeImportRequest, request: Request) ->
         return await _service(request).import_knowledge(payload, context)
     except KnowledgeInvalid as error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     except KnowledgeStateUnavailable as error:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
 
@@ -374,9 +377,12 @@ async def list_knowledge(
     application_id: str | None = None,
 ) -> list[KnowledgeView]:
     context = await resolve_context(request)
-    return await _service(request).list_knowledge(
-        context, kind=kind, status=status_filter, application_id=application_id
-    )
+    try:
+        return await _service(request).list_knowledge(
+            context, kind=kind, status=status_filter, application_id=application_id
+        )
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
 
 
 @router.get("/knowledge/search", response_model=list[KnowledgeSearchHit])
@@ -389,9 +395,12 @@ async def search_knowledge(
 ) -> list[KnowledgeSearchHit]:
     """在**服务端权限过滤之后**检索本组织可见的项目知识。"""
     context = await resolve_context(request)
-    return await _service(request).search_knowledge(
-        context, q, kind=kind, application_id=application_id, limit=limit
-    )
+    try:
+        return await _service(request).search_knowledge(
+            context, q, kind=kind, application_id=application_id, limit=limit
+        )
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
 
 
 @router.get("/knowledge/{knowledge_id}", response_model=KnowledgeDetail)
@@ -401,6 +410,8 @@ async def get_knowledge(knowledge_id: str, request: Request) -> KnowledgeDetail:
         return await _service(request).get_knowledge(knowledge_id, context)
     except KnowledgeNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识不存在") from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
 
 
 @router.post("/knowledge/{knowledge_id}/deprecate", response_model=KnowledgeView)
@@ -410,6 +421,8 @@ async def deprecate_knowledge(knowledge_id: str, request: Request) -> KnowledgeV
         return await _service(request).deprecate_knowledge(knowledge_id, context)
     except KnowledgeNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识不存在") from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     except KnowledgeStateUnavailable as error:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
 
