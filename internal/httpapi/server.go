@@ -1168,10 +1168,31 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "请求数据格式不正确")
 			return
 		}
-		change, err := s.service.Create(input, actorID(r))
+		// 幂等：携带 Idempotency-Key 时用持久化幂等记录创建。重复点击、并发请求、
+		// 超时重试与进程重启后的重试都只会得到同一个变更单，不会新建第二条。
+		key, ok := validatedIdempotencyKey(w, r)
+		if !ok {
+			return
+		}
+		if key == "" {
+			w.Header().Set("Idempotency-Status", "not-requested")
+			change, err := s.service.Create(input, actorID(r))
+			if err != nil {
+				writeServiceError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, change)
+			return
+		}
+		change, replayed, err := s.service.CreateIdempotent(
+			input, actorID(r), key, requestDigest("CREATE_CHANGE", "change", input),
+		)
 		if err != nil {
 			writeServiceError(w, err)
 			return
+		}
+		if replayed {
+			w.Header().Set("Idempotency-Replayed", "true")
 		}
 		writeJSON(w, http.StatusCreated, change)
 	default:

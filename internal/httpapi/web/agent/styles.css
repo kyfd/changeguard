@@ -489,6 +489,28 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .check-body { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
 .check-suggestion { color: var(--text-muted); font-size: 12px; }
 
+/* ---------- M2：版本历史与执行轨迹 ---------- */
+.version-item {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  background: var(--surface);
+}
+pre.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
 .empty {
   color: var(--text-muted); font-size: 13px; text-align: left; line-height: 1.8;
   padding: 24px 18px;

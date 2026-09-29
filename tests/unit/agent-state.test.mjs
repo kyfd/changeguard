@@ -17,7 +17,7 @@ function setup() {
     nodes.set(id, result);
     return result;
   }
-  for (const id of ['draftMeta', 'taskTimeline', 'evidenceBody', 'conversation', 'taskConfirmation']) node(id);
+  for (const id of ['draftMeta', 'taskTimeline', 'evidenceBody', 'conversation', 'taskConfirmation', 'errorBanner']) node(id);
   const context = vm.createContext({
     document,
     setInterval: () => 1,
@@ -25,7 +25,7 @@ function setup() {
     $: (id) => document.getElementById(id),
     CSS: { escape: (value) => String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&') },
   });
-  vm.runInContext(source + '\n globalThis.agent = { state, adoptTask, pollOnce, preserveView, draftSql, isLocallyEdited, refreshHealth, confirmMaterial, openHistoricalTask, refreshTaskHistory, createTask };', context);
+  vm.runInContext(source + '\n globalThis.agent = { state, adoptTask, pollOnce, preserveView, draftSql, isLocallyEdited, refreshHealth, confirmMaterial, openHistoricalTask, refreshTaskHistory, createTask, saveDraft, linkChange, renderTrace, renderVersions, loadTrace, loadVersions };', context);
   vm.runInContext('render = () => { globalThis.fullRenders = (globalThis.fullRenders || 0) + 1; };', context);
   return { ...context.agent, context, nodes, document, node };
 }
@@ -43,10 +43,11 @@ test('historical task restores authorized server response and URL id only', asyn
   h.context.URL = URL;
   h.context.window = { location: { href: 'http://localhost/agent/' }, history: { replaceState(_a, _b, url) { h.context.savedURL = String(url); } } };
   h.context.nextTask = task({ task_id: 'restored', status: 'DRAFT_READY' });
-  vm.runInContext('api = async path => { globalThis.requested = path; return nextTask; };', h.context);
+  vm.runInContext('globalThis.requests = []; api = async path => { globalThis.requests.push(path); return nextTask; };', h.context);
   await h.openHistoricalTask('restored');
   assert.equal(h.state.task.task_id, 'restored');
-  assert.equal(h.context.requested, '/api/agent/tasks/restored');
+  // 详情请求必须在其中；轨迹/版本等附加请求不应替换掉它。
+  assert.ok(h.context.requests.includes('/api/agent/tasks/restored'));
   assert.equal(h.context.savedURL, 'http://localhost/agent/?task=restored');
 });
 
@@ -85,10 +86,10 @@ test('new task creation invalidates an in-flight history response', async () => 
   for (const id of ['requirement', 'optApplication', 'optEnvironment', 'optDatabase', 'optTable', 'optQuerySql', 'optTimezone', 'optSchema', 'optPlannedAt', 'createButton']) h.node(id);
   h.nodes.get('requirement').value = 'new task';
   h.context.created = task({ task_id: 'new' });
-  vm.runInContext('clearError = () => {}; browserTimezone = () => "UTC"; api = path => path === "/api/agent/tasks" ? Promise.resolve(created) : new Promise(resolve => { globalThis.resolveHistory = resolve; });', h.context);
+  vm.runInContext('clearError = () => {}; browserTimezone = () => "UTC"; globalThis.pendingHistory = {}; api = path => path === "/api/agent/tasks" ? Promise.resolve(created) : new Promise(resolve => { globalThis.pendingHistory[path] = resolve; });', h.context);
   const old = h.openHistoricalTask('old');
   await h.createTask({ preventDefault() {} });
-  h.context.resolveHistory(task({ task_id: 'old' }));
+  h.context.pendingHistory['/api/agent/tasks/old'](task({ task_id: 'old' }));
   await old;
   assert.equal(h.state.task.task_id, 'new');
 });
@@ -182,10 +183,11 @@ test('partial rebuild restores input, selection, focus and ancestor scroll', () 
 test('in-flight response cannot restore an old task after switching', async () => {
   const h = setup();
   h.adoptTask(task());
-  vm.runInContext('api = () => new Promise(resolve => { globalThis.resolvePoll = resolve; });', h.context);
+  vm.runInContext('globalThis.pendings = []; api = () => new Promise(resolve => { globalThis.pendings.push(resolve); });', h.context);
   const pending = h.pollOnce();
   h.adoptTask(task({ task_id: 'B' }));
-  h.context.resolvePoll(task({ events: [{ detail: 'obsolete' }] }));
+  // 解析所有未决请求（含轨迹与版本），无论顺序：轮询响应都不能覆盖已切换的任务。
+  h.context.pendings.forEach((resolve) => resolve(task({ events: [{ detail: 'obsolete' }] })));
   await pending;
    assert.equal(h.state.task.task_id, 'B');
  });
@@ -203,6 +205,87 @@ test('in-flight response cannot restore an old task after switching', async () =
    await h.refreshHealth({ quiet: true });
    assert.equal(h.nodes.get('evidenceBody').innerHTML, 'degraded');
    assert.equal(h.context.fullRenders, 1);
+ });
+
+ test('server edit posts the expected version and adopts the new version', async () => {
+   const h = setup();
+   h.node('draftBody');
+   h.node('editReason');
+   h.adoptTask(task({ status: 'DRAFT_READY' }));
+   h.state.edits.sql = 'select 2';
+   h.context.editResponse = task({ status: 'DRAFT_READY', draft: { sql: 'select 2', rollback_sql: '', version: 2 } });
+   vm.runInContext('globalThis.calls = []; api = async (path, options) => { globalThis.calls.push({ path, options }); return editResponse; };', h.context);
+   await h.saveDraft();
+   const edit = h.context.calls.find((call) => call.path.endsWith('/draft'));
+   assert.equal(edit.path, '/api/agent/tasks/A/draft');
+   assert.equal(edit.options.method, 'POST');
+   assert.equal(edit.options.body.expected_version, 1);
+   assert.equal(edit.options.body.sql, 'select 2');
+   assert.equal(h.state.task.draft.version, 2);
+   assert.equal(h.state.edits.sql, null);
+ });
+
+ test('stale server edit (409) reloads the latest task instead of overwriting', async () => {
+   const h = setup();
+   h.node('draftBody');
+   h.node('editReason');
+   h.adoptTask(task({ status: 'DRAFT_READY' }));
+   h.state.edits.sql = 'select 9';
+   h.context.latest = task({ status: 'DRAFT_READY', draft: { sql: 'server', rollback_sql: '', version: 3 } });
+   vm.runInContext('globalThis.calls = []; api = async (path, options) => { globalThis.calls.push(path); if (options && options.method === "POST") { const error = new Error("stale"); error.status = 409; throw error; } return latest; }; handleActionError = () => {};', h.context);
+   await h.saveDraft();
+   assert.ok(h.context.calls.includes('/api/agent/tasks/A'));
+   assert.equal(h.state.task.draft.version, 3);
+   assert.equal(h.state.edits.sql, null);
+ });
+
+ test('unmodified draft is not re-saved', async () => {
+   const h = setup();
+   h.adoptTask(task({ status: 'DRAFT_READY' }));
+   vm.runInContext('globalThis.calls = 0; api = async () => { globalThis.calls++; return null; };', h.context);
+   await h.saveDraft();
+   assert.equal(h.context.calls, 0);
+ });
+
+ test('trace renders unknown values explicitly and never fabricates durations', () => {
+   const h = setup();
+   h.state.trace = {
+     task_id: 'A', includes_model_reasoning: false, unknown: ['cost_estimate', 'step_duration_ms'],
+     steps: [{ index: 1, kind: 'model_call', name: 'generate', status: 'timeout', duration_ms: null,
+       usage_known: false, prompt_tokens: null, evidence_ids: [], detail: '', model: 'm' }],
+   };
+   const html = h.renderTrace();
+   assert.match(html, /耗时未知/);
+   assert.match(html, /token 未知/);
+   assert.match(html, /费用/);
+   assert.doesNotMatch(html, />0 ms</);
+ });
+
+ test('version history renders snapshots and a diff control', () => {
+   const h = setup();
+   h.state.versions = [
+     { version: 1, origin: 'agent', actor: 'agent', created_at: '2026-09-28T00:00:00+00:00', reason: '', summary: '1 条', check_status: 'PASSED', content_hash: 'aaaa' },
+     { version: 2, origin: 'user_edit', actor: 'alice', created_at: '2026-09-28T01:00:00+00:00', reason: '评审修订', summary: '2 条', check_status: 'PASSED', content_hash: 'bbbb' },
+   ];
+   const html = h.renderVersions(task({ draft: { sql: 'x', rollback_sql: '', version: 2 } }));
+   assert.match(html, /人工编辑/);
+   assert.match(html, /评审修订/);
+   assert.match(html, /data-diff-to="2"/);
+   assert.match(html, /data-diff-from="1"/);
+ });
+
+ test('linking a change is a server call carrying the change id', async () => {
+   const h = setup();
+   h.node('draftBody');
+   h.adoptTask(task({ status: 'DRAFT_READY' }));
+   h.node('changeLinkInput').value = 'chg_1';
+   h.context.linkResponse = task({ status: 'DRAFT_READY', change_links: [{ change_request_id: 'chg_1', organization_id: 'o', linked_by: 'alice', linked_at: '2026-09-28T00:00:00+00:00' }] });
+   vm.runInContext('globalThis.calls = []; api = async (path, options) => { globalThis.calls.push({ path, options }); return linkResponse; };', h.context);
+   await h.linkChange();
+   const call = h.context.calls.find((item) => item.path.endsWith('/change-links'));
+   assert.equal(call.path, '/api/agent/tasks/A/change-links');
+   assert.equal(call.options.body.change_request_id, 'chg_1');
+   assert.equal(h.state.task.change_links[0].change_request_id, 'chg_1');
  });
 
  test('reordered questions keep typed answers and focus by field name', () => {

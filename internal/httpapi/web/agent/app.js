@@ -86,6 +86,10 @@ const state = {
   busy: false,
   editing: false,
   edits: { sql: null, rollback: null },
+  // M2：服务端执行轨迹、草案版本历史与版本差异。
+  trace: null,
+  versions: [],
+  versionDiff: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -610,6 +614,12 @@ function adoptTask(task) {
   const sameTask = previous && previous.task_id === task.task_id;
   const sameDraft = sameTask && JSON.stringify(previous.draft || null) === JSON.stringify(task.draft || null);
   if (!sameDraft) resetEdits();
+  if (!sameTask || !sameDraft) {
+    // 换任务或换了草案：轨迹/版本历史必须重新从服务端取，不能沿用上一个任务的。
+    state.trace = null;
+    state.versionDiff = null;
+    if (!sameTask) state.versions = [];
+  }
   state.task = task;
   // Only the opaque task id is persisted in the URL, never SQL or evidence.
   if (typeof window !== "undefined" && window.history?.replaceState && window.location?.href) {
@@ -621,6 +631,10 @@ function adoptTask(task) {
     refreshTaskView(previous);
   } else {
     render();
+  }
+  if (!sameTask || !sameDraft) {
+    loadTrace();
+    loadVersions();
   }
   if (TERMINAL.has(task.status) || isTaskReadOnly(task)) {
     stopPolling();
@@ -694,6 +708,11 @@ function refreshTaskView(previous) {
     preserveView($("draftBody"), renderDraft);
   }
   if (isTaskReadOnly(previous) !== isTaskReadOnly(task)) preserveView($("draftBody"), renderDraft);
+  // 关联正式变更单或版本数量变化时，草案栏里的版本历史/关联卡片必须跟着更新。
+  if (JSON.stringify([previous.change_links, previous.draft_version_count]) !==
+      JSON.stringify([task.change_links, task.draft_version_count])) {
+    preserveView($("draftBody"), renderDraft);
+  }
   if (JSON.stringify([previous.confirmations, previous.material_hash]) !==
       JSON.stringify([task.confirmations, task.material_hash])) {
     const confirmation = $("taskConfirmation");
@@ -1059,9 +1078,9 @@ function renderDraft() {
   // 而它正是"右侧检查结论已对当前文本失效"的唯一提醒。
   parts.push(`
     <article class="card card-warn" id="staleNoticeMiddle" hidden>
-      <div class="card-title"><span>本地编辑未经验证</span></div>
-      <p>下面显示的 SQL 已被本地修改。右侧的检查结果对应的是<strong>生成时的那一份 SQL</strong>，对当前文本已失效。</p>
-      <p class="note-inline">本地编辑只用于审阅，不会回传服务端。需要正式修改请重新提交需求。</p>
+      <div class="card-title"><span>本地修改尚未保存到服务端</span></div>
+      <p>下面显示的 SQL 已被本地修改。右侧的检查结果对应的是<strong>服务端当前版本</strong>，对这段本地文本已失效。</p>
+      <p class="note-inline">保存到服务端会创建一个<strong>新版本</strong>并重新执行确定性检查；检查未通过时任务会停在「检查阻断」，不会显示为可确认材料。旧确认随之失效，但旧版本与审计仍保留。</p>
     </article>
   `);
 
@@ -1081,6 +1100,13 @@ function renderDraft() {
       <div class="sql-block">
         <textarea id="sqlText" class="mono${staleClass}" rows="12" ${readOnlyAttr} spellcheck="false">${esc(draftSql())}</textarea>
       </div>
+      <label class="field"><span>修改原因（保存到服务端时记入版本快照）</span>
+        <input id="editReason" type="text" maxlength="2000" placeholder="例如：按评审意见改为 CREATE INDEX CONCURRENTLY" ${readOnlyAttr}>
+      </label>
+      <div class="sql-actions">
+        <button class="button button-small button-primary" type="button" id="saveDraft" disabled>保存到服务端并重新检查</button>
+        <span class="note-inline">服务端校验归属、任务状态与预期版本；陈旧页面会被拒绝，不会被静默覆盖。</span>
+      </div>
     </article>
 
     <article class="card">
@@ -1099,6 +1125,8 @@ function renderDraft() {
   parts.push(renderAssumptions(draft));
   parts.push(renderAdvice(draft));
   parts.push(`<div id="taskConfirmation">${renderConfirmation(task)}</div>`);
+  parts.push(renderVersions(task));
+  parts.push(renderChangeLinks(task));
 
   if ((draft.revision_notes || []).length) {
     parts.push(`
@@ -1131,6 +1159,7 @@ function renderDraft() {
   if (isTaskReadOnly(task)) {
     if (sqlText) sqlText.readOnly = true;
     if (rollbackText) rollbackText.readOnly = true;
+    if ($("editReason")) $("editReason").readOnly = true;
     if ($("editToggle")) $("editToggle").disabled = true;
   }
 
@@ -1140,6 +1169,8 @@ function renderDraft() {
       state.editing = editToggle.checked;
       if (sqlText) sqlText.readOnly = !state.editing;
       if (rollbackText) rollbackText.readOnly = !state.editing;
+      const reason = $("editReason");
+      if (reason) reason.readOnly = !state.editing;
     });
   }
 
@@ -1160,6 +1191,22 @@ function renderDraft() {
 
   const confirmButtonEl = $("confirmButton");
   if (confirmButtonEl) confirmButtonEl.addEventListener("click", confirmMaterial);
+
+  const saveButton = $("saveDraft");
+  if (saveButton) saveButton.addEventListener("click", saveDraft);
+
+  host.querySelectorAll("[data-diff-to]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const from = button.dataset.diffFrom ? Number(button.dataset.diffFrom) : null;
+      loadDiff(from, Number(button.dataset.diffTo));
+    });
+  });
+
+  const linkButton = $("linkChange");
+  if (linkButton) linkButton.addEventListener("click", linkChange);
+
+  const closeDiff = $("closeDiff");
+  if (closeDiff) closeDiff.addEventListener("click", () => { state.versionDiff = null; renderDraft(); });
 }
 
 /** SQL 一改，旧检查结果必须立刻标为失效，而不是继续显示为当前结论。
@@ -1178,6 +1225,8 @@ function markStale() {
   });
   const reset = $("resetSql");
   if (reset) reset.disabled = !stale;
+  const save = $("saveDraft");
+  if (save) save.disabled = !stale || isTaskReadOnly(state.task);
   const confirm = $("confirmButton");
   if (confirm) {
     confirm.disabled = stale || confirm.dataset.confirmed === "true";
@@ -1267,6 +1316,231 @@ function renderConfirmation(task) {
       <div class="sql-actions">${button}</div>
     </article>
   `;
+}
+
+/* ---------- M2：服务端执行轨迹与草案版本 ---------- */
+
+let traceGeneration = 0;
+let versionsGeneration = 0;
+let diffGeneration = 0;
+
+const TRACE_KIND_LABELS = { event: "事件", tool: "工具", model_call: "模型调用", check: "检查", draft: "草案" };
+const TRACE_STATUS_TONE = {
+  ok: "badge-ok", passed: "badge-ok", waiting: "badge-warn", blocked: "badge-danger",
+  failed: "badge-danger", timeout: "badge-danger", pending: "badge-muted", unknown: "badge-muted",
+};
+const UNKNOWN_LABELS = {
+  step_duration_ms: "部分步骤耗时", token_totals: "token 总量", cost_estimate: "费用",
+  usage: "用量", check_status: "检查状态", "tool_observation.observed_at": "工具观察时间",
+};
+
+function traceStepLine(step) {
+  const tone = TRACE_STATUS_TONE[step.status] || "badge-muted";
+  const duration = (step.duration_ms === null || step.duration_ms === undefined) ? "耗时未知" : `${step.duration_ms} ms`;
+  let tokens = "";
+  if (step.usage_known === false) tokens = "token 未知";
+  else if (step.prompt_tokens !== null && step.prompt_tokens !== undefined) {
+    tokens = `prompt ${step.prompt_tokens} · completion ${step.completion_tokens === null || step.completion_tokens === undefined ? "未知" : step.completion_tokens}`;
+  }
+  const refs = (step.evidence_ids || []).length ? `引用 ${step.evidence_ids.length} 条` : "";
+  const meta = [duration, tokens, refs, step.model || ""].filter(Boolean).join(" · ");
+  return `
+    <div class="check-item">
+      <span class="check-code">${esc(step.index)}. ${esc(TRACE_KIND_LABELS[step.kind] || step.kind)} · ${esc(step.name)}</span>
+      <span class="check-body">
+        <span><span class="badge ${tone}">${esc(step.status)}</span> <span class="note-inline">${esc(meta)}</span></span>
+        ${step.detail ? `<span class="check-suggestion">${esc(step.detail)}</span>` : ""}
+        ${step.error ? `<span class="check-suggestion tone-danger">${esc(step.error)}</span>` : ""}
+      </span>
+    </div>`;
+}
+
+function renderTrace() {
+  const trace = state.trace;
+  if (!trace) return "";
+  const steps = trace.steps || [];
+  const unknown = (trace.unknown || []).map((item) => UNKNOWN_LABELS[item] || item);
+  const items = steps.length
+    ? `<div class="stack">${steps.map(traceStepLine).join("")}</div>`
+    : '<p class="note-inline">还没有可展示的步骤。</p>';
+  return `
+    <article class="card card-flat" id="tracePanel">
+      <div class="card-title"><span>执行轨迹（逐步）</span><span class="badge badge-muted">不含模型思维链</span></div>
+      <p class="note-inline">步骤来自已落盘的事件、工具观察与调用账本；未记录的耗时 / token / 费用显示为<strong>未知</strong>，不用 0 代替。</p>
+      ${items}
+      ${unknown.length ? `<p class="note-inline">未知项：${esc(unknown.join("、"))}</p>` : ""}
+      <div class="sql-actions"><button class="button button-small" type="button" id="refreshTrace">刷新轨迹</button></div>
+    </article>`;
+}
+
+function renderVersions(task) {
+  if (!task.draft) return "";
+  const versions = state.versions || [];
+  const current = Number(task.draft.version);
+  const rows = versions.length
+    ? versions.slice().reverse().map((item) => {
+        const index = versions.findIndex((candidate) => candidate.version === item.version);
+        const previous = index > 0 ? versions[index - 1].version : "";
+        const isCurrent = Number(item.version) === current;
+        const origin = item.origin === "user_edit" ? "人工编辑" : "生成";
+        const tone = item.origin === "user_edit" ? "badge-confirm" : "badge-muted";
+        const compare = previous === ""
+          ? '<button class="button button-small" type="button" disabled>首版无对比对象</button>'
+          : `<button class="button button-small" type="button" data-diff-to="${esc(item.version)}" data-diff-from="${esc(previous)}">与 v${esc(previous)} 对比</button>`;
+        return `
+          <li class="version-item">
+            <div class="card-title">
+              <span>v${esc(item.version)}${isCurrent ? " · 当前" : ""}</span>
+              <span class="badge ${tone}">${origin}</span>
+            </div>
+            <p class="note-inline">${esc(formatDate(item.created_at))} · ${esc(item.actor)} · 检查 ${esc(item.check_status)}</p>
+            ${item.reason ? `<p>${esc(item.reason)}</p>` : ""}
+            <p class="note-inline">${esc(item.summary || "")}</p>
+            <div class="sql-actions">${compare}<span class="note-inline mono">${esc((item.content_hash || "").slice(0, 12))}</span></div>
+          </li>`;
+      }).join("")
+    : '<li class="note-inline">还没有版本快照。</li>';
+
+  const diff = state.versionDiff;
+  const diffBlock = diff ? `
+    <div class="card card-flat">
+      <div class="card-title">
+        <span>版本差异 v${esc(diff.from_version === null || diff.from_version === undefined ? "—" : diff.from_version)} → v${esc(diff.to_version)}</span>
+        <button class="button button-small" type="button" id="closeDiff">关闭</button>
+      </div>
+      <pre class="mono">${esc(diff.sql_diff || "（变更 SQL 无差异）")}</pre>
+      <pre class="mono">${esc(diff.rollback_diff || "（回滚 SQL 无差异）")}</pre>
+    </div>` : "";
+
+  return `
+    <article class="card" id="versionHistory">
+      <div class="card-title"><span>版本历史</span><span class="badge badge-muted">不可变快照</span></div>
+      <p class="note-inline">每次生成或人工编辑都保留一份快照（谁、何时、为什么、内容摘要与检查结论）。旧版本与审计不会被删除。</p>
+      <ul class="stack">${rows}</ul>
+      ${diffBlock}
+    </article>`;
+}
+
+function renderChangeLinks(task) {
+  const links = task.change_links || [];
+  const items = links.length
+    ? `<ul>${links.map((item) => `<li><span class="mono">${esc(item.change_request_id)}</span> <span class="note-inline">${esc(formatDate(item.linked_at))} · ${esc(item.linked_by)}</span></li>`).join("")}</ul>`
+    : '<p class="note-inline">尚未关联正式变更单。</p>';
+  const readonly = isTaskReadOnly(task);
+  const controls = readonly
+    ? '<p class="note-inline">任务只读，恢复至活跃列表后才能建立关联。</p>'
+    : `<div class="sql-actions">
+         <input id="changeLinkInput" type="text" maxlength="128" placeholder="正式变更单 ID（如 chg_…）" autocomplete="off">
+         <button class="button button-small" type="button" id="linkChange">建立关联</button>
+       </div>`;
+  return `
+    <article class="card card-flat" id="changeLinkCard">
+      <div class="card-title"><span>正式变更单关联</span><span class="badge badge-muted">关联 ≠ 批准</span></div>
+      <p class="note-inline">关联只表示"这个变更单由本任务的人工动作关联而来"，<strong>不代表已获批准，也不授予执行权限</strong>；服务端会先核对变更单存在且属于本组织。</p>
+      ${items}
+      ${controls}
+    </article>`;
+}
+
+async function loadTrace() {
+  const id = state.task && state.task.task_id;
+  if (!id) return;
+  const generation = ++traceGeneration;
+  try {
+    const trace = await api(`/api/agent/tasks/${encodeURIComponent(id)}/trace`);
+    if (generation !== traceGeneration || !state.task || state.task.task_id !== id) return;
+    state.trace = trace;
+    preserveView($("evidenceBody"), renderEvidence);
+  } catch (error) {
+    // 轨迹获取失败不阻塞主流程；保留上一次（可能为空）而不是显示编造的内容。
+  }
+}
+
+async function loadVersions() {
+  const id = state.task && state.task.task_id;
+  if (!id || !state.task.draft) { state.versions = []; return; }
+  const generation = ++versionsGeneration;
+  try {
+    const versions = await api(`/api/agent/tasks/${encodeURIComponent(id)}/draft/versions`);
+    if (generation !== versionsGeneration || !state.task || state.task.task_id !== id) return;
+    state.versions = Array.isArray(versions) ? versions : [];
+    preserveView($("draftBody"), renderDraft);
+  } catch (error) {
+    // 版本历史获取失败：保留现有列表，不覆盖。
+  }
+}
+
+async function loadDiff(from, to) {
+  const id = state.task && state.task.task_id;
+  if (!id || !to) return;
+  const generation = ++diffGeneration;
+  const params = [`to=${encodeURIComponent(to)}`];
+  if (from) params.push(`from=${encodeURIComponent(from)}`);
+  try {
+    const diff = await api(`/api/agent/tasks/${encodeURIComponent(id)}/draft/diff?${params.join("&")}`);
+    if (generation !== diffGeneration || !state.task || state.task.task_id !== id) return;
+    state.versionDiff = diff;
+    preserveView($("draftBody"), renderDraft);
+  } catch (error) {
+    handleActionError(error);
+  }
+}
+
+/** 把本地修改保存为服务端新版本：带预期版本，陈旧页面会被拒绝（409）。 */
+async function saveDraft() {
+  const task = state.task;
+  if (!task || !task.draft || state.busy) return;
+  // 没有本地修改时不必制造一个内容相同的新版本。
+  if (!isLocallyEdited()) return;
+  const sql = draftSql();
+  if (!sql.trim()) { showError("变更 SQL 不能为空。"); return; }
+  const id = task.task_id;
+  clearError();
+  state.busy = true;
+  let stale = false;
+  try {
+    const updated = await api(`/api/agent/tasks/${encodeURIComponent(id)}/draft`, {
+      method: "POST",
+      body: {
+        expected_version: task.draft.version,
+        sql,
+        rollback_sql: draftRollback(),
+        reason: ($("editReason") && $("editReason").value.trim()) || "",
+      },
+    });
+    if (state.task && state.task.task_id === id) { resetEdits(); adoptTask(updated); }
+  } catch (error) {
+    handleActionError(error);
+    stale = error.status === 409;
+  } finally { state.busy = false; }
+  // 服务端拒绝（陈旧版本 / 状态变化）：重新拉取最新记录，避免用户继续覆盖。
+  // 刷新在释放 busy 之后进行，界面不会因为一次后台刷新而变得不可操作。
+  if (stale) {
+    try {
+      const latest = await api(`/api/agent/tasks/${encodeURIComponent(id)}`);
+      if (state.task && state.task.task_id === id) { resetEdits(); adoptTask(latest); }
+    } catch (reloadError) { /* 保持当前视图，等待轮询或手动刷新 */ }
+  }
+}
+
+/** 建立 Agent 任务与正式变更单的服务端权威关联（人工动作，服务端再校验）。 */
+async function linkChange() {
+  const task = state.task;
+  if (!task || state.busy) return;
+  const input = $("changeLinkInput");
+  const changeID = input && input.value.trim();
+  if (!changeID) { showError("请填写要关联的正式变更单 ID。"); return; }
+  const id = task.task_id;
+  clearError();
+  state.busy = true;
+  try {
+    const updated = await api(`/api/agent/tasks/${encodeURIComponent(id)}/change-links`, {
+      method: "POST", body: { change_request_id: changeID },
+    });
+    if (state.task && state.task.task_id === id) adoptTask(updated);
+  } catch (error) {
+    handleActionError(error);
+  } finally { state.busy = false; }
 }
 
 /** 执行轨迹与预算：实际用了什么策略、为什么停下、花了多少。 */
@@ -1374,6 +1648,7 @@ function renderEvidence() {
   const parts = [];
 
   parts.push(renderServiceStatus());
+  parts.push(renderTrace());
   parts.push(renderTrajectory(task));
   if (draft) {
     parts.push(renderCheck(draft));
@@ -1387,6 +1662,9 @@ function renderEvidence() {
   parts.push(renderProvenance());
 
   host.innerHTML = parts.join("");
+
+  const refreshTrace = $("refreshTrace");
+  if (refreshTrace) refreshTrace.addEventListener("click", loadTrace);
 }
 
 function renderCheck(draft) {

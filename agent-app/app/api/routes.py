@@ -21,7 +21,8 @@ from fastapi.responses import JSONResponse
 
 from app.schemas.drafts import (
     ClarifyRequest, ConfirmRequest, CreateTaskRequest, DeleteTaskPreview,
-    DeleteTaskRequest, TaskStatus, TaskView,
+    DeleteTaskRequest, DraftEditRequest, DraftVersion, DraftVersionDiff,
+    LinkChangeRequest, TaskStatus, TaskTrace, TaskView,
 )
 from app.service import (
     AgentService,
@@ -188,6 +189,68 @@ async def _manage_task(task_id: str, request: Request, operation: str, **kwargs:
     context = await resolve_context(request)
     try:
         return await getattr(_service(request), operation)(task_id, context, **kwargs)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+    except TaskNotResumable as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except TaskStateUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@router.get("/tasks/{task_id}/trace", response_model=TaskTrace)
+async def task_trace(task_id: str, request: Request) -> TaskTrace:
+    """执行轨迹：真实步骤、状态、耗时、引用、token、费用与失败原因（不含模型思维链）。"""
+    context = await resolve_context(request)
+    try:
+        return await _service(request).task_trace(task_id, context)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+
+
+@router.get("/tasks/{task_id}/draft/versions", response_model=list[DraftVersion])
+async def draft_versions(task_id: str, request: Request) -> list[DraftVersion]:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).draft_versions(task_id, context)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+
+
+@router.get("/tasks/{task_id}/draft/diff", response_model=DraftVersionDiff)
+async def draft_diff(
+    task_id: str, request: Request,
+    from_version: int | None = Query(default=None, alias="from"),
+    to_version: int | None = Query(default=None, alias="to"),
+) -> DraftVersionDiff:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).draft_version_diff(task_id, context, from_version, to_version)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+    except TaskNotResumable as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/tasks/{task_id}/draft", response_model=TaskView)
+async def edit_draft(task_id: str, payload: DraftEditRequest, request: Request) -> TaskView:
+    """服务端版本化编辑草案：校验归属/状态/预期版本，重新执行确定性检查，失败关闭。"""
+    context = await resolve_context(request)
+    try:
+        return await _service(request).edit_draft(task_id, context, payload)
+    except TaskNotFound as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+    except TaskNotResumable as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except TaskStateUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@router.post("/tasks/{task_id}/change-links", response_model=TaskView)
+async def link_change(task_id: str, payload: LinkChangeRequest, request: Request) -> TaskView:
+    """把任务关联到一个已存在的正式变更单（人工动作；服务端校验 + 幂等）。"""
+    context = await resolve_context(request)
+    try:
+        return await _service(request).link_change(task_id, context, payload)
     except TaskNotFound as error:
         raise HTTPException(status_code=404, detail="任务不存在") from error
     except TaskNotResumable as error:

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import uuid
@@ -26,24 +27,34 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
+
 from app.budget import PHASE_GENERATE, LedgerPersistError, UsageLedger, usage_scope
 from app.config import Settings
 from app.guard import detect_injection
 from app.llm.provider import build_provider
 from app.retrieval.corpus import build_retriever
 from app.schemas.drafts import (
+    ChangeLink,
     ClarifyRequest,
     ConfirmRequest,
     CreateTaskRequest,
     DatabaseKind,
     DeleteTaskPreview,
+    DeterministicCheck,
+    DraftEditRequest,
+    DraftVersion,
+    DraftVersionDiff,
+    LinkChangeRequest,
     TaskSlots,
     TaskStatus,
+    TaskTrace,
     TaskView,
 )
 from app.store.tasks import TaskRepository
 from app.tools.business import Toolbox
 from app.tools.registry import TrustedContext
+from app.trace import build_trace
 from app.workflow.checkpoint import has_checkpoint, open_checkpointer
 from app.workflow.graph import DraftWorkflow, WorkflowDeps
 from app.workflow.state import event, input_version, material_hash, merge_slot_data
@@ -534,8 +545,8 @@ class AgentService:
         if record.get("status") not in {"FAILED", "CANCELLED", "INPUT_REJECTED"} or self._has_live_execution(record["task_id"]):
             blockers.append("仅允许清理已停止的失败、取消或输入拒绝任务")
         # 现有系统尚无权威跨服务关联索引：有过材料/确认的记录保守地只允许归档。
-        if record.get("draft") or record.get("confirmations") or any(
-            item.get("kind") in {"generate_draft", "finalize", "confirmed"}
+        if record.get("draft") or record.get("confirmations") or record.get("change_links") or any(
+            item.get("kind") in {"generate_draft", "finalize", "confirmed", "change_linked"}
             for item in record.get("events") or []
         ) or any(
             record.get(key) for key in ("change_id", "change_request_id", "linked_change_id", "submitted_change_id")
@@ -554,6 +565,203 @@ class AgentService:
         # 校验与原子落盘之间没有 await；单实例事件循环不能插入另一生命周期操作。
         record["deleted_at"] = datetime.now(timezone.utc).isoformat()
         return self._save_management(record, "moved_to_trash", context)
+
+    # -- M2：执行轨迹与草案版本 -------------------------------------------
+
+    async def task_trace(self, task_id: str, context: TrustedContext) -> TaskTrace:
+        """执行轨迹投影。
+
+        只展示**已落盘的**事件、工具观察、模型调用账本与检查结论：步骤、状态、
+        实测耗时、引用、token、费用与失败原因。未记录的一律标为未知（不填 0），
+        且不含模型内部思维链。
+        """
+        return build_trace(self._authorize(task_id, context))
+
+    async def draft_versions(self, task_id: str, context: TrustedContext) -> list[DraftVersion]:
+        record = self._authorize(task_id, context)
+        return [DraftVersion.model_validate(item) for item in record.get("draft_versions") or []]
+
+    async def draft_version_diff(
+        self, task_id: str, context: TrustedContext, from_version: int | None, to_version: int | None
+    ) -> DraftVersionDiff:
+        record = self._authorize(task_id, context)
+        versions = [DraftVersion.model_validate(item) for item in record.get("draft_versions") or []]
+        if not versions:
+            raise TaskNotResumable("该任务还没有草案版本快照")
+        target_version = int(to_version) if to_version is not None else versions[-1].version
+        target = next((item for item in versions if item.version == target_version), None)
+        if target is None:
+            raise TaskNotResumable(f"草案版本 v{target_version} 不存在")
+        if from_version is None:
+            # 默认对照上一版；没有上一版时与空内容对照（展示整份材料的引入）。
+            previous = next((item for item in reversed(versions) if item.version < target_version), None)
+        else:
+            previous = next((item for item in versions if item.version == int(from_version)), None)
+            if previous is None:
+                raise TaskNotResumable(f"草案版本 v{from_version} 不存在")
+        return DraftVersionDiff(
+            task_id=task_id,
+            from_version=previous.version if previous else None,
+            to_version=target.version,
+            sql_diff=_unified_diff(previous.sql if previous else "", target.sql, "sql"),
+            rollback_diff=_unified_diff(previous.rollback_sql if previous else "", target.rollback_sql, "rollback"),
+        )
+
+    async def edit_draft(self, task_id: str, context: TrustedContext, request: DraftEditRequest) -> TaskView:
+        """服务端版本化编辑草案。
+
+        边界（失败关闭）：
+
+        - 归属（组织 + 创建者）由 `_authorize` 校验；归档 / 回收站任务只读；
+        - 只有 `DRAFT_READY` / `CHECK_BLOCKED` 且没有在途执行时可编辑；
+        - `expected_version` 必须与当前草案版本一致，否则拒绝（陈旧页面 / 并发覆盖）；
+        - 编辑后**重新执行确定性检查**，新内容绝不沿用旧检查结果；检查工具失败即失败关闭
+          （状态落到 `CHECK_BLOCKED`，不会变成 `DRAFT_READY`）；
+        - 内容变化使旧人工确认**失效**，但审计、旧确认与旧版本快照全部保留。
+        """
+        record = self._authorize(task_id, context)
+        self._ensure_active(record)
+        if record.get("status") not in {TaskStatus.DRAFT_READY.value, TaskStatus.CHECK_BLOCKED.value}:
+            raise TaskNotResumable(f"当前状态 {record.get('status')} 不允许编辑材料")
+        if self._has_live_execution(task_id):
+            raise TaskNotResumable("任务仍有执行在进行中，请先取消或等待结束")
+        draft = record.get("draft") or {}
+        if not draft:
+            raise TaskNotResumable("当前任务没有可编辑的草案")
+        current_version = int(draft.get("version") or 1)
+        if int(request.expected_version) != current_version:
+            raise TaskNotResumable(
+                f"草案已被更新（当前 v{current_version}），您看到的是旧版本；请刷新后重试"
+            )
+        # 自由文本说明按新输入筛查；SQL 是材料，不作为提示词注入处理。
+        _screen_new_input(request.reason or "")
+
+        check = await self._scan_material(record, request.sql, request.rollback_sql)
+
+        # 校验与落盘之间只隔着一次同步读取：确认在检查期间没有并发编辑/状态变化。
+        latest = self._repository.get(task_id)
+        if latest is None:
+            raise TaskNotFound(task_id)
+        if int((latest.get("draft") or {}).get("version") or 1) != current_version:
+            raise TaskNotResumable("草案已被其他操作更新，本次编辑未生效；请刷新后重试")
+        if latest.get("status") not in {TaskStatus.DRAFT_READY.value, TaskStatus.CHECK_BLOCKED.value}:
+            raise TaskNotResumable("任务状态已变化，本次编辑未生效；请刷新后重试")
+
+        new_version = current_version + 1
+        new_draft = dict(draft)
+        new_draft.update(
+            {
+                "version": new_version,
+                "sql": request.sql,
+                "rollback_sql": request.rollback_sql,
+                "deterministic_check": check.model_dump(mode="json"),
+                "revision_notes": [*(draft.get("revision_notes") or []), f"人工编辑 v{new_version}"],
+            }
+        )
+        record["draft"] = new_draft
+        # 检查未通过（含扫描工具失败）时失败关闭：状态是 CHECK_BLOCKED，不是 DRAFT_READY。
+        record["status"] = (
+            TaskStatus.CHECK_BLOCKED.value if check.status in {"BLOCKED", "FAILED"} else TaskStatus.DRAFT_READY.value
+        )
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        # 材料内容已变：旧确认失效（保留痕跡）；新检查结果是针对**新内容**计算的。
+        _invalidate_stale_confirmations(record, "材料已被人工编辑，旧确认失效")
+        _record_draft_version(
+            record, origin="user_edit", actor=context.user_id, reason=request.reason or "", draft=new_draft
+        )
+        events = list(record.get("events") or [])
+        events.append(
+            event("draft_edited", f"创建者 {context.user_id} 服务端编辑材料至 v{new_version}；检查 {check.status}")
+        )
+        record["events"] = events
+        try:
+            self._repository.save(record)
+        except OSError as error:
+            # 失败关闭且状态不变：内存不得领先磁盘（TaskRepository 先落盘后提交内存）。
+            raise TaskStateUnavailable("材料编辑未落盘，请重试") from error
+        return self._view(record)
+
+    async def link_change(self, task_id: str, context: TrustedContext, request: LinkChangeRequest) -> TaskView:
+        """把本任务关联到一个**已存在**的正式变更单（人工动作，服务端校验）。
+
+        三条边界：
+
+        - 归档 / 回收站任务只读：不允许借本接口绕过生命周期限制；
+        - 关联前必须通过治理后端只读接口确认该变更存在且属于本组织，**失败关闭**；
+        - 同一 `change_request_id`（或同一幂等键）重复提交是幂等的，不新增关联、不重复写事件。
+
+        关联**不是**授权凭据：它不代表变更单已获批，也不授予任何生产执行权利。
+        """
+        record = self._authorize(task_id, context)
+        self._ensure_active(record)
+        if self._has_live_execution(task_id):
+            raise TaskNotResumable("任务仍在执行，请稍后再关联正式变更单")
+        change_id = (request.change_request_id or "").strip()
+        if not change_id:
+            raise TaskNotResumable("change_request_id 不能为空")
+        idempotency_key = (request.idempotency_key or change_id).strip()
+        links = list(record.get("change_links") or [])
+        for item in links:
+            if item.get("change_request_id") == change_id or (
+                item.get("idempotency_key") and item.get("idempotency_key") == idempotency_key
+            ):
+                return self._view(record)
+        if not await self._change_exists(change_id, context):
+            raise TaskNotResumable("无法确认该正式变更单存在且属于本组织，未建立关联")
+        links.append(
+            {
+                "change_request_id": change_id,
+                "organization_id": context.organization_id,
+                "linked_by": context.user_id,
+                "linked_at": datetime.now(timezone.utc).isoformat(),
+                "origin": "agent_task",
+                "idempotency_key": idempotency_key,
+            }
+        )
+        record["change_links"] = links
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        events = list(record.get("events") or [])
+        events.append(event("change_linked", f"创建者 {context.user_id} 关联正式变更单 {change_id}（关联不代表批准）"))
+        record["events"] = events
+        try:
+            self._repository.save(record)
+        except OSError as error:
+            raise TaskStateUnavailable("变更关联未落盘，请重试") from error
+        return self._view(record)
+
+    async def _scan_material(self, record: dict[str, Any], sql: str, rollback_sql: str) -> DeterministicCheck:
+        """对给定材料执行确定性扫描。工具失败按 FAILED 返回（失败关闭，绝不当作通过）。"""
+        registry = Toolbox(
+            settings=self._settings,
+            retriever=self._retriever,
+            schema_snapshot=record.get("schema_snapshot") or "",
+        ).build()
+        result = await registry.call(
+            "scan_sql",
+            {"sql": sql, "rollback_sql": rollback_sql},
+            TrustedContext(
+                user_id=record.get("user_id") or "",
+                organization_id=record.get("organization_id") or "",
+            ),
+        )
+        if not result.ok:
+            return DeterministicCheck(status="FAILED", source="scan_sql", error=result.error or "确定性扫描未执行")
+        return DeterministicCheck.model_validate(result.data)
+
+    async def _change_exists(self, change_id: str, context: TrustedContext) -> bool:
+        """通过治理后端内部只读接口确认变更存在且属于本组织。缺密钥即失败关闭。"""
+        token = self._settings.upstream_token.strip()
+        if not token:
+            return False
+        url = f"{self._settings.governance_base_url}/api/agent-tools/changes/{change_id}"
+        headers = dict(context.as_headers())
+        headers["X-Agent-Upstream-Token"] = token
+        try:
+            async with httpx.AsyncClient(timeout=self._settings.governance_timeout_seconds) as client:
+                response = await client.get(url, params={"projection": "context"}, headers=headers)
+        except Exception:  # noqa: BLE001 - 治理后端不可达时失败关闭，不建立未经验证的关联
+            return False
+        return response.status_code == 200
 
     async def cancel(self, task_id: str, context: TrustedContext) -> TaskView:
         record = self._authorize(task_id, context)
@@ -998,6 +1206,8 @@ class AgentService:
                 "strategy": investigation.get("strategy") or record.get("strategy"),
             }
         )
+        # 草案（重新）生成后保留一份版本快照；内容未变时不重复追加。
+        _record_draft_version(record, origin="agent", actor="agent", reason="工作流生成", created_at=datetime.now(timezone.utc))
         # 草案重新生成后，与当前内容不一致的旧确认立即失效（保留痕跡）。
         _invalidate_stale_confirmations(record, "草案已重新生成，旧确认失效")
         _annotate_recovery(record)
@@ -1107,6 +1317,8 @@ class AgentService:
                 "restart_policy": record.get("restart_policy"),
                 "material_hash": _current_material_hash(record) or None,
                 "confirmations": record.get("confirmations") or [],
+                "draft_version_count": len(record.get("draft_versions") or []),
+                "change_links": record.get("change_links") or [],
                 "strategy": record.get("strategy") or self._settings.investigation_strategy,
                 "investigation": record.get("investigation"),
                 "usage": record.get("usage"),
@@ -1186,6 +1398,85 @@ def _current_material_hash(record: dict[str, Any]) -> str:
     if not draft:
         return ""
     return material_hash(str(draft.get("sql") or ""), str(draft.get("rollback_sql") or ""))
+
+
+def _unified_diff(before: str, after: str, label: str) -> str:
+    """统一 diff（服务端计算，不依赖浏览器）。内容相同则返回空串。"""
+    lines = difflib.unified_diff(
+        (before or "").splitlines(),
+        (after or "").splitlines(),
+        fromfile=f"{label}:before",
+        tofile=f"{label}:after",
+        lineterm="",
+    )
+    return "\n".join(lines)
+
+
+def _material_summary(draft: dict[str, Any]) -> str:
+    """人可读的材料摘要（语句类型、回滚、长度），仅用于版本列表展示。"""
+    sql = str(draft.get("sql") or "")
+    rollback = str(draft.get("rollback_sql") or "")
+    statements = [part.strip() for part in sql.split(";") if part.strip()]
+    verbs: list[str] = []
+    for statement in statements:
+        head = statement.split(None, 1)[0].upper() if statement.split() else ""
+        if head and head not in verbs:
+            verbs.append(head)
+    parts = [f"{len(statements)} 条变更语句" + (f"（{'/'.join(verbs)}）" if verbs else "")]
+    parts.append("含回滚" if rollback.strip() else "缺少回滚")
+    parts.append(f"变更 {len(sql)} 字符")
+    return "；".join(parts)
+
+
+def _draft_version_entry(
+    draft: dict[str, Any], *, origin: str, actor: str, reason: str, created_at: datetime | None = None
+) -> dict[str, Any]:
+    """把一份草案物化成不可变版本快照。"""
+    check = draft.get("deterministic_check") or {}
+    return {
+        "version": int(draft.get("version") or 1),
+        "created_at": (created_at or datetime.now(timezone.utc)).isoformat(),
+        "origin": origin,
+        "actor": actor,
+        "reason": reason or "",
+        "sql": draft.get("sql") or "",
+        "rollback_sql": draft.get("rollback_sql") or "",
+        "content_hash": material_hash(str(draft.get("sql") or ""), str(draft.get("rollback_sql") or "")),
+        "summary": _material_summary(draft),
+        "check_status": str(check.get("status") or "NOT_RUN"),
+        "check_source": str(check.get("source") or "local_scan"),
+        "check_error": check.get("error"),
+        "check_blocking_count": int(check.get("blocking_count") or 0),
+        "evidence_ids": [str(item.get("evidence_id")) for item in (draft.get("evidence") or [])],
+        "revision_notes": list(draft.get("revision_notes") or []),
+    }
+
+
+def _record_draft_version(
+    record: dict[str, Any],
+    *,
+    origin: str,
+    actor: str,
+    reason: str = "",
+    draft: dict[str, Any] | None = None,
+    created_at: datetime | None = None,
+) -> bool:
+    """追加一份草案版本快照；返回是否真的新增。
+
+    - 工作流生成（origin="agent"）在内容与上一版**完全相同**时不新增，避免把恢复重跑
+      记成"新材料版本"；
+    - 人工编辑（origin="user_edit"）总会新增（版本号由编辑路径递增）。
+    """
+    resolved = draft if draft is not None else (record.get("draft") or {})
+    if not resolved:
+        return False
+    entry = _draft_version_entry(resolved, origin=origin, actor=actor, reason=reason, created_at=created_at)
+    versions = list(record.get("draft_versions") or [])
+    if origin == "agent" and versions and versions[-1].get("content_hash") == entry["content_hash"]:
+        return False
+    versions.append(entry)
+    record["draft_versions"] = versions
+    return True
 
 
 def _invalidate_stale_confirmations(record: dict[str, Any], reason: str) -> bool:

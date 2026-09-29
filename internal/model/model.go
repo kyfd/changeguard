@@ -219,43 +219,51 @@ type TimelineEntry struct {
 }
 
 type ChangeRequest struct {
-	OrganizationID  string            `json:"organization_id"`
-	ID              string            `json:"id"`
-	Title           string            `json:"title"`
-	ApplicationID   string            `json:"application_id"`
-	ApplicationName string            `json:"application_name"`
-	Environment     string            `json:"environment"`
-	ChangeType      string            `json:"change_type"`
-	RepositoryURL   string            `json:"repository_url,omitempty"`
-	Branch          string            `json:"branch,omitempty"`
-	CommitSHA       string            `json:"commit_sha,omitempty"`
-	ArtifactSHA256  string            `json:"artifact_sha256"`
-	SQLSHA256       string            `json:"sql_sha256,omitempty"`
-	RollbackSHA256  string            `json:"rollback_sha256,omitempty"`
-	RuleSetVersion  string            `json:"rule_set_version,omitempty"`
-	Artifacts       []ChangeArtifact  `json:"artifacts,omitempty"`
-	SQL             string            `json:"sql"`
-	RollbackSQL     string            `json:"rollback_sql"`
-	RollbackPlan    string            `json:"rollback_plan,omitempty"`
-	ReleasePlan     ReleasePlan       `json:"release_plan"`
-	Description     string            `json:"description"`
-	SubmitterID     string            `json:"submitter_id"`
-	SubmitterName   string            `json:"submitter_name"`
-	ReviewerID      string            `json:"reviewer_id,omitempty"`
-	ReviewerName    string            `json:"reviewer_name,omitempty"`
-	ReviewComment   string            `json:"review_comment,omitempty"`
-	Status          ChangeStatus      `json:"status"`
-	Risk            RiskLevel         `json:"risk"`
-	PlannedAt       time.Time         `json:"planned_at"`
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
-	Version         int               `json:"version"`
-	Findings        []Finding         `json:"findings"`
-	CheckRun        *CheckRun         `json:"check_run,omitempty"`
-	Experiment      *ExperimentReport `json:"experiment,omitempty"`
-	Analysis        *AgentAnalysis    `json:"analysis,omitempty"`
-	Timeline        []TimelineEntry   `json:"timeline"`
-	Comments        []ChangeComment   `json:"comments"`
+	OrganizationID  string           `json:"organization_id"`
+	ID              string           `json:"id"`
+	Title           string           `json:"title"`
+	ApplicationID   string           `json:"application_id"`
+	ApplicationName string           `json:"application_name"`
+	Environment     string           `json:"environment"`
+	ChangeType      string           `json:"change_type"`
+	RepositoryURL   string           `json:"repository_url,omitempty"`
+	Branch          string           `json:"branch,omitempty"`
+	CommitSHA       string           `json:"commit_sha,omitempty"`
+	ArtifactSHA256  string           `json:"artifact_sha256"`
+	SQLSHA256       string           `json:"sql_sha256,omitempty"`
+	RollbackSHA256  string           `json:"rollback_sha256,omitempty"`
+	RuleSetVersion  string           `json:"rule_set_version,omitempty"`
+	Artifacts       []ChangeArtifact `json:"artifacts,omitempty"`
+	SQL             string           `json:"sql"`
+	RollbackSQL     string           `json:"rollback_sql"`
+	RollbackPlan    string           `json:"rollback_plan,omitempty"`
+	ReleasePlan     ReleasePlan      `json:"release_plan"`
+	Description     string           `json:"description"`
+	// Source 是服务端判定的**来源**（console / agent_task），不接受调用方直接声明。
+	// 它只是来源标记，不是授权凭据，也不改变审批或通行证判定。
+	Source string `json:"source,omitempty"`
+	// AgentTaskID 是创建本变更单时关联的 Agent 任务（可空）。关联由服务端记录，
+	// 便于双向核对"某个任务产生了哪个正式变更单"。
+	AgentTaskID string `json:"agent_task_id,omitempty"`
+	// RequestKey 记录产生本变更单的幂等键，用于进程重启后的对账去重；它不是凭据。
+	RequestKey    string            `json:"request_key,omitempty"`
+	SubmitterID   string            `json:"submitter_id"`
+	SubmitterName string            `json:"submitter_name"`
+	ReviewerID    string            `json:"reviewer_id,omitempty"`
+	ReviewerName  string            `json:"reviewer_name,omitempty"`
+	ReviewComment string            `json:"review_comment,omitempty"`
+	Status        ChangeStatus      `json:"status"`
+	Risk          RiskLevel         `json:"risk"`
+	PlannedAt     time.Time         `json:"planned_at"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
+	Version       int               `json:"version"`
+	Findings      []Finding         `json:"findings"`
+	CheckRun      *CheckRun         `json:"check_run,omitempty"`
+	Experiment    *ExperimentReport `json:"experiment,omitempty"`
+	Analysis      *AgentAnalysis    `json:"analysis,omitempty"`
+	Timeline      []TimelineEntry   `json:"timeline"`
+	Comments      []ChangeComment   `json:"comments"`
 }
 
 type ChangeComment struct {
@@ -431,6 +439,9 @@ type CreateChangeInput struct {
 	ReleasePlan   ReleasePlan      `json:"release_plan"`
 	Description   string           `json:"description"`
 	PlannedAt     time.Time        `json:"planned_at"`
+	// AgentTaskID 可选：把本变更单关联到产生它的 Agent 任务。服务端只接受安全字符集，
+	// 并据此把 Source 判为 agent_task；它不改变任何授权判定。
+	AgentTaskID string `json:"agent_task_id"`
 }
 
 type AssignFindingInput struct {

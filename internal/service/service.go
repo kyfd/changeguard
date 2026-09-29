@@ -445,7 +445,12 @@ func (s *Service) UpdateApplication(id string, input model.SaveApplicationInput,
 	return updated, err
 }
 
+// Create 创建一个正式变更单（无幂等键）。兼容既有调用方；需要幂等请用 CreateIdempotent。
 func (s *Service) Create(input model.CreateChangeInput, actorID string) (model.ChangeRequest, error) {
+	return s.create(input, actorID, "")
+}
+
+func (s *Service) create(input model.CreateChangeInput, actorID, requestKey string) (model.ChangeRequest, error) {
 	actor, err := s.activeActor(actorID)
 	if err != nil {
 		return model.ChangeRequest{}, ErrForbidden
@@ -484,6 +489,10 @@ func (s *Service) Create(input model.CreateChangeInput, actorID string) (model.C
 		(hasArtifactKind(artifacts, model.ArtifactDatabase) && sqlText == "") {
 		return model.ChangeRequest{}, fmt.Errorf("%w：标题、环境、仓库信息或变更证据不符合要求", ErrValidation)
 	}
+	agentTaskID := strings.TrimSpace(input.AgentTaskID)
+	if !validAgentTaskID(agentTaskID) {
+		return model.ChangeRequest{}, fmt.Errorf("%w：agent_task_id 不合法（仅允许字母、数字、下划线和连字符，最长 128 字符）", ErrValidation)
+	}
 	now := time.Now()
 	if input.PlannedAt.IsZero() {
 		input.PlannedAt = now.Add(24 * time.Hour)
@@ -492,6 +501,7 @@ func (s *Service) Create(input model.CreateChangeInput, actorID string) (model.C
 	}
 	change := model.ChangeRequest{
 		OrganizationID: actor.OrganizationID, ID: store.NewID("chg_"), Title: strings.TrimSpace(input.Title),
+		Source: changeSource(agentTaskID), AgentTaskID: agentTaskID, RequestKey: requestKey,
 		ApplicationID: app.ID, ApplicationName: app.Name,
 		Environment:   environment,
 		ChangeType:    changeType,
@@ -511,6 +521,32 @@ func (s *Service) Create(input model.CreateChangeInput, actorID string) (model.C
 	}
 	s.publish(change, "变更单已创建")
 	return change, nil
+}
+
+// validAgentTaskID 接受空值或一个受限字符集的非空标识，避免把任意文本塞进关联字段。
+func validAgentTaskID(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// changeSource 由服务端根据是否携带 Agent 任务关联判定来源；调用方不能直接声明 source。
+func changeSource(agentTaskID string) string {
+	if strings.TrimSpace(agentTaskID) != "" {
+		return "agent_task"
+	}
+	return "console"
 }
 
 func (s *Service) Update(id string, input model.CreateChangeInput, actorID string) (model.ChangeRequest, error) {

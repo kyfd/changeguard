@@ -530,6 +530,11 @@ class DraftWorkflow:
                     "error": item.error,
                     "data_version": item.data_version,
                     "evidence_ids": list(item.evidence_ids),
+                    # 供执行轨迹展示每个工具步骤的实测耗时与可核对标识（截断不等于无法核对）。
+                    "duration_ms": item.duration_ms,
+                    "observed_at": item.observed_at,
+                    "args_digest": item.args_digest,
+                    "payload_digest": item.payload_digest,
                 }
                 for item in report.observations
             ],
