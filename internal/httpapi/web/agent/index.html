@@ -47,7 +47,20 @@
       </header>
       <div class="col-body" id="chatBody">
         <section class="task-history" aria-label="历史任务">
+          <details class="details history-filters">
+            <summary>筛选任务 <span class="optional-label" id="historyScope">正式与历史 · 活跃列表</span></summary>
+            <form id="historyFilters">
+              <label class="field"><span>搜索需求、任务 ID 或应用</span><input id="historyQuery" type="search" maxlength="200" placeholder="输入关键词后搜索"></label>
+              <div class="grid-2">
+                <label class="field"><span>来源</span><select id="historySource"><option value="default">正式与历史</option><option value="all">全部来源</option><option value="production">正式</option><option value="evaluation">评测</option><option value="demo">演示</option><option value="legacy">历史未分类</option></select></label>
+                <label class="field"><span>工作区</span><select id="historyWorkspace"><option value="active">活跃列表</option><option value="archived">已归档</option><option value="trash">回收站</option><option value="all">全部工作区</option></select></label>
+              </div>
+              <label class="field"><span>状态</span><select id="historyStatus"><option value="">全部状态</option><option value="RECEIVED">已接收</option><option value="RUNNING">生成中</option><option value="NEEDS_INFO">待补充</option><option value="DRAFT_READY">草案已生成</option><option value="CHECK_BLOCKED">检查阻断</option><option value="FAILED">失败</option><option value="CANCELLED">已取消</option><option value="INPUT_REJECTED">输入被拒绝</option></select></label>
+              <button class="button button-small" type="submit">应用筛选</button>
+            </form>
+          </details>
           <label class="field"><span>我的历史任务</span><select id="taskHistory"><option value="">选择任务…</option></select></label>
+          <p class="note-inline" id="historyFeedback" role="status" aria-live="polite"></p>
           <button type="button" class="button button-small" id="refreshTasks">刷新任务列表</button>
         </section>
         <form class="card" id="createForm">
@@ -103,6 +116,13 @@
       <div class="col-body" id="evidenceBody"></div>
     </section>
   </main>
+
+  <dialog id="deleteDialog" aria-labelledby="deleteTitle" aria-describedby="deleteExplanation">
+    <h2 id="deleteTitle">移入回收站前确认</h2>
+    <p id="deleteExplanation">这不是物理删除。任务可恢复到归档；审计、检查点与用量记录仍保留。</p>
+    <div id="deleteDetails"></div>
+    <div class="sql-actions"><button type="button" class="button" id="deleteCancel">取消</button><button type="button" class="button button-danger" id="deleteConfirm" disabled>确认移入回收站</button></div>
+  </dialog>
 
   <script src="app.js" defer></script>
 </body>

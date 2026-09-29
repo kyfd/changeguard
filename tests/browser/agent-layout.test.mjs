@@ -29,7 +29,7 @@ test("agent: responsive forms, long content, keyboard focus and reduced motion",
     await page.locator("#knownInfo summary").focus();
     await page.keyboard.press("Enter");
     assert.equal(await page.locator("#knownInfo").getAttribute("open"), "");
-    assert.equal(await page.locator("summary").evaluate(el => getComputedStyle(el).outlineStyle), "solid");
+    assert.equal(await page.locator("#knownInfo summary").evaluate(el => getComputedStyle(el).outlineStyle), "solid");
     await page.locator("#optPlannedAt").fill("2030-12-31T23:59");
     assert.equal(await page.locator("#optPlannedAt").inputValue(), "2030-12-31T23:59");
     await page.evaluate(() => {

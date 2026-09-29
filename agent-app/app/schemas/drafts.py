@@ -215,6 +215,11 @@ class TaskView(BaseModel):
     """对外暴露的任务视图。"""
 
     task_id: str
+    source: Literal["production", "evaluation", "demo", "legacy"] = "legacy"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    archived_at: datetime | None = None
+    deleted_at: datetime | None = None
     status: TaskStatus
     requirement: str
     slots: TaskSlots
@@ -289,6 +294,21 @@ class ConfirmRequest(BaseModel):
     # 调用方**所看到的**材料内容哈希。提供时服务端必须核对一致，否则拒绝并要求刷新——
     # 否则一个停留在旧页面的用户会把"已经改过的材料"确认掉。
     material_hash: str | None = Field(default=None, max_length=128)
+
+
+class DeleteTaskRequest(BaseModel):
+    """绑定删除预览看到的完整记录，状态变化后必须重新预览。"""
+
+    record_version: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DeleteTaskPreview(BaseModel):
+    task_id: str
+    allowed: bool
+    blockers: list[str]
+    record_version: str
+    effect: Literal["recycle_bin"] = "recycle_bin"
+    retained: list[str] = Field(default_factory=lambda: ["audit_events", "checkpoints", "usage"])
 
 
 class ToolResult(BaseModel):

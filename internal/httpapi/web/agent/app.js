@@ -504,7 +504,7 @@ async function createTask(event) {
 }
 
 async function clarify(payload) {
-  if (!state.task || state.busy) return;
+  if (!state.task || state.busy || isTaskReadOnly(state.task)) return;
   state.busy = true;
   clearError();
   try {
@@ -522,7 +522,7 @@ async function clarify(payload) {
 }
 
 async function cancelTask() {
-  if (!state.task || state.busy) return;
+  if (!state.task || state.busy || isTaskReadOnly(state.task)) return;
   state.busy = true;
   clearError();
   try {
@@ -543,7 +543,7 @@ async function retryTask() {
 
 /** 从检查点恢复：由服务端重新校验归属与输入版本后，从中断点继续。 */
 async function resumeTask() {
-  if (!state.task || state.busy) return;
+  if (!state.task || state.busy || isTaskReadOnly(state.task)) return;
   state.busy = true;
   clearError();
   try {
@@ -559,7 +559,7 @@ async function resumeTask() {
 
 /** 人工确认材料：只记录"谁确认了哪一版材料"，不构成审批，也不授予执行许可。 */
 async function confirmMaterial() {
-  if (!state.task || state.busy) return;
+  if (!state.task || state.busy || isTaskReadOnly(state.task)) return;
   if (isLocallyEdited()) {
     showError("本地 SQL 已修改。请恢复服务端原稿后再确认；本地编辑不能确认原稿。");
     return;
@@ -606,6 +606,7 @@ function handleActionError(error) {
 
 function adoptTask(task) {
   const previous = state.task;
+  if (JSON.stringify(previous) !== JSON.stringify(task)) invalidateDeletePreview();
   const sameTask = previous && previous.task_id === task.task_id;
   const sameDraft = sameTask && JSON.stringify(previous.draft || null) === JSON.stringify(task.draft || null);
   if (!sameDraft) resetEdits();
@@ -621,7 +622,7 @@ function adoptTask(task) {
   } else {
     render();
   }
-  if (TERMINAL.has(task.status)) {
+  if (TERMINAL.has(task.status) || isTaskReadOnly(task)) {
     stopPolling();
   } else {
     startPolling();
@@ -681,7 +682,7 @@ function refreshTaskView(previous) {
   }
   // 对话的其他数据发生变化时才刷新；保存正在填写的控件状态。
   const conversationData = (value) => [value.requirement, value.error, value.planned_at_missing,
-    value.questions, value.awaiting_input, value.restart_policy, value.status];
+    value.questions, value.awaiting_input, value.restart_policy, value.status, value.source, value.archived_at, value.deleted_at];
   if (JSON.stringify(conversationData(previous)) !== JSON.stringify(conversationData(task))) {
     preserveView($("conversation"), renderConversation);
   }
@@ -692,6 +693,7 @@ function refreshTaskView(previous) {
   if (!task.draft && previous.status !== task.status) {
     preserveView($("draftBody"), renderDraft);
   }
+  if (isTaskReadOnly(previous) !== isTaskReadOnly(task)) preserveView($("draftBody"), renderDraft);
   if (JSON.stringify([previous.confirmations, previous.material_hash]) !==
       JSON.stringify([task.confirmations, task.material_hash])) {
     const confirmation = $("taskConfirmation");
@@ -775,9 +777,10 @@ function renderConversation() {
     <article class="turn turn-user">
       <div class="turn-head"><span>需求</span><span>·</span><span>${esc(task.task_id)}</span></div>
       <div class="bubble">${esc(task.requirement)}</div>
-      <div>${statusBadge(task.status)}</div>
+      <div>${statusBadge(task.status)} <span class="badge badge-muted">${esc(sourceLabel(task.source))}</span></div>
     </article>
   `);
+  blocks.push(renderLifecycle(task));
 
   if (task.error) {
     blocks.push(`
@@ -806,7 +809,7 @@ function renderConversation() {
     `);
   }
 
-  if (task.status === "NEEDS_INFO" && (task.questions || []).length) {
+  if (!isTaskReadOnly(task) && task.status === "NEEDS_INFO" && (task.questions || []).length) {
     blocks.push(renderQuestions(task));
   }
 
@@ -814,10 +817,10 @@ function renderConversation() {
 
   const checkpointResumable = Boolean(task.awaiting_input) || task.restart_policy === "checkpoint_available";
   const actions = [];
-  if (ACTIVE.has(task.status)) {
+  if (!isTaskReadOnly(task) && ACTIVE.has(task.status)) {
     actions.push('<button class="button button-small button-danger" type="button" id="cancelButton">停止</button>');
   }
-  if (RESUMABLE.has(task.status)) {
+  if (!isTaskReadOnly(task) && RESUMABLE.has(task.status)) {
     // 有检查点时是"从检查点恢复"（从等待点续跑），没有时才是"重新执行一次"。
     // 两者不能混为一谈：把重跑说成续跑是不诚实的。
     actions.push(
@@ -829,6 +832,9 @@ function renderConversation() {
   if (actions.length) blocks.push(`<div class="sql-actions">${actions.join("")}</div>`);
 
   host.innerHTML = blocks.join("");
+  $("archiveTask")?.addEventListener("click", () => mutateLifecycle("archive"));
+  $("restoreTask")?.addEventListener("click", () => mutateLifecycle("restore"));
+  $("deleteTask")?.addEventListener("click", previewDeletion);
 
   const cancelButton = $("cancelButton");
   if (cancelButton) cancelButton.addEventListener("click", cancelTask);
@@ -1122,6 +1128,11 @@ function renderDraft() {
 
   // 重绘之后同步一次显隐：模板里的初始状态可能和当前编辑状态不一致。
   markStale();
+  if (isTaskReadOnly(task)) {
+    if (sqlText) sqlText.readOnly = true;
+    if (rollbackText) rollbackText.readOnly = true;
+    if ($("editToggle")) $("editToggle").disabled = true;
+  }
 
   const editToggle = $("editToggle");
   if (editToggle) {
@@ -1239,7 +1250,7 @@ function renderConfirmation(task) {
       }).join("")}</div>`
     : `<p class="note-inline">还没有人工确认记录。确认只表示"有人看过这一版材料"，不构成审批。</p>`;
 
-  const button = confirmedCurrent
+  const button = isTaskReadOnly(task) ? '<p class="note-inline">任务只读，恢复至活跃列表后才能确认材料。</p>' : confirmedCurrent
     ? '<button class="button button-small" type="button" id="confirmButton" data-confirmed="true" disabled>当前材料已确认</button>'
     : `<button class="button button-small button-primary" type="button" id="confirmButton" ${isLocallyEdited() ? "disabled" : ""}>确认这一版材料</button>`;
 
@@ -1504,9 +1515,73 @@ const HEALTH_REFRESH_MS = 5000;
 let healthTimer = null;
 
 let taskSelectionGeneration = 0;
+let historyGeneration = 0;
+let deletionGeneration = 0;
+let deletionPreview = null;
+
+function sourceLabel(source) {
+  return { production: "正式", evaluation: "评测", demo: "演示", legacy: "历史未分类" }[source] || "历史未分类";
+}
+function isTaskReadOnly(task) { return Boolean(task?.archived_at || task?.deleted_at); }
+function renderLifecycle(task) {
+  const label = task.deleted_at ? "回收站 · 只读" : task.archived_at ? "已归档 · 只读" : "活跃任务";
+  const controls = task.deleted_at
+    ? '<button type="button" class="button button-small" id="restoreTask">恢复到归档</button>'
+    : task.archived_at
+      ? '<button type="button" class="button button-small" id="restoreTask">恢复到活跃列表</button><button type="button" class="button button-small button-danger" id="deleteTask">查看清理预览</button>'
+      : `<button type="button" class="button button-small" id="archiveTask" ${ACTIVE.has(task.status) ? 'disabled title="运行中任务不能归档，请先停止"' : ""}>归档任务</button>`;
+  return `<section class="task-lifecycle" aria-label="任务管理"><span class="note-inline">${label}</span><div class="sql-actions">${controls}</div><p class="note-inline">归档保留全部材料，不触发模型调用。</p></section>`;
+}
+function invalidateDeletePreview() {
+  deletionGeneration++;
+  deletionPreview = null;
+  const dialog = $("deleteDialog");
+  if (dialog?.open) dialog.close();
+}
+async function mutateLifecycle(action, preview = null) {
+  if (!state.task || state.busy) return;
+  const id = preview?.task_id || state.task.task_id;
+  if (id !== state.task.task_id) return;
+  const generation = ++taskSelectionGeneration;
+  invalidateDeletePreview();
+  clearError();
+  state.busy = true;
+  try {
+    const task = await api(`/api/agent/tasks/${encodeURIComponent(id)}/${action}`, {
+      method: "POST", ...(preview ? { body: { record_version: preview.record_version } } : {}),
+    });
+    if (generation === taskSelectionGeneration && state.task?.task_id === id) adoptTask(task);
+    await refreshTaskHistory();
+  } catch (error) {
+    handleActionError(error);
+  } finally { state.busy = false; }
+}
+async function previewDeletion() {
+  if (!state.task || state.busy) return;
+  clearError();
+  invalidateDeletePreview();
+  const generation = deletionGeneration;
+  const id = state.task.task_id;
+  const dialog = $("deleteDialog");
+  $("deleteDetails").textContent = "正在核对关联记录…";
+  $("deleteConfirm").disabled = true;
+  dialog.showModal();
+  $("deleteCancel").focus();
+  try {
+    const result = await api(`/api/agent/tasks/${encodeURIComponent(id)}/delete-preview`);
+    if (generation !== deletionGeneration || state.task?.task_id !== id) return;
+    deletionPreview = result;
+    const retainedLabels = { audit_events: "审计事件", checkpoints: "执行检查点", usage: "用量记录" };
+    $("deleteDetails").innerHTML = `<p class="mono">${esc(id)}</p><p>${result.allowed ? "满足移入回收站条件。" : "当前不能移入回收站。"}</p><ul>${(result.blockers || []).map(reason => `<li>${esc(reason)}</li>`).join("")}</ul><p class="note-inline">保留：${esc((result.retained || []).map(item => Object.hasOwn(retainedLabels, item) ? retainedLabels[item] : item).join("、"))}</p>`;
+    $("deleteConfirm").disabled = !result.allowed || !result.record_version || result.task_id !== id;
+  } catch (error) {
+    if (generation === deletionGeneration) $("deleteDetails").textContent = `预览失败：${error.message}。请取消后重试。`;
+  }
+}
 
 async function openHistoricalTask(id) {
   if (!id || state.busy) return;
+  invalidateDeletePreview();
   const generation = ++taskSelectionGeneration;
   stopPolling();
   try {
@@ -1525,13 +1600,31 @@ async function openHistoricalTask(id) {
 async function refreshTaskHistory() {
   const select = $("taskHistory");
   if (!select) return;
+  const generation = ++historyGeneration;
+  invalidateDeletePreview();
+  const feedback = $("historyFeedback");
+  if (feedback) feedback.textContent = "正在加载任务…";
+  const params = [];
+  for (const [id, key] of [["historyQuery", "q"], ["historySource", "source"], ["historyWorkspace", "workspace"], ["historyStatus", "status"]]) {
+    const value = $(id)?.value?.trim();
+    if (value) params.push(`${key}=${encodeURIComponent(value)}`);
+  }
+  const source = $("historySource"), workspace = $("historyWorkspace");
+  if ($("historyScope") && source && workspace) $("historyScope").textContent = `${source.selectedOptions[0].text} · ${workspace.selectedOptions[0].text}`;
   try {
-    const tasks = await api("/api/agent/tasks");
+    const tasks = await api("/api/agent/tasks" + (params.length ? "?" + params.join("&") : ""));
+    if (generation !== historyGeneration) return;
+    if (!Array.isArray(tasks)) throw new Error("任务列表响应格式不正确");
     select.innerHTML = '<option value="">选择任务…</option>' + tasks.map(task =>
-      `<option value="${esc(task.task_id)}">${esc(task.task_id)} · ${esc(task.status)}</option>`
+      `<option value="${esc(task.task_id)}">${esc(task.task_id)} · ${esc(STATUS_META[task.status]?.label || task.status)} · ${esc(sourceLabel(task.source))}</option>`
     ).join("");
     select.value = state.task?.task_id || "";
-  } catch (error) { handleActionError(error); }
+    if (feedback) feedback.textContent = tasks.length ? `${tasks.length} 条任务${state.task && !tasks.some(task => task.task_id === state.task.task_id) ? " · 当前查看的任务不在筛选结果中" : ""}` : "没有符合条件的任务。可调整筛选条件，当前材料不会丢失。";
+  } catch (error) {
+    if (generation !== historyGeneration) return;
+    if (feedback) feedback.textContent = `任务列表加载失败：${error.message}。请刷新重试。`;
+    handleActionError(error);
+  }
 }
 
 async function init() {
@@ -1559,6 +1652,13 @@ async function init() {
 
   await refreshHealth();
   $("refreshTasks")?.addEventListener("click", refreshTaskHistory);
+  $("historyFilters")?.addEventListener("submit", event => { event.preventDefault(); refreshTaskHistory(); });
+  $("historyFilters")?.addEventListener("input", invalidateDeletePreview);
+  $("deleteCancel")?.addEventListener("click", invalidateDeletePreview);
+  $("deleteDialog")?.addEventListener("cancel", invalidateDeletePreview);
+  $("deleteConfirm")?.addEventListener("click", () => {
+    if (deletionPreview?.allowed) mutateLifecycle("delete", deletionPreview);
+  });
   $("taskHistory")?.addEventListener("change", event => openHistoricalTask(event.target.value));
   await refreshTaskHistory();
   const restoredId = new URL(window.location.href).searchParams.get("task");

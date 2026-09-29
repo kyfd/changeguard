@@ -191,6 +191,10 @@ def build_settings(workdir: Path, args: argparse.Namespace, overrides: dict[str,
         "investigation_planner": planner,
     }
     values.update({k: v for k, v in (overrides or {}).items() if k in Settings.__dataclass_fields__})
+    # 来源和持久化隔离不允许被用例配置覆盖到正式数据文件。
+    values["task_source"] = "evaluation"
+    values["task_store_path"] = str(workdir / f"eval-tasks-{token}.json")
+    values["checkpoint_path"] = str(workdir / f"eval-checkpoint-{token}.sqlite")
     return Settings(**{k: v for k, v in values.items() if k in Settings.__dataclass_fields__})
 
 

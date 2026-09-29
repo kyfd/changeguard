@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,6 +36,7 @@ from app.schemas.drafts import (
     ConfirmRequest,
     CreateTaskRequest,
     DatabaseKind,
+    DeleteTaskPreview,
     TaskSlots,
     TaskStatus,
     TaskView,
@@ -187,6 +190,8 @@ class AgentService:
         schema_snapshot = request.schema_snapshot or ""
         record: dict[str, Any] = {
             "task_id": f"task_{uuid.uuid4().hex[:12]}",
+            "source": self._settings.task_source,
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "organization_id": context.organization_id,
             "user_id": context.user_id,
             "requirement": requirement,
@@ -213,6 +218,7 @@ class AgentService:
 
     async def clarify(self, task_id: str, request: ClarifyRequest, context: TrustedContext) -> TaskView:
         record = self._authorize(task_id, context)
+        self._ensure_active(record)
         status = record.get("status")
         if status not in RESUMABLE_STATUSES:
             raise TaskNotResumable(f"当前状态 {status} 不允许补充信息")
@@ -291,6 +297,7 @@ class AgentService:
         任何一项不满足都抛 `TaskNotResumable`，任务保持原状——不做"尽力继续"。
         """
         record = self._authorize(task_id, context)
+        self._ensure_active(record)
         status = record.get("status")
         # 终态（取消、输入被拒等）不允许借恢复回到执行路径。
         if status not in RESUMABLE_STATUSES:
@@ -339,6 +346,7 @@ class AgentService:
         # 否则并发的两次恢复都会看到"还没人占"，于是双双派发，在同一个 thread_id 上并发跑图——
         # 检查点不是并发安全的共享状态，那不是"最后写入者胜"，而是互相交错写入。
         latest = self._require(task_id)
+        self._ensure_active(latest)
         if (latest.get("execution_id") or "") != expected_execution or (latest.get("status") or "") != expected_status:
             raise TaskNotResumable("任务已被其他操作接管，本次恢复未生效，请重试")
         if self._has_live_execution(task_id):
@@ -376,6 +384,8 @@ class AgentService:
         审批与通行证签发仍只由 Go 治理服务负责。
         """
         record = self._authorize(task_id, context)
+        if record.get("archived_at") or record.get("deleted_at"):
+            raise TaskNotConfirmable("请先恢复任务，再确认材料")
         status = record.get("status")
         if status not in {TaskStatus.DRAFT_READY.value, TaskStatus.CHECK_BLOCKED.value}:
             raise TaskNotConfirmable(f"当前状态 {status} 没有可确认的材料")
@@ -425,22 +435,129 @@ class AgentService:
     async def get_task(self, task_id: str, context: TrustedContext) -> TaskView:
         return self._view(self._authorize(task_id, context))
 
-    async def list_tasks(self, context: TrustedContext) -> list[TaskView]:
+    async def list_tasks(
+        self, context: TrustedContext, *, q: str = "", status: str | None = None,
+        source: str = "default", workspace: str = "active",
+    ) -> list[TaskView]:
         """只列出调用方**自己**创建的任务。
 
         组织与创建者都要匹配；可信上下文不完整时返回空列表而不是全部任务。
         """
         if not context.organization_id or not context.user_id:
             return []
+        if source not in {"default", "all", "production", "evaluation", "demo", "legacy"}:
+            raise ValueError("未知任务来源")
+        if workspace not in {"active", "archived", "trash", "all"}:
+            raise ValueError("未知任务工作区")
+        if status is not None:
+            TaskStatus(status)
+        query = q.strip().casefold()
+        if len(query) > 200:
+            raise ValueError("搜索最多 200 字")
+
+        def matches(item: dict[str, Any]) -> bool:
+            origin = item.get("source") or "legacy"
+            if source == "default" and origin not in {"production", "legacy"}:
+                return False
+            if source not in {"default", "all"} and origin != source:
+                return False
+            scope = "trash" if item.get("deleted_at") else "archived" if item.get("archived_at") else "active"
+            if workspace != "all" and workspace != scope:
+                return False
+            if status and item.get("status") != status:
+                return False
+            fields = (item.get("task_id"), item.get("requirement"), (item.get("slots") or {}).get("application"))
+            return not query or any(query in str(value or "").casefold() for value in fields)
+
         return [
             self._view(item)
             for item in self._repository.list()
             if (item.get("organization_id") or "").strip() == context.organization_id
             and (item.get("user_id") or "").strip() == context.user_id
+            and matches(item)
         ]
+
+    @staticmethod
+    def _ensure_active(record: dict[str, Any]) -> None:
+        if record.get("archived_at") or record.get("deleted_at"):
+            raise TaskNotResumable("任务已归档或在回收站，请先恢复")
+
+    def _ensure_idle(self, record: dict[str, Any]) -> None:
+        if record.get("status") in INTERRUPTED_STATUSES or self._has_live_execution(record["task_id"]):
+            raise TaskNotResumable("任务仍在执行，请先取消或等待结束")
+
+    def _save_management(self, record: dict[str, Any], kind: str, context: TrustedContext) -> TaskView:
+        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        entry = event(kind, f"创建者 {context.user_id} 执行任务管理操作；不改变审批与执行权限")
+        # 检查点可能携带旧 events；管理审计独立留存，恢复图后再合并，不能被旧快照抹掉。
+        record["management_events"] = [*(record.get("management_events") or []), entry]
+        record["events"] = [*(record.get("events") or []), entry]
+        try:
+            self._repository.save(record)
+        except OSError as error:
+            raise TaskStateUnavailable("任务管理操作未落盘，请重试") from error
+        return self._view(record)
+
+    async def archive_task(self, task_id: str, context: TrustedContext) -> TaskView:
+        record = self._authorize(task_id, context)
+        self._ensure_idle(record)
+        if record.get("deleted_at"):
+            raise TaskNotResumable("任务在回收站，请先恢复")
+        if record.get("archived_at"):
+            return self._view(record)
+        record["archived_at"] = datetime.now(timezone.utc).isoformat()
+        return self._save_management(record, "archived", context)
+
+    async def restore_task(self, task_id: str, context: TrustedContext) -> TaskView:
+        record = self._authorize(task_id, context)
+        self._ensure_idle(record)
+        if record.get("deleted_at"):
+            record["deleted_at"] = None
+            # 回收站恢复到归档区，不能暗中恢复模型执行。
+            record["archived_at"] = record.get("archived_at") or datetime.now(timezone.utc).isoformat()
+        elif record.get("archived_at"):
+            record["archived_at"] = None
+        else:
+            return self._view(record)
+        return self._save_management(record, "restored", context)
+
+    async def delete_preview(self, task_id: str, context: TrustedContext) -> DeleteTaskPreview:
+        record = self._authorize(task_id, context)
+        return self._deletion_preview(record)
+
+    def _deletion_preview(self, record: dict[str, Any]) -> DeleteTaskPreview:
+        blockers = []
+        if record.get("deleted_at"):
+            blockers.append("任务已在回收站")
+        if not record.get("archived_at"):
+            blockers.append("请先归档任务")
+        if record.get("status") not in {"FAILED", "CANCELLED", "INPUT_REJECTED"} or self._has_live_execution(record["task_id"]):
+            blockers.append("仅允许清理已停止的失败、取消或输入拒绝任务")
+        # 现有系统尚无权威跨服务关联索引：有过材料/确认的记录保守地只允许归档。
+        if record.get("draft") or record.get("confirmations") or any(
+            item.get("kind") in {"generate_draft", "finalize", "confirmed"}
+            for item in record.get("events") or []
+        ) or any(
+            record.get(key) for key in ("change_id", "change_request_id", "linked_change_id", "submitted_change_id")
+        ):
+            blockers.append("包含草案、确认或正式变更关联，保留记录，仅支持归档")
+        version = hashlib.sha256(json.dumps(record, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        return DeleteTaskPreview(task_id=record["task_id"], allowed=not blockers, blockers=blockers, record_version=version)
+
+    async def delete_task(self, task_id: str, context: TrustedContext, record_version: str) -> TaskView:
+        record = self._authorize(task_id, context)
+        preview = self._deletion_preview(record)
+        if not preview.allowed:
+            raise TaskNotResumable("；".join(preview.blockers))
+        if preview.record_version != record_version:
+            raise TaskNotResumable("任务已变化，请重新预览后确认")
+        # 校验与原子落盘之间没有 await；单实例事件循环不能插入另一生命周期操作。
+        record["deleted_at"] = datetime.now(timezone.utc).isoformat()
+        return self._save_management(record, "moved_to_trash", context)
 
     async def cancel(self, task_id: str, context: TrustedContext) -> TaskView:
         record = self._authorize(task_id, context)
+        self._ensure_active(record)
         superseded_execution_id = record.get("execution_id") or ""
 
         # 先在**副本**上构造取消后的状态，并且先落盘。
@@ -969,6 +1086,11 @@ class AgentService:
         return TaskView.model_validate(
             {
                 "task_id": record["task_id"],
+                "source": record.get("source") or "legacy",
+                "created_at": record.get("created_at"),
+                "updated_at": (record.get("events") or [{}])[-1].get("at") or record.get("updated_at"),
+                "archived_at": record.get("archived_at"),
+                "deleted_at": record.get("deleted_at"),
                 "status": record.get("status", TaskStatus.FAILED.value),
                 "requirement": record.get("requirement", ""),
                 "slots": record.get("slots") or {},
@@ -1044,6 +1166,11 @@ def _annotate_recovery(record: dict[str, Any]) -> None:
     必须在工作流返回**之后**补写：图的事件流来自检查点里保存的旧状态，会把恢复时在记录上
     追加的那一条覆盖掉。这里按 kind 去重，因此重复调用是幂等的。
     """
+    events = list(record.get("events") or [])
+    for item in record.get("management_events") or []:
+        if item not in events:
+            events.append(item)
+    record["events"] = sorted(events, key=lambda item: item.get("at", ""))
     if record.get("recovery_semantics") != RECOVERY_AT_LEAST_ONCE:
         return
     events = list(record.get("events") or [])
