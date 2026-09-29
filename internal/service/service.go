@@ -549,6 +549,20 @@ func changeSource(agentTaskID string) string {
 	return "console"
 }
 
+// trustedReleaseSources 是**允许进入生产放行流程**的来源白名单，失败关闭：
+// 未列出的来源（例如评测 / 演示产物）不得提交、审批或签发通行证。空串是历史记录，
+// 按 console 处理。来源标记只是溯源，不是授权凭据；这份白名单只做"来源不被信任时拒绝"，
+// 不会因为来源被信任就跳过其它任何检查。
+var trustedReleaseSources = map[string]bool{"": true, "console": true, "agent_task": true}
+
+func trustedForRelease(change model.ChangeRequest) bool {
+	return trustedReleaseSources[strings.TrimSpace(change.Source)]
+}
+
+func releaseSourceRefusal(change model.ChangeRequest) error {
+	return fmt.Errorf("%w：变更来源 %q 不允许进入生产放行流程（来源标记不是授权凭据）", ErrForbidden, change.Source)
+}
+
 func (s *Service) Update(id string, input model.CreateChangeInput, actorID string) (model.ChangeRequest, error) {
 	actor, err := s.activeActor(actorID)
 	if err != nil {
@@ -655,6 +669,9 @@ func (s *Service) Submit(id, actorID string) (model.ChangeRequest, error) {
 	}
 	if change.OrganizationID != actor.OrganizationID || change.SubmitterID != actor.ID || !s.canUseApplication(actor, change.ApplicationID, "submit") {
 		return model.ChangeRequest{}, ErrForbidden
+	}
+	if !trustedForRelease(change) {
+		return model.ChangeRequest{}, releaseSourceRefusal(change)
 	}
 	if change.Status != model.StatusDraft && change.Status != model.StatusCheckFailed {
 		return model.ChangeRequest{}, ErrInvalidState
@@ -1166,6 +1183,9 @@ func (s *Service) Approve(id, actorID, comment string) (model.ChangeRequest, err
 	if change.OrganizationID != actor.OrganizationID || !s.canUseApplication(actor, change.ApplicationID, "review") {
 		return model.ChangeRequest{}, ErrForbidden
 	}
+	if !trustedForRelease(change) {
+		return model.ChangeRequest{}, releaseSourceRefusal(change)
+	}
 	if change.Status != model.StatusWaitingApproval {
 		return model.ChangeRequest{}, ErrInvalidState
 	}
@@ -1217,6 +1237,9 @@ func (s *Service) Reject(id, actorID, comment string) (model.ChangeRequest, erro
 	}
 	if change.OrganizationID != actor.OrganizationID || !s.canUseApplication(actor, change.ApplicationID, "review") {
 		return model.ChangeRequest{}, ErrForbidden
+	}
+	if !trustedForRelease(change) {
+		return model.ChangeRequest{}, releaseSourceRefusal(change)
 	}
 	if change.Status != model.StatusWaitingApproval {
 		return model.ChangeRequest{}, ErrInvalidState

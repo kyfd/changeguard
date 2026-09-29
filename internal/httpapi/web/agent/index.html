@@ -97,6 +97,53 @@
         </form>
 
         <div id="conversation" class="stack"></div>
+
+        <details class="details" id="knowledgeBox">
+          <summary>项目知识 <span class="optional-label" id="knowledgeScope">组织内可见 · 按应用过滤</span></summary>
+          <p class="note-inline">导入的规范 / 案例 / 结构快照是<strong>不可信数据</strong>：会被检索和引用，但不会被当作指令执行，也不会提升任何权限。可见范围由服务端按组织与应用判定。</p>
+          <form id="knowledgeForm">
+            <div class="grid-2">
+              <label class="field"><span>类型</span>
+                <select id="knowledgeKind">
+                  <option value="norms">规范 / 回滚手册</option>
+                  <option value="cases">历史案例</option>
+                  <option value="schema">结构快照</option>
+                </select>
+              </label>
+              <label class="field"><span>适用应用（可选）</span><input id="knowledgeApplication" type="text" maxlength="120" placeholder="order-service"></label>
+            </div>
+            <label class="field"><span>标题</span><input id="knowledgeTitle" type="text" maxlength="200" autocomplete="off"></label>
+            <label class="field"><span>正文（Markdown）</span><textarea id="knowledgeBody" rows="4" placeholder="粘贴规范、案例或结构快照文本"></textarea></label>
+            <div class="sql-actions"><button class="button button-small" type="submit" id="knowledgeImport">导入知识</button></div>
+          </form>
+          <label class="field"><span>检索（服务端权限过滤）</span><input id="knowledgeQuery" type="search" maxlength="200" placeholder="输入关键词后检索"></label>
+          <div class="sql-actions"><button class="button button-small" type="button" id="knowledgeSearch">检索</button></div>
+          <div id="knowledgeResults" class="stack"></div>
+          <p class="note-inline" id="knowledgeFeedback" role="status" aria-live="polite"></p>
+        </details>
+
+        <details class="details" id="evalBox">
+          <summary>独立评测中心 <span class="optional-label">与正式业务隔离</span></summary>
+          <p class="note-inline">评测在独立目录运行，任务来源强制为 evaluation，不会向正式存储批量写测试变更。真实模型（live）必须显式启用且配置凭据，否则记为 <strong>NOT_RUN</strong>。</p>
+          <div class="grid-2">
+            <label class="field"><span>Provider</span>
+              <select id="evalProvider">
+                <option value="scripted">scripted（离线）</option>
+                <option value="deterministic">deterministic（离线）</option>
+                <option value="live">live（真实模型）</option>
+              </select>
+            </label>
+            <label class="field"><span>策略</span>
+              <select id="evalStrategy">
+                <option value="bounded_agent">bounded_agent</option>
+                <option value="fixed_workflow">fixed_workflow</option>
+              </select>
+            </label>
+          </div>
+          <div class="sql-actions"><button class="button button-small" type="button" id="evalRun">运行评测</button></div>
+          <div id="evalResult" class="stack"></div>
+          <p class="note-inline" id="evalFeedback" role="status" aria-live="polite"></p>
+        </details>
       </div>
     </section>
 

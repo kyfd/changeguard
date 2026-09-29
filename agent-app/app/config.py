@@ -96,6 +96,21 @@ class Settings:
     # 共享同一个 SQLite 文件会在并发打开时产生锁冲突，也会让用例之间互相污染状态。
     checkpoint_path: str = ""
 
+    # 项目知识（导入的规范 / 历史案例 / 结构快照）。单实例 JSON 原子落盘。
+    # 留空表示与任务存储同目录（默认即 data/agent-knowledge.json），
+    # 使改了任务存储路径的调用方（尤其是测试）不会共用仓库里那一个文件。
+    knowledge_store_path: str = ""
+
+    # 独立评测中心。评测使用独立工作目录并把任务来源强制为 evaluation。
+    # 真实模型（live）必须**显式启用**且配置了凭据，否则作业记为 not_run，不伪造通过率。
+    eval_live_enabled: bool = False
+    eval_task_timeout_seconds: float = 60.0
+    # 0 = 不限制；对真实模型调用建议设置有限预算。
+    eval_max_task_tokens: int = 0
+    eval_max_task_requests: int = 0
+    # 评测工作目录（用例级任务存储与检查点的父目录）。留空表示与任务存储同目录。
+    eval_work_dir: str = ""
+
     # 执行模式：
     #   background（默认）—— 接口立即返回，执行交给后台任务，可取消；
     #   inline            —— 接口内执行完毕再返回，便于测试与单步调试。
@@ -139,6 +154,32 @@ class Settings:
         return str(Path(store).with_name("agent-checkpoints.sqlite"))
 
     @property
+    def knowledge_file(self) -> str:
+        """解析项目知识文件路径（显式配置优先，否则与任务存储同目录）。"""
+        explicit = (self.knowledge_store_path or "").strip()
+        if explicit:
+            return explicit
+        store = (self.task_store_path or "").strip()
+        if not store:
+            return ""
+        return str(Path(store).with_name("agent-knowledge.json"))
+
+    @property
+    def eval_dir(self) -> Path:
+        """评测工作目录：显式配置优先，否则与任务存储同目录下的 eval-work。"""
+        explicit = (self.eval_work_dir or "").strip()
+        if explicit:
+            return Path(explicit)
+        store = (self.task_store_path or "").strip()
+        base = Path(store).parent if store else Path("data")
+        return base / "eval-work"
+
+    @property
+    def live_model_ready(self) -> bool:
+        """真实模型评测的显式条件：必须显式启用且配置了凭据。"""
+        return bool(self.eval_live_enabled) and self.llm_configured
+
+    @property
     def demo_dir(self) -> Path:
         if self.agent_demo_dir.strip():
             return Path(self.agent_demo_dir)
@@ -178,6 +219,12 @@ class Settings:
             agent_demo_dir=os.getenv("AGENT_DEMO_DIR", "").strip(),
             task_store_path=os.getenv("AGENT_TASK_STORE", defaults.task_store_path),
             checkpoint_path=os.getenv("AGENT_CHECKPOINT_PATH", defaults.checkpoint_path),
+            knowledge_store_path=os.getenv("AGENT_KNOWLEDGE_STORE", defaults.knowledge_store_path),
+            eval_live_enabled=os.getenv("AGENT_EVAL_LIVE_ENABLED", "0").strip() in {"1", "true", "on", "yes"},
+            eval_task_timeout_seconds=float(os.getenv("AGENT_EVAL_TASK_TIMEOUT", "60")),
+            eval_max_task_tokens=int(os.getenv("AGENT_EVAL_MAX_TASK_TOKENS", "0")),
+            eval_max_task_requests=int(os.getenv("AGENT_EVAL_MAX_TASK_REQUESTS", "0")),
+            eval_work_dir=os.getenv("AGENT_EVAL_WORK_DIR", defaults.eval_work_dir).strip(),
             execution_mode=os.getenv("AGENT_EXECUTION_MODE", defaults.execution_mode).strip() or defaults.execution_mode,
             allow_header_identity=os.getenv("AGENT_ALLOW_HEADER_IDENTITY", "0").strip()
             in {"1", "true", "on", "yes"},

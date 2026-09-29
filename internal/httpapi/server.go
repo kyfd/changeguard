@@ -1115,6 +1115,16 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 			writeServiceError(w, err)
 			return
 		}
+		// 按 Agent 任务关联过滤：关联是服务端记录的，这里只做同组织内查询。
+		if agentTask := strings.TrimSpace(r.URL.Query().Get("agent_task_id")); agentTask != "" {
+			filtered := make([]model.ChangeRequest, 0, len(changes))
+			for _, change := range changes {
+				if change.AgentTaskID == agentTask {
+					filtered = append(filtered, change)
+				}
+			}
+			changes = filtered
+		}
 		if r.URL.Query().Has("page") || r.URL.Query().Has("page_size") || r.URL.Query().Has("cursor") {
 			pageSize := 50
 			if raw := strings.TrimSpace(r.URL.Query().Get("page_size")); raw != "" {

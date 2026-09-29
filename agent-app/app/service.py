@@ -31,9 +31,33 @@ import httpx
 
 from app.budget import PHASE_GENERATE, LedgerPersistError, UsageLedger, usage_scope
 from app.config import Settings
+from app.evalcenter import (
+    LIVE_ENABLE_HINT,
+    LIVE_NOT_RUN_NOTE,
+    EvalInvalid,
+    EvalNotFound,
+    EvalRepository,
+    EvalStateUnavailable,
+    aggregate_failures,
+    compare_jobs,
+    job_view,
+    new_job_record,
+    run_evaluation,
+)
 from app.guard import detect_injection
+from app.knowledge import KnowledgeRepository, chunks_for, import_record, visible_chunks
 from app.llm.provider import build_provider
 from app.retrieval.corpus import build_retriever
+from app.retrieval.keyword import HybridRetriever
+from app.schemas.evals import EvalComparison, EvalJobRequest, EvalJobView, EvalReport
+from app.schemas.knowledge import (
+    KIND_PREFIX,
+    KnowledgeDetail,
+    KnowledgeImportRequest,
+    KnowledgeSearchHit,
+    KnowledgeSnippet,
+    KnowledgeView,
+)
 from app.schemas.drafts import (
     ChangeLink,
     ClarifyRequest,
@@ -120,6 +144,18 @@ class TaskNotConfirmable(Exception):
     """当前没有可人工确认的材料（例如尚未生成草案）。"""
 
 
+class KnowledgeNotFound(Exception):
+    """知识不存在或不属于调用方组织（不区分，避免探测）。"""
+
+
+class KnowledgeInvalid(Exception):
+    """知识导入参数不合法。"""
+
+
+class KnowledgeStateUnavailable(Exception):
+    """知识无法落盘：失败关闭，不返回未持久化的成功。"""
+
+
 @dataclass
 class _Execution:
     """一次受管理的执行。"""
@@ -149,6 +185,8 @@ class AgentService:
         # provider 可注入：评估集需要构造"模型输出非法/冲突"等场景。
         self._provider = provider or build_provider(settings)
         self._repository = TaskRepository(settings.task_store_path)
+        self._knowledge = KnowledgeRepository(settings.knowledge_file or "data/agent-knowledge.json")
+        self._evals = EvalRepository(str(settings.eval_dir / "eval-jobs.json"))
         # 受管理的执行登记表：inline 与 background 都登记，二者因此都可被取消。
         self._executions: dict[str, _Execution] = {}
         # 未能留下可查询终态的执行（存储不可用）。健康状态据此报告降级。
@@ -763,6 +801,267 @@ class AgentService:
             return False
         return response.status_code == 200
 
+    # -- M3：项目知识 ------------------------------------------------------
+
+    async def import_knowledge(self, request: KnowledgeImportRequest, context: TrustedContext) -> KnowledgeView:
+        """导入一份项目知识（规范 / 历史案例 / 结构快照）。
+
+        组织来自可信上下文；文档内容按**不可信数据**处理——只做提示注入筛查并如实
+        记录，既不据此提升权限，也不据此放行或拒绝一份可能正当的安全文档。
+        """
+        if not context.organization_id or not context.user_id:
+            raise KnowledgeInvalid("缺少可信身份，拒绝导入")
+        title = request.title.strip()
+        body = request.body
+        if not title:
+            raise KnowledgeInvalid("标题不能为空")
+        if not body.strip():
+            raise KnowledgeInvalid("正文不能为空")
+        hits = sorted(set(detect_injection(f"{title}\n{body}")))
+        record = import_record(
+            knowledge_id=f"kb_{uuid.uuid4().hex[:12]}",
+            organization_id=context.organization_id,
+            imported_by=context.user_id,
+            kind=request.kind,
+            title=title,
+            body=body,
+            version=request.version.strip(),
+            source=request.source.strip(),
+            application_id=request.application_id.strip(),
+            status=request.status,
+            injection_hits=hits,
+        )
+        try:
+            self._knowledge.save(record)
+        except OSError as error:
+            raise KnowledgeStateUnavailable("知识未落盘，请重试") from error
+        return self._knowledge_view(record)
+
+    async def list_knowledge(
+        self,
+        context: TrustedContext,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        application_id: str | None = None,
+    ) -> list[KnowledgeView]:
+        """列出**本组织**导入的知识。其他组织的数据完全不出现。"""
+        if not context.organization_id:
+            return []
+        result: list[KnowledgeView] = []
+        for record in self._knowledge.list():
+            if str(record.get("organization_id") or "") != context.organization_id:
+                continue
+            if kind and str(record.get("kind") or "") != kind:
+                continue
+            if status and str(record.get("status") or "active") != status:
+                continue
+            if application_id is not None and str(record.get("application_id") or "") != application_id:
+                continue
+            result.append(self._knowledge_view(record))
+        result.sort(key=lambda item: item.knowledge_id, reverse=True)
+        return result
+
+    async def get_knowledge(self, knowledge_id: str, context: TrustedContext) -> KnowledgeDetail:
+        return self._knowledge_detail(self._require_knowledge(knowledge_id, context))
+
+    async def deprecate_knowledge(self, knowledge_id: str, context: TrustedContext) -> KnowledgeView:
+        """把一份知识标记为失效（保留记录，不物理删除）。失效后不再进入检索。"""
+        record = self._require_knowledge(knowledge_id, context)
+        if str(record.get("status") or "active") == "deprecated":
+            return self._knowledge_view(record)
+        record["status"] = "deprecated"
+        record["deprecated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            self._knowledge.save(record)
+        except OSError as error:
+            raise KnowledgeStateUnavailable("知识状态未落盘，请重试") from error
+        return self._knowledge_view(record)
+
+    async def search_knowledge(
+        self,
+        context: TrustedContext,
+        query: str,
+        *,
+        kind: str | None = None,
+        application_id: str = "",
+        limit: int = 8,
+    ) -> list[KnowledgeSearchHit]:
+        """在服务端权限过滤之后检索项目知识。
+
+        只会在"本组织 + 应用匹配 + 生效中"的片段里排序，因此跨组织、未授权应用或已失效的
+        知识不可能出现在结果里。
+        """
+        organization_id = context.organization_id
+        if not organization_id or not (query or "").strip():
+            return []
+        chunks = visible_chunks(self._knowledge.list(), organization_id, application_id)
+        if not chunks:
+            return []
+        retriever = HybridRetriever()
+        retriever.add(chunks)
+        prefixes = (KIND_PREFIX[kind],) if kind in KIND_PREFIX else None
+        selected = retriever.search(
+            query, limit=max(1, min(int(limit), 20)), prefixes=prefixes, organizations=(organization_id,)
+        )
+        hits: list[KnowledgeSearchHit] = []
+        for item in selected:
+            knowledge_id = item.chunk.doc_id.split("/", 1)[-1]
+            hits.append(
+                KnowledgeSearchHit(
+                    knowledge_id=knowledge_id,
+                    doc_id=item.chunk.doc_id,
+                    title=item.chunk.title,
+                    section=item.chunk.section,
+                    version=item.chunk.version,
+                    status=item.chunk.status,
+                    snippet=item.chunk.as_snippet(),
+                    score=item.score,
+                )
+            )
+        return hits
+
+    def _require_knowledge(self, knowledge_id: str, context: TrustedContext) -> dict[str, Any]:
+        if not context.organization_id or not context.user_id:
+            raise KnowledgeNotFound(knowledge_id)
+        record = self._knowledge.get(knowledge_id)
+        # 不存在与不属于本组织同样返回 404：不提供跨组织存在性探测。
+        if record is None or str(record.get("organization_id") or "") != context.organization_id:
+            raise KnowledgeNotFound(knowledge_id)
+        return record
+
+    @staticmethod
+    def _knowledge_view(record: dict[str, Any]) -> KnowledgeView:
+        snippets = chunks_for(record)
+        return KnowledgeView(
+            knowledge_id=str(record.get("knowledge_id") or ""),
+            organization_id=str(record.get("organization_id") or ""),
+            application_id=str(record.get("application_id") or ""),
+            kind=str(record.get("kind") or "norms"),
+            title=str(record.get("title") or ""),
+            version=str(record.get("version") or ""),
+            source=str(record.get("source") or ""),
+            status=str(record.get("status") or "active"),
+            content_hash=str(record.get("content_hash") or ""),
+            imported_by=str(record.get("imported_by") or ""),
+            imported_at=record.get("imported_at"),
+            deprecated_at=record.get("deprecated_at"),
+            injection_hits=[str(item) for item in (record.get("injection_hits") or [])],
+            snippet_count=len(snippets),
+        )
+
+    def _knowledge_detail(self, record: dict[str, Any]) -> KnowledgeDetail:
+        view = self._knowledge_view(record)
+        snippets = chunks_for(record)
+        return KnowledgeDetail(
+            **view.model_dump(),
+            snippets=[
+                KnowledgeSnippet(
+                    evidence_id=chunk.evidence_id,
+                    doc_id=chunk.doc_id,
+                    section=chunk.section,
+                    version=chunk.version,
+                    status=chunk.status,
+                    snippet=chunk.as_snippet(),
+                )
+                for chunk in snippets
+            ],
+        )
+
+    # -- M3：独立评测中心 --------------------------------------------------
+
+    async def create_eval_job(self, request: EvalJobRequest, context: TrustedContext) -> EvalJobView:
+        """发起一次评测作业并在**隔离目录**中执行。
+
+        真实模型（live）必须显式启用且配置凭据，否则作业记为 `not_run`——
+        未运行就是未运行，不用离线结果冒充真实模型质量。
+        """
+        if not context.organization_id or not context.user_id:
+            raise EvalInvalid("缺少可信身份，拒绝发起评测")
+        record = new_job_record(
+            job_id=f"eval_{uuid.uuid4().hex[:12]}",
+            organization_id=context.organization_id,
+            created_by=context.user_id,
+            provider=request.provider,
+            strategy=request.strategy,
+            split=request.split,
+            limit=request.limit,
+        )
+        if request.provider == "live" and not self._settings.live_model_ready:
+            record["status"] = "not_run"
+            record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            record["notes"] = [LIVE_NOT_RUN_NOTE, LIVE_ENABLE_HINT]
+            self._save_eval(record)
+            return EvalJobView.model_validate(job_view(record))
+
+        self._save_eval(record)
+        workdir = self._settings.eval_dir / str(record["job_id"])
+        try:
+            report = await run_evaluation(
+                self._settings,
+                provider=request.provider,
+                strategy=request.strategy,
+                split=request.split,
+                limit=request.limit,
+                workdir=workdir,
+            )
+        except Exception as error:  # noqa: BLE001 - 任何失败都必须留下可见的作业记录，不伪装成功
+            record["status"] = "failed"
+            record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            record["error"] = f"{type(error).__name__}: {error}"
+            self._save_eval(record)
+            return EvalJobView.model_validate(job_view(record))
+
+        record["status"] = "completed"
+        record["finished_at"] = datetime.now(timezone.utc).isoformat()
+        record["dataset"] = report["dataset"]
+        record["summary"] = report["summary"]
+        record["cases"] = report["cases"]
+        record["limitations"] = report.get("limitations") or []
+        record["failure_classes"] = aggregate_failures(report["cases"])
+        self._save_eval(record)
+        return EvalJobView.model_validate(job_view(record))
+
+    async def list_eval_jobs(self, context: TrustedContext) -> list[EvalJobView]:
+        if not context.organization_id:
+            return []
+        records = [
+            record for record in self._evals.list()
+            if str(record.get("organization_id") or "") == context.organization_id
+        ]
+        records.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return [EvalJobView.model_validate(job_view(record)) for record in records]
+
+    async def get_eval_job(self, job_id: str, context: TrustedContext) -> EvalJobView:
+        return EvalJobView.model_validate(job_view(self._require_eval(job_id, context)))
+
+    async def eval_report(self, job_id: str, context: TrustedContext) -> EvalReport:
+        record = self._require_eval(job_id, context)
+        return EvalReport(
+            job=EvalJobView.model_validate(job_view(record)),
+            cases=list(record.get("cases") or []),
+            limitations=list(record.get("limitations") or []),
+        )
+
+    async def compare_eval_jobs(self, base_id: str, target_id: str, context: TrustedContext) -> EvalComparison:
+        base = self._require_eval(base_id, context)
+        target = self._require_eval(target_id, context)
+        return EvalComparison(base_job_id=base_id, target_job_id=target_id, **compare_jobs(base, target))
+
+    def _save_eval(self, record: dict[str, Any]) -> None:
+        try:
+            self._evals.save(record)
+        except OSError as error:
+            raise EvalStateUnavailable("评测作业未落盘，请重试") from error
+
+    def _require_eval(self, job_id: str, context: TrustedContext) -> dict[str, Any]:
+        if not context.organization_id or not context.user_id:
+            raise EvalNotFound(job_id)
+        record = self._evals.get(job_id)
+        if record is None or str(record.get("organization_id") or "") != context.organization_id:
+            raise EvalNotFound(job_id)
+        return record
+
     async def cancel(self, task_id: str, context: TrustedContext) -> TaskView:
         record = self._authorize(task_id, context)
         self._ensure_active(record)
@@ -1213,10 +1512,26 @@ class AgentService:
         _annotate_recovery(record)
         return record
 
+    def _retriever_for(self, organization_id: str, application_id: str = "") -> Any:
+        """按 (组织, 应用) 构建检索器：公开合成语料 + 该组织可见的导入知识。
+
+        权限过滤在**服务端**这一层完成：只有通过 `is_visible`（组织匹配、应用匹配、
+        处于生效状态）的知识才会被加入检索器，模型无法用参数扩大范围。
+        """
+        retriever = build_retriever(self._settings.demo_dir)
+        extra = visible_chunks(self._knowledge.list(), organization_id, application_id)
+        if extra:
+            retriever.add(extra)
+        return retriever
+
     def _build_workflow(self, record: dict[str, Any], checkpointer: Any) -> DraftWorkflow:
+        slots = record.get("slots") or {}
+        retriever = self._retriever_for(
+            str(record.get("organization_id") or ""), str(slots.get("application") or "")
+        )
         toolbox_factory = lambda snapshot: Toolbox(  # noqa: E731 - 需要按任务注入快照
             settings=self._settings,
-            retriever=self._retriever,
+            retriever=retriever,
             schema_snapshot=snapshot,
         )
         return DraftWorkflow(

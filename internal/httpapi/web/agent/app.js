@@ -1905,8 +1905,96 @@ async function refreshTaskHistory() {
   }
 }
 
+/* ---------- M3：项目知识与独立评测中心 ---------- */
+
+async function importKnowledge(event) {
+  if (event) event.preventDefault();
+  const title = $("knowledgeTitle").value.trim();
+  const body = $("knowledgeBody").value;
+  if (!title || !body.trim()) { showError("请填写知识标题与正文。"); return; }
+  clearError();
+  state.busy = true;
+  try {
+    const created = await api("/api/agent/knowledge", {
+      method: "POST",
+      body: { kind: $("knowledgeKind").value, title, body, application_id: $("knowledgeApplication").value.trim() },
+    });
+    $("knowledgeFeedback").textContent = `已导入 ${created.knowledge_id}（${created.snippet_count} 个片段；命中的注入模式已作为数据风险记录，不提升权限）`;
+    $("knowledgeBody").value = "";
+  } catch (error) {
+    handleActionError(error);
+  } finally { state.busy = false; }
+}
+
+async function searchKnowledgePanel() {
+  const query = $("knowledgeQuery").value.trim();
+  if (!query) { $("knowledgeFeedback").textContent = "请输入检索关键词。"; return; }
+  const applicationId = $("knowledgeApplication").value.trim();
+  clearError();
+  const params = new URLSearchParams({ q: query, limit: "8" });
+  if (applicationId) params.set("application_id", applicationId);
+  try {
+    const hits = await api(`/api/agent/knowledge/search?${params.toString()}`);
+    const host = $("knowledgeResults");
+    if (!hits.length) {
+      host.innerHTML = '<p class="note-inline">没有匹配的知识（已按组织与应用过滤）。</p>';
+      return;
+    }
+    host.innerHTML = hits.map((hit) => `
+      <div class="check-item">
+        <span class="check-code">${esc(hit.doc_id)}</span>
+        <span class="check-body">
+          <span>${esc(hit.title)} <span class="note-inline">${esc(hit.section || "")} · ${esc(hit.status)}</span></span>
+          <span class="check-suggestion">${esc(hit.snippet)}</span>
+        </span>
+      </div>`).join("");
+  } catch (error) {
+    handleActionError(error);
+  }
+}
+
+function renderEvalJob(job) {
+  const summary = job.summary || {};
+  const failures = Object.entries(job.failure_classes || {});
+  const tone = job.status === "completed" ? "badge-ok" : job.status === "not_run" ? "badge-warn" : "badge-muted";
+  $("evalResult").innerHTML = `
+    <article class="card card-flat">
+      <div class="card-title"><span>${esc(job.job_id)}</span><span class="badge ${tone}">${esc(job.status)}</span></div>
+      <dl class="kv">
+        <dt>Provider / 策略</dt><dd>${esc(job.provider)} / ${esc(job.strategy)}</dd>
+        <dt>任务来源</dt><dd>${esc(job.task_source)}</dd>
+        <dt>用例数</dt><dd>${esc(job.case_count)}</dd>
+        ${summary.total === undefined ? "" : `<dt>通过 / 已执行</dt><dd>${esc(summary.passed)} / ${esc(summary.executed)}</dd>`}
+        ${summary.not_run === undefined ? "" : `<dt>NOT_RUN / SKIPPED</dt><dd>${esc(summary.not_run)} / ${esc(summary.skipped)}</dd>`}
+      </dl>
+      ${failures.length ? `<p class="note-inline">失败分类：${esc(failures.map(([key, value]) => `${key}×${value}`).join("、"))}</p>` : ""}
+      ${(job.notes || []).map((note) => `<p class="note-inline">${esc(note)}</p>`).join("")}
+      ${job.error ? `<p class="tone-danger">${esc(job.error)}</p>` : ""}
+    </article>`;
+  $("evalFeedback").textContent =
+    job.status === "not_run" ? "真实模型评测未运行：结果记为 NOT_RUN。" : "评测完成。";
+}
+
+async function runEval() {
+  clearError();
+  $("evalFeedback").textContent = "正在运行评测…";
+  try {
+    const job = await api("/api/agent/evals", {
+      method: "POST",
+      body: { provider: $("evalProvider").value, strategy: $("evalStrategy").value, split: "dev", limit: 3 },
+    });
+    renderEvalJob(job);
+  } catch (error) {
+    $("evalFeedback").textContent = "";
+    handleActionError(error);
+  }
+}
+
 async function init() {
   $("createForm").addEventListener("submit", createTask);
+  $("knowledgeForm").addEventListener("submit", importKnowledge);
+  $("knowledgeSearch").addEventListener("click", searchKnowledgePanel);
+  $("evalRun").addEventListener("click", runEval);
   wireRequirementCounter();
   $("timeZoneHelp").textContent = `计划时间是所填时区的墙钟时间；时区留空明确使用浏览器时区 ${browserTimezone() || "（无法识别，请手动填写）"}，并随请求发送。支持 2000—2099 年，夏令时缺失或重复时刻会被拒绝。`;
   $("healthChip").addEventListener("click", () => {
