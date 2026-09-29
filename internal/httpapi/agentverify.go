@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kyfd/changeguard/internal/model"
+	"github.com/kyfd/changeguard/internal/service"
 )
 
 // 正式变更的 Agent 任务关联必须**服务端核对**，不能只凭客户端填写的 ID。
@@ -36,6 +37,23 @@ type verifiedAgentTask struct {
 }
 
 const verifyAgentTaskTimeout = 5 * time.Second
+
+// resolveVerifiedAgentTask 把请求里的 agent_task_id 换成服务端核对通过的 ID（无关联时返回空串）。
+// 核对不通过时返回包装了 service.ErrUntrustedAgentTask 的错误，由调用方映射为拒绝响应。
+func (s *Server) resolveVerifiedAgentTask(ctx context.Context, actorID string, input model.CreateChangeInput) (string, error) {
+	taskID := strings.TrimSpace(input.AgentTaskID)
+	if taskID == "" {
+		return "", nil
+	}
+	organizationID, err := s.auth.ActorOrganization(actorID)
+	if err != nil {
+		return "", fmt.Errorf("%w：缺少可信身份", service.ErrUntrustedAgentTask)
+	}
+	if verified, reason := s.verifyAgentTask(ctx, actorID, organizationID, input); !verified {
+		return "", fmt.Errorf("%w：%s", service.ErrUntrustedAgentTask, reason)
+	}
+	return taskID, nil
+}
 
 // verifyAgentTask 返回 (是否可信, 拒绝原因)。只有全部核对通过才算可信。
 func (s *Server) verifyAgentTask(ctx context.Context, actorID, organizationID string, input model.CreateChangeInput) (bool, string) {

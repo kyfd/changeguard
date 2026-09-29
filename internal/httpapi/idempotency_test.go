@@ -205,13 +205,14 @@ func TestChangeCreateIdempotencySurvivesProcessRestart(t *testing.T) {
 		ReleasePlan:  model.ReleasePlan{Strategy: "金丝雀发布", ObservationMinutes: 15, SuccessMetrics: []string{"HTTP 5xx"}},
 	}
 	// agent_task_id 由服务端核对后传入（这里模拟核对通过），Client 声明的字段必须与之一致。
-	first, replayed, err := svc.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart", "task_restart_1")
+	resolve := func() (string, error) { return "task_restart_1", nil }
+	first, replayed, err := svc.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart", resolve)
 	if err != nil || replayed {
 		t.Fatalf("first create replayed=%v err=%v", replayed, err)
 	}
 	// 进程重启：用同一份持久化存储构造新的服务实例，重试同一幂等键。
 	restarted := service.New(data, idempotencyRunner{}, idempotencyAnalyzer{})
-	second, replayed, err := restarted.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart", "task_restart_1")
+	second, replayed, err := restarted.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart", resolve)
 	if err != nil || !replayed || second.ID != first.ID {
 		t.Fatalf("restart retry replayed=%v err=%v first=%s second=%s", replayed, err, first.ID, second.ID)
 	}

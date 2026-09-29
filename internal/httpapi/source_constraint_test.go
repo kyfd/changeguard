@@ -270,6 +270,49 @@ func TestAgentTaskAssociationMustBeVerified(t *testing.T) {
 	})
 }
 
+// 幂等重放必须先于 Agent 任务核对：一次成功的创建不能因为下游不可用而被误报成失败。
+func TestChangeCreateReplaySurvivesAgentOutage(t *testing.T) {
+	server, _, _ := newIdempotencyHTTPServer(t)
+	stub, _ := newAgentTaskStub(t, http.StatusOK, agentTaskPayload(nil))
+	configureAgent(t, stub.URL)
+
+	request := func() *httptest.ResponseRecorder {
+		encoded, err := json.Marshal(agentChangeInput("task_prod_1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest(http.MethodPost, "/api/changes", bytes.NewReader(encoded))
+		r.Header.Set("X-Actor-ID", "usr_developer")
+		r.Header.Set("Idempotency-Key", "create-key-outage-1")
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, r)
+		return w
+	}
+
+	first := request()
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first create status=%d body=%s", first.Code, first.Body.String())
+	}
+	var created model.ChangeRequest
+	if err := json.Unmarshal(first.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	// 变更准备服务不可用（连接被拒绝），完全相同的幂等请求仍必须返回已保存的变更单。
+	t.Setenv(agentBaseURLEnv, "http://127.0.0.1:1")
+	second := request()
+	if second.Code != http.StatusCreated || second.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("replay must not depend on the agent backend: status=%d body=%s", second.Code, second.Body.String())
+	}
+	var replayed model.ChangeRequest
+	if err := json.Unmarshal(second.Body.Bytes(), &replayed); err != nil {
+		t.Fatal(err)
+	}
+	if replayed.ID != created.ID {
+		t.Fatalf("replay returned a different change: first=%s second=%s", created.ID, replayed.ID)
+	}
+}
+
 // 直接调用服务层时，客户端声明的 agent_task_id 不会被信任。
 func TestServiceCreateRejectsDeclaredAgentTaskID(t *testing.T) {
 	_, svc, _ := newIdempotencyHTTPServer(t)

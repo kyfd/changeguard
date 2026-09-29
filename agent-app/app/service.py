@@ -281,19 +281,21 @@ class AgentService:
         if status not in RESUMABLE_STATUSES:
             raise TaskNotResumable(f"当前状态 {status} 不允许补充信息")
 
-        # 应用授权核对是一次外部调用（await）。先算好结果，再基于**最新**记录重新校验后写入，
-        # 避免等待期间并发的归档 / 关联被这份旧记录覆盖。
-        authorized_application = record.get("authorized_application") or ""
-        if request.application is not None:
-            authorized_application = await self._authorized_application(context, request.application)
-            record = self._reload_for_mutation(task_id)
-            self._ensure_active(record)
-            if record.get("status") != status:
-                raise TaskNotResumable("任务状态已变化，本次补充未生效，请重试")
+        # 应用授权**每次都重新核对**（历史授权不是长期凭据）：即使本次没有重新填写应用，
+        # 也要按任务当前的应用重新判定。核对是一次外部调用（await），之后必须基于**最新**
+        # 记录重新校验并写入，避免等待期间并发的归档 / 关联被这份旧记录覆盖。
+        candidate = merge_slot_data(TaskSlots.model_validate(record.get("slots") or {}), request.model_dump())
+        authorized_application = await self._authorized_application(context, candidate.application or "")
+        record = self._reload_for_mutation(task_id)
+        self._ensure_active(record)
+        if record.get("status") != status:
+            raise TaskNotResumable("任务状态已变化，本次补充未生效，请重试")
 
         slots = TaskSlots.model_validate(record.get("slots") or {})
         updated = merge_slot_data(slots, request.model_dump())
         record["slots"] = updated.model_dump(mode="json")
+        # 只记录本次核对结果；未授权时为空串，检索不会使用请求里声明的应用。
+        record["authorized_application"] = authorized_application
         # 表结构快照是任务级材料而非槽位，但必须能在补充阶段补齐；
         # 只有显式提供才覆盖，避免把已有快照清空。
         if request.schema_snapshot is not None:
@@ -326,8 +328,6 @@ class AgentService:
         events.append(event("clarified", f"补充信息：{', '.join(provided) or '无字段变化'}"))
         # 输入/材料变了就作废旧草案与旧结果——不能带着陈旧上下文继续。
         _apply_input_version(record)
-        # 只记录**已核对通过**的应用；未授权时为空串，检索不会使用请求里声明的应用。
-        record["authorized_application"] = authorized_application
         record["events"] = events
 
         if record.get("awaiting_input"):
@@ -386,10 +386,11 @@ class AgentService:
                 notes = list(record.get("clarification_notes") or [])
                 notes.append(note)
                 record["clarification_notes"] = notes
-        # 应用授权核对（await）：同样在落盘前完成；未授权时按空串处理（失败关闭）。
-        authorized_application = record.get("authorized_application") or ""
-        if request is not None and request.application is not None:
-            authorized_application = await self._authorized_application(context, request.application)
+        # 应用授权**每次恢复都重新核对**（历史授权不是长期凭据）：按合并后的任务当前应用判定，
+        # 而不是继续沿用上次的结果。未授权时按空串处理（失败关闭，只看组织通用知识）。
+        authorized_application = await self._authorized_application(
+            context, str((record.get("slots") or {}).get("application") or "")
+        )
         _apply_input_version(record)
 
         # 下面读检查点是一个 await：期间可能有另一个请求抢先派发。记下此刻的"代际 + 状态"，

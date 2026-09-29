@@ -26,6 +26,8 @@ var (
 	ErrInvalidState = errors.New("当前状态不允许执行该操作")
 	ErrForbidden    = errors.New("没有权限执行该操作")
 	ErrValidation   = errors.New("请求参数不完整")
+	// ErrUntrustedAgentTask：Agent 任务关联无法核对通过，不能建立可信来源。
+	ErrUntrustedAgentTask = errors.New("无法核对 Agent 任务来源")
 )
 
 type Event struct {
