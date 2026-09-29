@@ -129,6 +129,115 @@ func TestHTTPPassportIdempotentRetryDoesNotReplayToken(t *testing.T) {
 	}
 }
 
+func configCreateBody(title, agentTaskID string) string {
+	payload, _ := json.Marshal(model.CreateChangeInput{
+		Title: title, ApplicationID: "app_order", ChangeType: "配置变更", Environment: "生产环境",
+		AgentTaskID:  agentTaskID,
+		Artifacts:    []model.ChangeArtifact{{Kind: model.ArtifactConfig, Name: "app.yaml", Content: "debug: false\nauth_enabled: true\ntls_verify: true"}},
+		RollbackPlan: "restore prior configuration",
+		ReleasePlan:  model.ReleasePlan{Strategy: "金丝雀发布", ObservationMinutes: 15, SuccessMetrics: []string{"HTTP 5xx"}},
+	})
+	return string(payload)
+}
+
+func TestHTTPChangeCreateIdempotentReplayConflictAndSource(t *testing.T) {
+	server, _, data := newIdempotencyHTTPServer(t)
+	create := func(title, agentTaskID, key string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/changes", strings.NewReader(configCreateBody(title, agentTaskID)))
+		r.Header.Set("X-Actor-ID", "usr_developer")
+		if key != "" {
+			r.Header.Set("Idempotency-Key", key)
+		}
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, r)
+		return w
+	}
+
+	first := create("repeat create", "", "create-key-0001")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first create status=%d body=%s", first.Code, first.Body.String())
+	}
+	var created model.ChangeRequest
+	if err := json.Unmarshal(first.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Source != "console" || created.AgentTaskID != "" {
+		t.Fatalf("unexpected source/association: %+v", created)
+	}
+
+	// 重复点击 / 超时重试：返回同一个变更单，并标记为重放。
+	second := create("repeat create", "", "create-key-0001")
+	var replayedChange model.ChangeRequest
+	_ = json.Unmarshal(second.Body.Bytes(), &replayedChange)
+	if second.Code != http.StatusCreated || second.Header().Get("Idempotency-Replayed") != "true" || replayedChange.ID != created.ID {
+		t.Fatalf("replay status=%d header=%q body=%s", second.Code, second.Header().Get("Idempotency-Replayed"), second.Body.String())
+	}
+
+	// 同一幂等键用于不同请求体 → 冲突，不新建。
+	conflict := create("different body", "", "create-key-0001")
+	if conflict.Code != http.StatusConflict || responseCode(t, conflict) != "IDEMPOTENCY_KEY_CONFLICT" {
+		t.Fatalf("digest conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+
+	// Agent 任务关联：来源由服务端判为 agent_task，并记录关联。
+	linked := create("agent authored", "task_abc_123", "create-key-0002")
+	var agentChange model.ChangeRequest
+	_ = json.Unmarshal(linked.Body.Bytes(), &agentChange)
+	if linked.Code != http.StatusCreated || agentChange.Source != "agent_task" || agentChange.AgentTaskID != "task_abc_123" {
+		t.Fatalf("agent task association status=%d body=%s", linked.Code, linked.Body.String())
+	}
+
+	// 非法 agent_task_id 被拒绝。
+	bad := create("bad task", "task id!", "create-key-0003")
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("invalid agent_task_id status=%d body=%s", bad.Code, bad.Body.String())
+	}
+
+	// 无幂等键保持兼容，并显式标注未请求幂等。
+	compatible := create("no key", "", "")
+	if compatible.Code != http.StatusCreated || compatible.Header().Get("Idempotency-Status") != "not-requested" {
+		t.Fatalf("missing key compatibility status=%d header=%q", compatible.Code, compatible.Header().Get("Idempotency-Status"))
+	}
+
+	if got := countAgentTaskChanges(data, "task_abc_123"); got != 1 {
+		t.Fatalf("agent task changes=%d want 1", got)
+	}
+}
+
+func TestChangeCreateIdempotencySurvivesProcessRestart(t *testing.T) {
+	_, svc, data := newIdempotencyHTTPServer(t)
+	input := model.CreateChangeInput{
+		Title: "restart safe", ApplicationID: "app_order", ChangeType: "配置变更", Environment: "生产环境",
+		AgentTaskID:  "task_restart_1",
+		Artifacts:    []model.ChangeArtifact{{Kind: model.ArtifactConfig, Name: "app.yaml", Content: "debug: false\nauth_enabled: true\ntls_verify: true"}},
+		RollbackPlan: "restore prior configuration",
+		ReleasePlan:  model.ReleasePlan{Strategy: "金丝雀发布", ObservationMinutes: 15, SuccessMetrics: []string{"HTTP 5xx"}},
+	}
+	first, replayed, err := svc.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart")
+	if err != nil || replayed {
+		t.Fatalf("first create replayed=%v err=%v", replayed, err)
+	}
+	// 进程重启：用同一份持久化存储构造新的服务实例，重试同一幂等键。
+	restarted := service.New(data, idempotencyRunner{}, idempotencyAnalyzer{})
+	second, replayed, err := restarted.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart")
+	if err != nil || !replayed || second.ID != first.ID {
+		t.Fatalf("restart retry replayed=%v err=%v first=%s second=%s", replayed, err, first.ID, second.ID)
+	}
+	if got := countAgentTaskChanges(data, "task_restart_1"); got != 1 {
+		t.Fatalf("restart produced %d changes, want 1", got)
+	}
+}
+
+func countAgentTaskChanges(data *store.Store, taskID string) int {
+	count := 0
+	for _, change := range data.Changes() {
+		if change.AgentTaskID == taskID {
+			count++
+		}
+	}
+	return count
+}
+
 func readyConfigChange(t *testing.T, svc *service.Service, title string) model.ChangeRequest {
 	t.Helper()
 	change, err := svc.Create(model.CreateChangeInput{

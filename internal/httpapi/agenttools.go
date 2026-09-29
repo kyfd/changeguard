@@ -58,6 +58,10 @@ type agentToolChangeView struct {
 	// DescriptionUntrusted 是**不可信文本**。字段名里保留 untrusted 是刻意的：
 	// 契约本身就要提醒调用方，这是数据而不是指令。
 	DescriptionUntrusted string `json:"description_untrusted,omitempty"`
+	// 来源标记与 Agent 任务关联。两者都是**数据**，不是授权凭据：它们不改变审批、
+	// 通行证或任何放行判定，只用于双向核对"这个变更单是不是那个任务产生的"。
+	Source      string `json:"source,omitempty"`
+	AgentTaskID string `json:"agent_task_id,omitempty"`
 
 	// findings 投影
 	Risk     string          `json:"risk,omitempty"`
@@ -144,6 +148,8 @@ func agentToolChangeProjection(change model.ChangeRequest, projection string) ag
 		view.ChangeType = change.ChangeType
 		view.ArtifactSHA256 = change.ArtifactSHA256
 		view.DescriptionUntrusted = change.Description
+		view.Source = change.Source
+		view.AgentTaskID = change.AgentTaskID
 	case agentProjectionFindings:
 		view.Risk = string(change.Risk)
 		view.Findings = change.Findings

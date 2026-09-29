@@ -113,14 +113,17 @@ func TestAgentWorkbenchKeepsMisleadingWordingOut(t *testing.T) {
 		"它不是审批结论，不会自动提交变更，也不代表可以在生产执行",
 		"检查失败 —— 不得视为通过",
 		"失败不等于没有问题",
-		"本地编辑未经验证",
-		"本地编辑只用于审阅，不会回传服务端",
+		"本地修改尚未保存到服务端",
+		"检查未通过时任务会停在「检查阻断」",
 		"这只能说未命中已知规则，不代表不存在风险",
 		"不参与放行判定",
 		"风险等级与阻断项由确定性扫描产生",
 		"本服务不触发",
 		"DEMO_ONLY",
 		"NOT_RUN",
+		// M2：执行轨迹不得冒充模型思维链，变更关联不得被读成"已批准"。
+		"不含模型思维链",
+		"关联 ≠ 批准",
 	} {
 		if !strings.Contains(script, marker) {
 			t.Fatalf("misleading-wording guard is missing: %q", marker)

@@ -187,6 +187,91 @@ class TaskEvent(BaseModel):
     detail: str = ""
 
 
+class DraftVersion(BaseModel):
+    """草案版本快照。
+
+    每次草案生成或服务端编辑都追加一份**不可变**快照，使"谁在什么时候、因为什么
+    把材料改成了什么"可复核。它是审计记录，不参与放行判定；物化删除时也一并保留。
+
+    未知值保持 None / 显式为 unknown，不用 0 或空字符串冒充"已记录"。
+    """
+
+    version: int
+    created_at: datetime
+    # agent（工作流生成）/ user_edit（服务端版本化编辑）
+    origin: Literal["agent", "user_edit", "initial"] = "agent"
+    actor: str = "agent"
+    reason: str = ""
+    sql: str = ""
+    rollback_sql: str = ""
+    # 内容摘要（SQL + 回滚的 SHA-256），与人工确认绑定的 material_hash 同一算法。
+    content_hash: str = ""
+    # 内容摘要（人可读：语句类型、是否含回滚、长度），仅用于列表展示。
+    summary: str = ""
+    check_status: str = "NOT_RUN"
+    check_source: str = "local_scan"
+    check_error: str | None = None
+    check_blocking_count: int = 0
+    evidence_ids: list[str] = Field(default_factory=list)
+    revision_notes: list[str] = Field(default_factory=list)
+
+
+class TraceStep(BaseModel):
+    """执行轨迹的一步。
+
+    **不含模型内部思维链**：只展示事件、工具观察、模型调用元数据与检查结论。
+    `duration_ms` 为 None 表示**未记录耗时（未知）**，不是 0 毫秒。
+    token / 费用同理：未知即 None，绝不填 0 冒充"确定没有消耗"。
+    """
+
+    index: int
+    kind: Literal["event", "tool", "model_call", "check", "draft"]
+    name: str
+    status: str = "unknown"
+    at: datetime | None = None
+    duration_ms: int | None = None
+    detail: str = ""
+    error: str | None = None
+    tool: str | None = None
+    phase: str | None = None
+    model: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    usage_known: bool | None = None
+    cost_estimate: float | None = None
+    cost_known: bool = False
+
+
+class TaskTrace(BaseModel):
+    """任务执行轨迹视图。
+
+    从**已落盘的事件、工具观察与调用账本**投影而来：可核对的是"真的发生了什么"，
+    没有记录的一律标为未知。它不包含、也不推断模型内部推理过程。
+    """
+
+    task_id: str
+    execution_id: str | None = None
+    generated_at: datetime
+    steps: list[TraceStep] = Field(default_factory=list)
+    usage: dict[str, Any] | None = None
+    notes: list[str] = Field(default_factory=list)
+    # 明确列出因缺少记录而无法确定的字段，避免"看起来完整"。
+    unknown: list[str] = Field(default_factory=list)
+    # 恒为 False：轨迹从不包含模型内部思维链。
+    includes_model_reasoning: bool = False
+
+
+class DraftVersionDiff(BaseModel):
+    """两个草案版本之间的差异（服务端用统一 diff 计算）。"""
+
+    task_id: str
+    from_version: int | None
+    to_version: int
+    sql_diff: str = ""
+    rollback_diff: str = ""
+
+
 class Confirmation(BaseModel):
     """材料的人工确认记录。
 
@@ -209,6 +294,23 @@ class Confirmation(BaseModel):
     @property
     def active(self) -> bool:
         return self.invalidated_at is None
+
+
+class ChangeLink(BaseModel):
+    """Agent 任务与**正式变更单**的关联记录。
+
+    关联的权威在治理服务：这里只记录"某个已存在的正式变更单由本任务的人工动作
+    关联而来"。它**不是**授权凭据，也不代表变更单已被批准或可在生产执行。
+    """
+
+    change_request_id: str
+    organization_id: str
+    linked_by: str
+    linked_at: datetime
+    # 关联的来源标记（恒为 agent_task：仅由工作台的人工动作建立）。
+    origin: Literal["agent_task"] = "agent_task"
+    # 建立关联时使用的幂等键，便于事后复核"重复点击没有产生重复记录"。
+    idempotency_key: str | None = None
 
 
 class TaskView(BaseModel):
@@ -242,6 +344,10 @@ class TaskView(BaseModel):
     # 当前材料摘要与人工确认记录（确认 ≠ 审批 ≠ 执行许可）。
     material_hash: str | None = None
     confirmations: list[Confirmation] = Field(default_factory=list)
+    # 草案版本快照数量（完整快照走 /tasks/{id}/draft/versions，避免列表响应膨胀）。
+    draft_version_count: int = 0
+    # Agent 任务与正式变更单的服务端权威关联（由人工动作触发、服务端校验后写入）。
+    change_links: list["ChangeLink"] = Field(default_factory=list)
     # 执行策略与调查轨迹（决策者、停止原因、预算、工具结果摘要），供工作台展示。
     strategy: str | None = None
     investigation: dict[str, Any] | None = None
@@ -309,6 +415,27 @@ class DeleteTaskPreview(BaseModel):
     record_version: str
     effect: Literal["recycle_bin"] = "recycle_bin"
     retained: list[str] = Field(default_factory=lambda: ["audit_events", "checkpoints", "usage"])
+
+
+class DraftEditRequest(BaseModel):
+    """服务端版本化编辑草案。
+
+    `expected_version` 是调用方**所看到的**草案版本。服务端必须核对一致，否则拒绝并要求
+    刷新——否则一个停留在旧页面的用户会把已经改过的材料覆盖掉（丢失并发修改）。
+    """
+
+    expected_version: int = Field(ge=1)
+    sql: str = Field(min_length=1, max_length=MAX_SQL_CHARS)
+    rollback_sql: str = Field(default="", max_length=MAX_SQL_CHARS)
+    reason: str = Field(default="", max_length=2000)
+
+
+class LinkChangeRequest(BaseModel):
+    """把本任务与一个**已存在**的正式变更单关联（人工动作）。"""
+
+    change_request_id: str = Field(min_length=1, max_length=128)
+    # 幂等键：重复提交同一键不会产生重复关联；缺省时按 change_request_id 去重。
+    idempotency_key: str | None = Field(default=None, max_length=128)
 
 
 class ToolResult(BaseModel):

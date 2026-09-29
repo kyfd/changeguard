@@ -220,6 +220,8 @@ class ToolObservation:
     data_version: str = ""
     observed_at: str = ""
     kind: str = "generic"
+    # 真实测量的工具耗时（毫秒）。未测量时为 None——不填 0 冒充"瞬间完成"。
+    duration_ms: int | None = None
 
 
 @dataclass
@@ -571,6 +573,8 @@ class BoundedInvestigation:
                         error=f"超时（{self._tool_timeout:g} 秒未返回）",
                         observed_at=datetime.now(timezone.utc).isoformat(),
                         kind="timeout",
+                        # 超时没有可用的实测耗时（我们只知道它没在限定时间内返回）。
+                        duration_ms=None,
                     )
                 )
                 report.stop_reason = StopReason.TOOL_FAILED.value
@@ -592,6 +596,8 @@ class BoundedInvestigation:
                     data_version=str(result.data_version or ""),
                     observed_at=(result.observed_at or datetime.now(timezone.utc)).isoformat(),
                     kind="search" if isinstance((result.data or {}).get("hits"), list) else "material",
+                    # 实测耗时（注册表按调用计时）；用于轨迹展示每个工具步骤花了多久。
+                    duration_ms=max(0, int(getattr(result, "duration_ms", 0) or 0)),
                 )
             )
             if not result.ok:
