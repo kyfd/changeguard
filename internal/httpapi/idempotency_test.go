@@ -179,28 +179,19 @@ func TestHTTPChangeCreateIdempotentReplayConflictAndSource(t *testing.T) {
 		t.Fatalf("digest conflict status=%d body=%s", conflict.Code, conflict.Body.String())
 	}
 
-	// Agent 任务关联：来源由服务端判为 agent_task，并记录关联。
-	linked := create("agent authored", "task_abc_123", "create-key-0002")
-	var agentChange model.ChangeRequest
-	_ = json.Unmarshal(linked.Body.Bytes(), &agentChange)
-	if linked.Code != http.StatusCreated || agentChange.Source != "agent_task" || agentChange.AgentTaskID != "task_abc_123" {
-		t.Fatalf("agent task association status=%d body=%s", linked.Code, linked.Body.String())
+	// Agent 任务关联必须先由服务端核对：没有配置变更准备服务时拒绝，且不落库。
+	unverified := create("agent authored", "task_abc_123", "create-key-0002")
+	if unverified.Code != http.StatusConflict {
+		t.Fatalf("unverifiable agent task must be refused: status=%d body=%s", unverified.Code, unverified.Body.String())
 	}
-
-	// 非法 agent_task_id 被拒绝。
-	bad := create("bad task", "task id!", "create-key-0003")
-	if bad.Code != http.StatusBadRequest {
-		t.Fatalf("invalid agent_task_id status=%d body=%s", bad.Code, bad.Body.String())
+	if got := countAgentTaskChanges(data, "task_abc_123"); got != 0 {
+		t.Fatalf("refused association created %d changes, want 0", got)
 	}
 
 	// 无幂等键保持兼容，并显式标注未请求幂等。
 	compatible := create("no key", "", "")
 	if compatible.Code != http.StatusCreated || compatible.Header().Get("Idempotency-Status") != "not-requested" {
 		t.Fatalf("missing key compatibility status=%d header=%q", compatible.Code, compatible.Header().Get("Idempotency-Status"))
-	}
-
-	if got := countAgentTaskChanges(data, "task_abc_123"); got != 1 {
-		t.Fatalf("agent task changes=%d want 1", got)
 	}
 }
 
@@ -213,13 +204,15 @@ func TestChangeCreateIdempotencySurvivesProcessRestart(t *testing.T) {
 		RollbackPlan: "restore prior configuration",
 		ReleasePlan:  model.ReleasePlan{Strategy: "金丝雀发布", ObservationMinutes: 15, SuccessMetrics: []string{"HTTP 5xx"}},
 	}
-	first, replayed, err := svc.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart")
+	// agent_task_id 由服务端核对后传入（这里模拟核对通过），Client 声明的字段必须与之一致。
+	resolve := func() (string, error) { return "task_restart_1", nil }
+	first, replayed, err := svc.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart", resolve)
 	if err != nil || replayed {
 		t.Fatalf("first create replayed=%v err=%v", replayed, err)
 	}
 	// 进程重启：用同一份持久化存储构造新的服务实例，重试同一幂等键。
 	restarted := service.New(data, idempotencyRunner{}, idempotencyAnalyzer{})
-	second, replayed, err := restarted.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart")
+	second, replayed, err := restarted.CreateIdempotent(input, "usr_developer", "create-key-restart-1", "digest-restart", resolve)
 	if err != nil || !replayed || second.ID != first.ID {
 		t.Fatalf("restart retry replayed=%v err=%v first=%s second=%s", replayed, err, first.ID, second.ID)
 	}

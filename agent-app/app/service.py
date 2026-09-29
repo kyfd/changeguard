@@ -31,9 +31,33 @@ import httpx
 
 from app.budget import PHASE_GENERATE, LedgerPersistError, UsageLedger, usage_scope
 from app.config import Settings
+from app.evalcenter import (
+    LIVE_ENABLE_HINT,
+    LIVE_NOT_RUN_NOTE,
+    EvalInvalid,
+    EvalNotFound,
+    EvalRepository,
+    EvalStateUnavailable,
+    aggregate_failures,
+    compare_jobs,
+    job_view,
+    new_job_record,
+    run_evaluation,
+)
 from app.guard import detect_injection
+from app.knowledge import KnowledgeRepository, chunks_for, import_record, visible_chunks
 from app.llm.provider import build_provider
 from app.retrieval.corpus import build_retriever
+from app.retrieval.keyword import HybridRetriever
+from app.schemas.evals import EvalComparison, EvalJobRequest, EvalJobView, EvalReport
+from app.schemas.knowledge import (
+    KIND_PREFIX,
+    KnowledgeDetail,
+    KnowledgeImportRequest,
+    KnowledgeSearchHit,
+    KnowledgeSnippet,
+    KnowledgeView,
+)
 from app.schemas.drafts import (
     ChangeLink,
     ClarifyRequest,
@@ -120,6 +144,22 @@ class TaskNotConfirmable(Exception):
     """当前没有可人工确认的材料（例如尚未生成草案）。"""
 
 
+class KnowledgeNotFound(Exception):
+    """知识不存在或不属于调用方组织（不区分，避免探测）。"""
+
+
+class KnowledgeInvalid(Exception):
+    """知识导入参数不合法。"""
+
+
+class KnowledgeStateUnavailable(Exception):
+    """知识无法落盘：失败关闭，不返回未持久化的成功。"""
+
+
+class KnowledgeForbidden(Exception):
+    """调用方对该应用没有授权（或无法核对授权）。"""
+
+
 @dataclass
 class _Execution:
     """一次受管理的执行。"""
@@ -149,6 +189,8 @@ class AgentService:
         # provider 可注入：评估集需要构造"模型输出非法/冲突"等场景。
         self._provider = provider or build_provider(settings)
         self._repository = TaskRepository(settings.task_store_path)
+        self._knowledge = KnowledgeRepository(settings.knowledge_file or "data/agent-knowledge.json")
+        self._evals = EvalRepository(str(settings.eval_dir / "eval-jobs.json"))
         # 受管理的执行登记表：inline 与 background 都登记，二者因此都可被取消。
         self._executions: dict[str, _Execution] = {}
         # 未能留下可查询终态的执行（存储不可用）。健康状态据此报告降级。
@@ -199,6 +241,9 @@ class AgentService:
         slots_payload = slots.model_dump(mode="json")
         requirement = request.requirement.strip()
         schema_snapshot = request.schema_snapshot or ""
+        # 应用由请求声明，检索前必须核对授权；无法核对时按"未授权"处理（失败关闭），
+        # 只会看到组织通用知识，而不会看到该应用专属知识。
+        authorized_application = await self._authorized_application(context, slots.application or "")
         record: dict[str, Any] = {
             "task_id": f"task_{uuid.uuid4().hex[:12]}",
             "source": self._settings.task_source,
@@ -208,6 +253,8 @@ class AgentService:
             "requirement": requirement,
             "slots": slots_payload,
             "schema_snapshot": schema_snapshot,
+            # 已核对通过的应用；检索只使用这个值，不回退到请求里声明的应用。
+            "authorized_application": authorized_application,
             "status": TaskStatus.RECEIVED.value,
             "questions": [],
             "draft": None,
@@ -234,9 +281,21 @@ class AgentService:
         if status not in RESUMABLE_STATUSES:
             raise TaskNotResumable(f"当前状态 {status} 不允许补充信息")
 
+        # 应用授权**每次都重新核对**（历史授权不是长期凭据）：即使本次没有重新填写应用，
+        # 也要按任务当前的应用重新判定。核对是一次外部调用（await），之后必须基于**最新**
+        # 记录重新校验并写入，避免等待期间并发的归档 / 关联被这份旧记录覆盖。
+        candidate = merge_slot_data(TaskSlots.model_validate(record.get("slots") or {}), request.model_dump())
+        authorized_application = await self._authorized_application(context, candidate.application or "")
+        record = self._reload_for_mutation(task_id)
+        self._ensure_active(record)
+        if record.get("status") != status:
+            raise TaskNotResumable("任务状态已变化，本次补充未生效，请重试")
+
         slots = TaskSlots.model_validate(record.get("slots") or {})
         updated = merge_slot_data(slots, request.model_dump())
         record["slots"] = updated.model_dump(mode="json")
+        # 只记录本次核对结果；未授权时为空串，检索不会使用请求里声明的应用。
+        record["authorized_application"] = authorized_application
         # 表结构快照是任务级材料而非槽位，但必须能在补充阶段补齐；
         # 只有显式提供才覆盖，避免把已有快照清空。
         if request.schema_snapshot is not None:
@@ -327,6 +386,11 @@ class AgentService:
                 notes = list(record.get("clarification_notes") or [])
                 notes.append(note)
                 record["clarification_notes"] = notes
+        # 应用授权**每次恢复都重新核对**（历史授权不是长期凭据）：按合并后的任务当前应用判定，
+        # 而不是继续沿用上次的结果。未授权时按空串处理（失败关闭，只看组织通用知识）。
+        authorized_application = await self._authorized_application(
+            context, str((record.get("slots") or {}).get("application") or "")
+        )
         _apply_input_version(record)
 
         # 下面读检查点是一个 await：期间可能有另一个请求抢先派发。记下此刻的"代际 + 状态"，
@@ -341,7 +405,7 @@ class AgentService:
         if checkpoint["interrupt"]:
             # 停在节点级中断上：把当前完整输入交给 interrupt()。
             mode = RESUME_INTERRUPT
-            value: Any = _resume_value(record)
+            value: Any = None  # 在重新校验之后基于**最新**记录计算，见下。
         elif checkpoint["next"]:
             # 续跑未完成节点：输入必须与检查点一致，否则会带着陈旧的检索/检查结果继续。
             # 核对不出来（检查点没有记录版本）时**失败关闭**，不放行"尽力继续"。
@@ -363,20 +427,34 @@ class AgentService:
         if self._has_live_execution(task_id):
             raise TaskNotResumable("该任务已有执行在进行中，本次恢复未生效，请等待或先取消")
 
-        record["awaiting_input"] = False
-        record["status"] = TaskStatus.RUNNING.value
-        record["error"] = None
-        record["resume_mode"] = mode
+        # 在**最新**记录上合并写入：`record` 是外部等待之前读到的，直接保存会把这段时间里
+        # 并发产生的归档 / 关联 / 审计覆盖回旧值。这里只把本次请求的**输入变更**合并过去，
+        # 其余字段以最新记录为准。下面到 save 之间没有 await，单进程内是原子的。
+        if request is not None:
+            latest["slots"] = record.get("slots") or latest.get("slots")
+            if "schema_snapshot" in record:
+                latest["schema_snapshot"] = record["schema_snapshot"]
+            if "clarification_notes" in record:
+                latest["clarification_notes"] = record["clarification_notes"]
+        # 合并后的输入若与最新记录不同，旧的草案/检查结果同样要作废。
+        _apply_input_version(latest)
+        if mode == RESUME_INTERRUPT:
+            value = _resume_value(latest)
+        latest["authorized_application"] = authorized_application
+        latest["awaiting_input"] = False
+        latest["status"] = TaskStatus.RUNNING.value
+        latest["error"] = None
+        latest["resume_mode"] = mode
         # 不宣称 exactly-once：`interrupt` 与 `checkpoint` 两种模式都会**重新执行**节点，
         # 而 `checkpoint` 模式的那个节点在中断前可能已经开始、甚至已经把模型请求发出去了。
         # 与其假装那次调用不存在，不如把不确定性写进记录（消耗以账本为准）。
-        record["recovery_semantics"] = RECOVERY_AT_LEAST_ONCE
-        record["resume_count"] = int(record.get("resume_count") or 0) + 1
-        events = list(record.get("events") or [])
+        latest["recovery_semantics"] = RECOVERY_AT_LEAST_ONCE
+        latest["resume_count"] = int(latest.get("resume_count") or 0) + 1
+        events = list(latest.get("events") or [])
         events.append(event("resumed", f"从检查点恢复（mode={mode}）"))
         events.append(event("recovery_at_least_once", RECOVERY_UNCERTAINTY_NOTE))
-        record["events"] = events
-        self._repository.save(record)
+        latest["events"] = events
+        self._repository.save(latest)
         await self._dispatch_or_fail(task_id, resume={"mode": mode, "value": value})
         return self._view(self._require(task_id))
 
@@ -638,48 +716,53 @@ class AgentService:
 
         check = await self._scan_material(record, request.sql, request.rollback_sql)
 
-        # 校验与落盘之间只隔着一次同步读取：确认在检查期间没有并发编辑/状态变化。
-        latest = self._repository.get(task_id)
-        if latest is None:
-            raise TaskNotFound(task_id)
-        if int((latest.get("draft") or {}).get("version") or 1) != current_version:
+        # 确定性扫描是一次 await：期间可能发生并发操作（归档、关联、另一次编辑）。
+        # 必须基于**最新**记录重新校验生命周期与版本，并把结果合并写回这份最新记录；
+        # 写回等待之前读到的那份会把并发产生的归档/关联/审计覆盖掉。
+        latest = self._reload_for_mutation(task_id)
+        self._ensure_active(latest)
+        if self._has_live_execution(task_id):
+            raise TaskNotResumable("任务已有新的执行在进行中，本次编辑未生效；请等待或先取消")
+        latest_draft = latest.get("draft") or {}
+        if int(latest_draft.get("version") or 1) != current_version:
             raise TaskNotResumable("草案已被其他操作更新，本次编辑未生效；请刷新后重试")
         if latest.get("status") not in {TaskStatus.DRAFT_READY.value, TaskStatus.CHECK_BLOCKED.value}:
             raise TaskNotResumable("任务状态已变化，本次编辑未生效；请刷新后重试")
 
         new_version = current_version + 1
-        new_draft = dict(draft)
+        new_draft = dict(latest_draft)
         new_draft.update(
             {
                 "version": new_version,
                 "sql": request.sql,
                 "rollback_sql": request.rollback_sql,
                 "deterministic_check": check.model_dump(mode="json"),
-                "revision_notes": [*(draft.get("revision_notes") or []), f"人工编辑 v{new_version}"],
+                "revision_notes": [*(latest_draft.get("revision_notes") or []), f"人工编辑 v{new_version}"],
             }
         )
-        record["draft"] = new_draft
+        # 以下到 save 之间没有 await，单进程事件循环内是原子的。
+        latest["draft"] = new_draft
         # 检查未通过（含扫描工具失败）时失败关闭：状态是 CHECK_BLOCKED，不是 DRAFT_READY。
-        record["status"] = (
+        latest["status"] = (
             TaskStatus.CHECK_BLOCKED.value if check.status in {"BLOCKED", "FAILED"} else TaskStatus.DRAFT_READY.value
         )
-        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        latest["updated_at"] = datetime.now(timezone.utc).isoformat()
         # 材料内容已变：旧确认失效（保留痕跡）；新检查结果是针对**新内容**计算的。
-        _invalidate_stale_confirmations(record, "材料已被人工编辑，旧确认失效")
+        _invalidate_stale_confirmations(latest, "材料已被人工编辑，旧确认失效")
         _record_draft_version(
-            record, origin="user_edit", actor=context.user_id, reason=request.reason or "", draft=new_draft
+            latest, origin="user_edit", actor=context.user_id, reason=request.reason or "", draft=new_draft
         )
-        events = list(record.get("events") or [])
+        events = list(latest.get("events") or [])
         events.append(
             event("draft_edited", f"创建者 {context.user_id} 服务端编辑材料至 v{new_version}；检查 {check.status}")
         )
-        record["events"] = events
+        latest["events"] = events
         try:
-            self._repository.save(record)
+            self._repository.save(latest)
         except OSError as error:
             # 失败关闭且状态不变：内存不得领先磁盘（TaskRepository 先落盘后提交内存）。
             raise TaskStateUnavailable("材料编辑未落盘，请重试") from error
-        return self._view(record)
+        return self._view(latest)
 
     async def link_change(self, task_id: str, context: TrustedContext, request: LinkChangeRequest) -> TaskView:
         """把本任务关联到一个**已存在**的正式变更单（人工动作，服务端校验）。
@@ -700,14 +783,27 @@ class AgentService:
         if not change_id:
             raise TaskNotResumable("change_request_id 不能为空")
         idempotency_key = (request.idempotency_key or change_id).strip()
-        links = list(record.get("change_links") or [])
-        for item in links:
-            if item.get("change_request_id") == change_id or (
-                item.get("idempotency_key") and item.get("idempotency_key") == idempotency_key
-            ):
-                return self._view(record)
+
+        def duplicate(item: dict[str, Any]) -> bool:
+            return item.get("change_request_id") == change_id or (
+                bool(item.get("idempotency_key")) and item.get("idempotency_key") == idempotency_key
+            )
+
+        # 先做一次廉价去重，避免为一次必然幂等的请求多打一次治理后端。
+        if any(duplicate(item) for item in record.get("change_links") or []):
+            return self._view(record)
         if not await self._change_exists(change_id, context):
             raise TaskNotResumable("无法确认该正式变更单存在且属于本组织，未建立关联")
+
+        # 核对是一次 await：期间可能被归档 / 被其它操作写入。基于**最新**记录重新校验并合并写入，
+        # 否则会把并发产生的归档、其它关联与审计覆盖掉。
+        latest = self._reload_for_mutation(task_id)
+        self._ensure_active(latest)
+        if self._has_live_execution(task_id):
+            raise TaskNotResumable("任务已有新的执行在进行中，本次关联未生效")
+        links = list(latest.get("change_links") or [])
+        if any(duplicate(item) for item in links):
+            return self._view(latest)
         links.append(
             {
                 "change_request_id": change_id,
@@ -718,16 +814,17 @@ class AgentService:
                 "idempotency_key": idempotency_key,
             }
         )
-        record["change_links"] = links
-        record["updated_at"] = datetime.now(timezone.utc).isoformat()
-        events = list(record.get("events") or [])
+        # 以下到 save 之间没有 await，单进程事件循环内是原子的。
+        latest["change_links"] = links
+        latest["updated_at"] = datetime.now(timezone.utc).isoformat()
+        events = list(latest.get("events") or [])
         events.append(event("change_linked", f"创建者 {context.user_id} 关联正式变更单 {change_id}（关联不代表批准）"))
-        record["events"] = events
+        latest["events"] = events
         try:
-            self._repository.save(record)
+            self._repository.save(latest)
         except OSError as error:
             raise TaskStateUnavailable("变更关联未落盘，请重试") from error
-        return self._view(record)
+        return self._view(latest)
 
     async def _scan_material(self, record: dict[str, Any], sql: str, rollback_sql: str) -> DeterministicCheck:
         """对给定材料执行确定性扫描。工具失败按 FAILED 返回（失败关闭，绝不当作通过）。"""
@@ -762,6 +859,336 @@ class AgentService:
         except Exception:  # noqa: BLE001 - 治理后端不可达时失败关闭，不建立未经验证的关联
             return False
         return response.status_code == 200
+
+    async def _application_authorized(self, context: TrustedContext, application_id: str) -> bool:
+        """核验调用方对某个应用是否真的获得授权（治理后端，失败关闭）。
+
+        **请求参数不是权限依据**：应用 ID 由调用方给出，只能作为"要访问谁"的声明；
+        是否允许由治理服务按成员与应用授权判定。留空（组织通用知识）不需要应用授权。
+        无法核对（缺密钥、后端不可达、非 200）一律按**未授权**处理。
+        """
+        application = (application_id or "").strip()
+        if not application:
+            return True
+        token = self._settings.upstream_token.strip()
+        if not token:
+            return False
+        url = f"{self._settings.governance_base_url}/api/agent-tools/applications/{application}"
+        headers = dict(context.as_headers())
+        headers["X-Agent-Upstream-Token"] = token
+        try:
+            async with httpx.AsyncClient(timeout=self._settings.governance_timeout_seconds) as client:
+                response = await client.get(url, headers=headers)
+        except Exception:  # noqa: BLE001 - 核验不了就当作没有授权
+            return False
+        return response.status_code == 200
+
+    async def _authorized_application(self, context: TrustedContext, application_id: str) -> str:
+        """返回**已核对通过**的应用 ID；未授权或无法核对时返回空串（失败关闭）。"""
+        application = (application_id or "").strip()
+        if not application:
+            return ""
+        return application if await self._application_authorized(context, application) else ""
+
+    def _reload_for_mutation(self, task_id: str) -> dict[str, Any]:
+        """在等待外部 I/O 之后重新读取记录，用于"基于最新状态合并写入"。
+
+        落盘一律写回这份最新记录（而不是等待之前读到的那份），否则并发产生的归档、
+        关联、审计等字段会被旧值覆盖。
+        """
+        record = self._repository.get(task_id)
+        if record is None:
+            raise TaskNotFound(task_id)
+        return record
+
+    # -- M3：项目知识 ------------------------------------------------------
+
+    async def import_knowledge(self, request: KnowledgeImportRequest, context: TrustedContext) -> KnowledgeView:
+        """导入一份项目知识（规范 / 历史案例 / 结构快照）。
+
+        组织来自可信上下文；文档内容按**不可信数据**处理——只做提示注入筛查并如实
+        记录，既不据此提升权限，也不据此放行或拒绝一份可能正当的安全文档。
+        """
+        if not context.organization_id or not context.user_id:
+            raise KnowledgeInvalid("缺少可信身份，拒绝导入")
+        title = request.title.strip()
+        body = request.body
+        if not title:
+            raise KnowledgeInvalid("标题不能为空")
+        if not body.strip():
+            raise KnowledgeInvalid("正文不能为空")
+        # 应用 ID 由调用方声明，必须由治理后端核对授权；不能把声明当权限。
+        application_id = request.application_id.strip()
+        if application_id and not await self._application_authorized(context, application_id):
+            raise KnowledgeForbidden("缺少该应用的授权（或无法核对），不能导入应用专属知识")
+        hits = sorted(set(detect_injection(f"{title}\n{body}")))
+        record = import_record(
+            knowledge_id=f"kb_{uuid.uuid4().hex[:12]}",
+            organization_id=context.organization_id,
+            imported_by=context.user_id,
+            kind=request.kind,
+            title=title,
+            body=body,
+            version=request.version.strip(),
+            source=request.source.strip(),
+            application_id=application_id,
+            status=request.status,
+            injection_hits=hits,
+        )
+        try:
+            self._knowledge.save(record)
+        except OSError as error:
+            raise KnowledgeStateUnavailable("知识未落盘，请重试") from error
+        return self._knowledge_view(record)
+
+    async def list_knowledge(
+        self,
+        context: TrustedContext,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+        application_id: str | None = None,
+    ) -> list[KnowledgeView]:
+        """列出**本组织**导入的知识。其他组织的数据完全不出现。
+
+        指定 `application_id` 时必须先由治理后端核对授权：筛选参数只是请求条件，
+        不是权限依据。未授权（或无法核对）直接拒绝，而不是返回该应用的知识。
+        """
+        if not context.organization_id:
+            return []
+        if application_id and not await self._application_authorized(context, application_id):
+            raise KnowledgeForbidden("缺少该应用的授权（或无法核对）")
+        result: list[KnowledgeView] = []
+        for record in self._knowledge.list():
+            if str(record.get("organization_id") or "") != context.organization_id:
+                continue
+            record_application = str(record.get("application_id") or "")
+            if application_id:
+                # 已核对过该应用授权：返回组织通用 + 该应用的知识。
+                if record_application not in ("", application_id):
+                    continue
+            elif record_application:
+                # 未指定应用时不返回应用专属知识——无法逐条核对授权。失败关闭。
+                continue
+            if kind and str(record.get("kind") or "") != kind:
+                continue
+            if status and str(record.get("status") or "active") != status:
+                continue
+            result.append(self._knowledge_view(record))
+        result.sort(key=lambda item: item.knowledge_id, reverse=True)
+        return result
+
+    async def get_knowledge(self, knowledge_id: str, context: TrustedContext) -> KnowledgeDetail:
+        record = self._require_knowledge(knowledge_id, context)
+        await self._ensure_knowledge_application(record, context)
+        return self._knowledge_detail(record)
+
+    async def deprecate_knowledge(self, knowledge_id: str, context: TrustedContext) -> KnowledgeView:
+        """把一份知识标记为失效（保留记录，不物理删除）。失效后不再进入检索。"""
+        record = self._require_knowledge(knowledge_id, context)
+        await self._ensure_knowledge_application(record, context)
+        if str(record.get("status") or "active") == "deprecated":
+            return self._knowledge_view(record)
+        record["status"] = "deprecated"
+        record["deprecated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            self._knowledge.save(record)
+        except OSError as error:
+            raise KnowledgeStateUnavailable("知识状态未落盘，请重试") from error
+        return self._knowledge_view(record)
+
+    async def search_knowledge(
+        self,
+        context: TrustedContext,
+        query: str,
+        *,
+        kind: str | None = None,
+        application_id: str = "",
+        limit: int = 8,
+    ) -> list[KnowledgeSearchHit]:
+        """在服务端权限过滤之后检索项目知识。
+
+        只会在"本组织 + 应用匹配 + 生效中"的片段里排序，因此跨组织、未授权应用或已失效的
+        知识不可能出现在结果里。
+        """
+        organization_id = context.organization_id
+        if not organization_id or not (query or "").strip():
+            return []
+        # 请求参数不是权限依据：应用范围必须先由治理后端核对授权。
+        if application_id and not await self._application_authorized(context, application_id):
+            raise KnowledgeForbidden("缺少该应用的授权（或无法核对）")
+        chunks = visible_chunks(self._knowledge.list(), organization_id, application_id)
+        if not chunks:
+            return []
+        retriever = HybridRetriever()
+        retriever.add(chunks)
+        prefixes = (KIND_PREFIX[kind],) if kind in KIND_PREFIX else None
+        selected = retriever.search(
+            query, limit=max(1, min(int(limit), 20)), prefixes=prefixes, organizations=(organization_id,)
+        )
+        hits: list[KnowledgeSearchHit] = []
+        for item in selected:
+            knowledge_id = item.chunk.doc_id.split("/", 1)[-1]
+            hits.append(
+                KnowledgeSearchHit(
+                    knowledge_id=knowledge_id,
+                    doc_id=item.chunk.doc_id,
+                    title=item.chunk.title,
+                    section=item.chunk.section,
+                    version=item.chunk.version,
+                    status=item.chunk.status,
+                    snippet=item.chunk.as_snippet(),
+                    score=item.score,
+                )
+            )
+        return hits
+
+    def _require_knowledge(self, knowledge_id: str, context: TrustedContext) -> dict[str, Any]:
+        if not context.organization_id or not context.user_id:
+            raise KnowledgeNotFound(knowledge_id)
+        record = self._knowledge.get(knowledge_id)
+        # 不存在与不属于本组织同样返回 404：不提供跨组织存在性探测。
+        if record is None or str(record.get("organization_id") or "") != context.organization_id:
+            raise KnowledgeNotFound(knowledge_id)
+        return record
+
+    async def _ensure_knowledge_application(self, record: dict[str, Any], context: TrustedContext) -> None:
+        """应用专属知识：必须由治理后端确认调用方对该应用有授权。"""
+        application = str(record.get("application_id") or "")
+        if application and not await self._application_authorized(context, application):
+            raise KnowledgeForbidden("缺少该应用的授权（或无法核对），不能访问应用专属知识")
+
+    @staticmethod
+    def _knowledge_view(record: dict[str, Any]) -> KnowledgeView:
+        snippets = chunks_for(record)
+        return KnowledgeView(
+            knowledge_id=str(record.get("knowledge_id") or ""),
+            organization_id=str(record.get("organization_id") or ""),
+            application_id=str(record.get("application_id") or ""),
+            kind=str(record.get("kind") or "norms"),
+            title=str(record.get("title") or ""),
+            version=str(record.get("version") or ""),
+            source=str(record.get("source") or ""),
+            status=str(record.get("status") or "active"),
+            content_hash=str(record.get("content_hash") or ""),
+            imported_by=str(record.get("imported_by") or ""),
+            imported_at=record.get("imported_at"),
+            deprecated_at=record.get("deprecated_at"),
+            injection_hits=[str(item) for item in (record.get("injection_hits") or [])],
+            snippet_count=len(snippets),
+        )
+
+    def _knowledge_detail(self, record: dict[str, Any]) -> KnowledgeDetail:
+        view = self._knowledge_view(record)
+        snippets = chunks_for(record)
+        return KnowledgeDetail(
+            **view.model_dump(),
+            snippets=[
+                KnowledgeSnippet(
+                    evidence_id=chunk.evidence_id,
+                    doc_id=chunk.doc_id,
+                    section=chunk.section,
+                    version=chunk.version,
+                    status=chunk.status,
+                    snippet=chunk.as_snippet(),
+                )
+                for chunk in snippets
+            ],
+        )
+
+    # -- M3：独立评测中心 --------------------------------------------------
+
+    async def create_eval_job(self, request: EvalJobRequest, context: TrustedContext) -> EvalJobView:
+        """发起一次评测作业并在**隔离目录**中执行。
+
+        真实模型（live）必须显式启用且配置凭据，否则作业记为 `not_run`——
+        未运行就是未运行，不用离线结果冒充真实模型质量。
+        """
+        if not context.organization_id or not context.user_id:
+            raise EvalInvalid("缺少可信身份，拒绝发起评测")
+        record = new_job_record(
+            job_id=f"eval_{uuid.uuid4().hex[:12]}",
+            organization_id=context.organization_id,
+            created_by=context.user_id,
+            provider=request.provider,
+            strategy=request.strategy,
+            split=request.split,
+            limit=request.limit,
+        )
+        if request.provider == "live" and not self._settings.live_model_ready:
+            record["status"] = "not_run"
+            record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            record["notes"] = [LIVE_NOT_RUN_NOTE, LIVE_ENABLE_HINT]
+            self._save_eval(record)
+            return EvalJobView.model_validate(job_view(record))
+
+        self._save_eval(record)
+        workdir = self._settings.eval_dir / str(record["job_id"])
+        try:
+            report = await run_evaluation(
+                self._settings,
+                provider=request.provider,
+                strategy=request.strategy,
+                split=request.split,
+                limit=request.limit,
+                workdir=workdir,
+            )
+        except Exception as error:  # noqa: BLE001 - 任何失败都必须留下可见的作业记录，不伪装成功
+            record["status"] = "failed"
+            record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            record["error"] = f"{type(error).__name__}: {error}"
+            self._save_eval(record)
+            return EvalJobView.model_validate(job_view(record))
+
+        record["status"] = "completed"
+        record["finished_at"] = datetime.now(timezone.utc).isoformat()
+        record["dataset"] = report["dataset"]
+        record["summary"] = report["summary"]
+        record["cases"] = report["cases"]
+        record["limitations"] = report.get("limitations") or []
+        record["failure_classes"] = aggregate_failures(report["cases"])
+        self._save_eval(record)
+        return EvalJobView.model_validate(job_view(record))
+
+    async def list_eval_jobs(self, context: TrustedContext) -> list[EvalJobView]:
+        if not context.organization_id:
+            return []
+        records = [
+            record for record in self._evals.list()
+            if str(record.get("organization_id") or "") == context.organization_id
+        ]
+        records.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return [EvalJobView.model_validate(job_view(record)) for record in records]
+
+    async def get_eval_job(self, job_id: str, context: TrustedContext) -> EvalJobView:
+        return EvalJobView.model_validate(job_view(self._require_eval(job_id, context)))
+
+    async def eval_report(self, job_id: str, context: TrustedContext) -> EvalReport:
+        record = self._require_eval(job_id, context)
+        return EvalReport(
+            job=EvalJobView.model_validate(job_view(record)),
+            cases=list(record.get("cases") or []),
+            limitations=list(record.get("limitations") or []),
+        )
+
+    async def compare_eval_jobs(self, base_id: str, target_id: str, context: TrustedContext) -> EvalComparison:
+        base = self._require_eval(base_id, context)
+        target = self._require_eval(target_id, context)
+        return EvalComparison(base_job_id=base_id, target_job_id=target_id, **compare_jobs(base, target))
+
+    def _save_eval(self, record: dict[str, Any]) -> None:
+        try:
+            self._evals.save(record)
+        except OSError as error:
+            raise EvalStateUnavailable("评测作业未落盘，请重试") from error
+
+    def _require_eval(self, job_id: str, context: TrustedContext) -> dict[str, Any]:
+        if not context.organization_id or not context.user_id:
+            raise EvalNotFound(job_id)
+        record = self._evals.get(job_id)
+        if record is None or str(record.get("organization_id") or "") != context.organization_id:
+            raise EvalNotFound(job_id)
+        return record
 
     async def cancel(self, task_id: str, context: TrustedContext) -> TaskView:
         record = self._authorize(task_id, context)
@@ -1213,10 +1640,26 @@ class AgentService:
         _annotate_recovery(record)
         return record
 
+    def _retriever_for(self, organization_id: str, application_id: str = "") -> Any:
+        """按 (组织, 应用) 构建检索器：公开合成语料 + 该组织可见的导入知识。
+
+        权限过滤在**服务端**这一层完成：只有通过 `is_visible`（组织匹配、应用匹配、
+        处于生效状态）的知识才会被加入检索器，模型无法用参数扩大范围。
+        """
+        retriever = build_retriever(self._settings.demo_dir)
+        extra = visible_chunks(self._knowledge.list(), organization_id, application_id)
+        if extra:
+            retriever.add(extra)
+        return retriever
+
     def _build_workflow(self, record: dict[str, Any], checkpointer: Any) -> DraftWorkflow:
+        # 检索只用**已核对通过**的应用；请求里声明的应用不能直接决定可见范围。
+        retriever = self._retriever_for(
+            str(record.get("organization_id") or ""), str(record.get("authorized_application") or "")
+        )
         toolbox_factory = lambda snapshot: Toolbox(  # noqa: E731 - 需要按任务注入快照
             settings=self._settings,
-            retriever=self._retriever,
+            retriever=retriever,
             schema_snapshot=snapshot,
         )
         return DraftWorkflow(

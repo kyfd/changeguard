@@ -24,8 +24,22 @@ from app.schemas.drafts import (
     DeleteTaskRequest, DraftEditRequest, DraftVersion, DraftVersionDiff,
     LinkChangeRequest, TaskStatus, TaskTrace, TaskView,
 )
+from app.schemas.evals import EvalComparison, EvalJobRequest, EvalJobView, EvalReport
+from app.schemas.knowledge import (
+    KnowledgeDetail,
+    KnowledgeImportRequest,
+    KnowledgeSearchHit,
+    KnowledgeView,
+)
 from app.service import (
     AgentService,
+    EvalInvalid,
+    EvalNotFound,
+    EvalStateUnavailable,
+    KnowledgeForbidden,
+    KnowledgeInvalid,
+    KnowledgeNotFound,
+    KnowledgeStateUnavailable,
     TaskCancelRejected,
     TaskNotConfirmable,
     TaskNotFound,
@@ -336,3 +350,128 @@ async def confirm(task_id: str, request: Request, payload: ConfirmRequest | None
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
     except TaskNotConfirmable as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+
+
+# -- M3：项目知识 -----------------------------------------------------------
+# 可见范围由服务端按 (组织, 应用, 生效状态) 判定；跨组织一律 404，不提供存在性探测。
+
+
+@router.post("/knowledge", response_model=KnowledgeView, status_code=status.HTTP_201_CREATED)
+async def import_knowledge(payload: KnowledgeImportRequest, request: Request) -> KnowledgeView:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).import_knowledge(payload, context)
+    except KnowledgeInvalid as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    except KnowledgeStateUnavailable as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+
+
+@router.get("/knowledge", response_model=list[KnowledgeView])
+async def list_knowledge(
+    request: Request,
+    kind: Literal["norms", "cases", "schema"] | None = None,
+    status_filter: Literal["active", "deprecated"] | None = Query(default=None, alias="status"),
+    application_id: str | None = None,
+) -> list[KnowledgeView]:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).list_knowledge(
+            context, kind=kind, status=status_filter, application_id=application_id
+        )
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+
+
+@router.get("/knowledge/search", response_model=list[KnowledgeSearchHit])
+async def search_knowledge(
+    request: Request,
+    q: str = Query(min_length=1, max_length=200),
+    kind: Literal["norms", "cases", "schema"] | None = None,
+    application_id: str = "",
+    limit: int = Query(default=8, ge=1, le=20),
+) -> list[KnowledgeSearchHit]:
+    """在**服务端权限过滤之后**检索本组织可见的项目知识。"""
+    context = await resolve_context(request)
+    try:
+        return await _service(request).search_knowledge(
+            context, q, kind=kind, application_id=application_id, limit=limit
+        )
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+
+
+@router.get("/knowledge/{knowledge_id}", response_model=KnowledgeDetail)
+async def get_knowledge(knowledge_id: str, request: Request) -> KnowledgeDetail:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).get_knowledge(knowledge_id, context)
+    except KnowledgeNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识不存在") from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+
+
+@router.post("/knowledge/{knowledge_id}/deprecate", response_model=KnowledgeView)
+async def deprecate_knowledge(knowledge_id: str, request: Request) -> KnowledgeView:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).deprecate_knowledge(knowledge_id, context)
+    except KnowledgeNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识不存在") from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    except KnowledgeStateUnavailable as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+
+
+# -- M3：独立评测中心 -------------------------------------------------------
+# 作业、报告与对照按组织隔离；评测在独立目录运行，不触碰正式业务存储。
+
+@router.post("/evals", response_model=EvalJobView, status_code=status.HTTP_201_CREATED)
+async def create_eval_job(payload: EvalJobRequest, request: Request) -> EvalJobView:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).create_eval_job(payload, context)
+    except EvalInvalid as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    except EvalStateUnavailable as error:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+
+
+@router.get("/evals", response_model=list[EvalJobView])
+async def list_eval_jobs(request: Request) -> list[EvalJobView]:
+    context = await resolve_context(request)
+    return await _service(request).list_eval_jobs(context)
+
+
+@router.get("/evals/compare", response_model=EvalComparison)
+async def compare_eval_jobs(
+    request: Request, base: str = Query(min_length=1), target: str = Query(min_length=1)
+) -> EvalComparison:
+    """并排对照两次作业，只陈述实测差异，不预设提升比例。"""
+    context = await resolve_context(request)
+    try:
+        return await _service(request).compare_eval_jobs(base, target, context)
+    except EvalNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="评测作业不存在") from error
+
+
+@router.get("/evals/{job_id}", response_model=EvalJobView)
+async def get_eval_job(job_id: str, request: Request) -> EvalJobView:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).get_eval_job(job_id, context)
+    except EvalNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="评测作业不存在") from error
+
+
+@router.get("/evals/{job_id}/report", response_model=EvalReport)
+async def eval_report(job_id: str, request: Request) -> EvalReport:
+    context = await resolve_context(request)
+    try:
+        return await _service(request).eval_report(job_id, context)
+    except EvalNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="评测作业不存在") from error

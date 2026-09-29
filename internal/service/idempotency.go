@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/kyfd/changeguard/internal/model"
@@ -33,10 +34,21 @@ type PassportIssueResult struct {
 // 语义：同一 (组织, 提交人, 幂等键) 上的重复请求——重复点击、并发到达、超时重试、
 // 进程重启后的重试——都只会得到**同一个**变更单，不会产生第二条。
 // 返回的 bool 表示本次调用是否是一次重放（没有新建）。
-func (s *Service) CreateIdempotent(input model.CreateChangeInput, actorID, key, digest string) (model.ChangeRequest, bool, error) {
+// resolveAgentTask 只在**首次创建**时被调用，用于把请求里的 agent_task_id 换成服务端核对
+// 通过的任务 ID（无关联时返回空串）。核对**不能放在幂等判定之前**：重放必须直接返回已保存的
+// 变更单，否则下游不可用时，一次已经成功的创建会被误报成失败。
+func (s *Service) CreateIdempotent(input model.CreateChangeInput, actorID, key, digest string, resolveAgentTask func() (string, error)) (model.ChangeRequest, bool, error) {
 	return executeIdempotent(s, actorID, "CREATE_CHANGE", "change", key, digest, http.StatusCreated,
 		func() (model.ChangeRequest, error) {
-			return s.create(input, actorID, key)
+			agentTaskID := ""
+			if strings.TrimSpace(input.AgentTaskID) != "" {
+				resolved, err := resolveAgentTask()
+				if err != nil {
+					return model.ChangeRequest{}, err
+				}
+				agentTaskID = resolved
+			}
+			return s.create(input, actorID, key, agentTaskID)
 		},
 		// 对账：进程可能在"变更已落库、幂等结果未落盘"之间崩溃。只认由**同一提交人**、
 		// 用**同一幂等键**创建的变更单，绝不把别人或别的请求的产物当成自己的重放。

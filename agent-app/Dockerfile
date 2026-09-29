@@ -26,6 +26,10 @@ RUN pip install --no-cache-dir .
 
 COPY examples/agent-demo ./corpus
 
+# 独立评测中心依赖评测框架与数据集：只复制运行所需的两项，不带 .work / reports。
+COPY agent-app/evals/run_eval.py ./evals/run_eval.py
+COPY agent-app/evals/datasets ./evals/datasets
+
 RUN useradd --system --create-home --uid 10001 agent \
     && mkdir -p /app/data \
     && chown -R agent:agent /app

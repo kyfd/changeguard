@@ -26,6 +26,8 @@ var (
 	ErrInvalidState = errors.New("当前状态不允许执行该操作")
 	ErrForbidden    = errors.New("没有权限执行该操作")
 	ErrValidation   = errors.New("请求参数不完整")
+	// ErrUntrustedAgentTask：Agent 任务关联无法核对通过，不能建立可信来源。
+	ErrUntrustedAgentTask = errors.New("无法核对 Agent 任务来源")
 )
 
 type Event struct {
@@ -144,6 +146,23 @@ func (s *Service) ApplicationsFor(actorID string) ([]model.Application, error) {
 		}
 	}
 	return visible, nil
+}
+
+// ApplicationAccess 判断某个成员是否可以使用（view）指定应用。
+//
+// 供 Agent 后端在"按应用访问项目知识"前做**服务端授权核对**：应用 ID 由调用方声明，
+// 声明本身不产生权限，必须回查成员是否存在、组织是否一致、以及应用授权。
+// 返回 (应用, 是否允许)；不存在或跨组织时返回 false，不区分，避免探测。
+func (s *Service) ApplicationAccess(applicationID, actorID string) (model.Application, bool) {
+	actor, err := s.activeActor(actorID)
+	if err != nil {
+		return model.Application{}, false
+	}
+	application, err := s.store.Application(strings.TrimSpace(applicationID))
+	if err != nil || application.OrganizationID != actor.OrganizationID {
+		return model.Application{}, false
+	}
+	return application, s.canUseApplication(actor, application.ID, "view")
 }
 
 func (s *Service) UsersFor(actorID string) ([]model.User, error) {
@@ -446,11 +465,22 @@ func (s *Service) UpdateApplication(id string, input model.SaveApplicationInput,
 }
 
 // Create 创建一个正式变更单（无幂等键）。兼容既有调用方；需要幂等请用 CreateIdempotent。
+//
+// 它**不接受**输入里的 agent_task_id：可信的 Agent 关联只能由 CreateIdempotent 在服务端
+// 核对通过后传入。这样"来源标记"就不会退化成客户端可以自己填的字段。
 func (s *Service) Create(input model.CreateChangeInput, actorID string) (model.ChangeRequest, error) {
-	return s.create(input, actorID, "")
+	return s.create(input, actorID, "", "")
 }
 
-func (s *Service) create(input model.CreateChangeInput, actorID, requestKey string) (model.ChangeRequest, error) {
+// CreateVerified 用**服务端已核对通过**的 Agent 任务 ID 创建变更单（无幂等键）。
+// 与 Create 的区别只有一点：它允许携带可信的 agent_task_id。
+func (s *Service) CreateVerified(input model.CreateChangeInput, actorID, verifiedAgentTaskID string) (model.ChangeRequest, error) {
+	return s.create(input, actorID, "", verifiedAgentTaskID)
+}
+
+// create 是所有创建路径的唯一实现。agentTaskID 是**服务端核对通过**的任务 ID（可为空）；
+// 客户端在请求体里声明的 agent_task_id 必须与它一致，否则拒绝。
+func (s *Service) create(input model.CreateChangeInput, actorID, requestKey, agentTaskID string) (model.ChangeRequest, error) {
 	actor, err := s.activeActor(actorID)
 	if err != nil {
 		return model.ChangeRequest{}, ErrForbidden
@@ -489,7 +519,11 @@ func (s *Service) create(input model.CreateChangeInput, actorID, requestKey stri
 		(hasArtifactKind(artifacts, model.ArtifactDatabase) && sqlText == "") {
 		return model.ChangeRequest{}, fmt.Errorf("%w：标题、环境、仓库信息或变更证据不符合要求", ErrValidation)
 	}
-	agentTaskID := strings.TrimSpace(input.AgentTaskID)
+	// 可信关联只认服务端核对过的值：客户端声明的 ID 必须与它一致，否则拒绝。
+	agentTaskID = strings.TrimSpace(agentTaskID)
+	if declared := strings.TrimSpace(input.AgentTaskID); declared != agentTaskID {
+		return model.ChangeRequest{}, fmt.Errorf("%w：agent_task_id 必须先通过服务端核对，不能由请求直接声明", ErrValidation)
+	}
 	if !validAgentTaskID(agentTaskID) {
 		return model.ChangeRequest{}, fmt.Errorf("%w：agent_task_id 不合法（仅允许字母、数字、下划线和连字符，最长 128 字符）", ErrValidation)
 	}
@@ -547,6 +581,20 @@ func changeSource(agentTaskID string) string {
 		return "agent_task"
 	}
 	return "console"
+}
+
+// trustedReleaseSources 是**允许进入生产放行流程**的来源白名单，失败关闭：
+// 未列出的来源（例如评测 / 演示产物）不得提交、审批或签发通行证。空串是历史记录，
+// 按 console 处理。来源标记只是溯源，不是授权凭据；这份白名单只做"来源不被信任时拒绝"，
+// 不会因为来源被信任就跳过其它任何检查。
+var trustedReleaseSources = map[string]bool{"": true, "console": true, "agent_task": true}
+
+func trustedForRelease(change model.ChangeRequest) bool {
+	return trustedReleaseSources[strings.TrimSpace(change.Source)]
+}
+
+func releaseSourceRefusal(change model.ChangeRequest) error {
+	return fmt.Errorf("%w：变更来源 %q 不允许进入生产放行流程（来源标记不是授权凭据）", ErrForbidden, change.Source)
 }
 
 func (s *Service) Update(id string, input model.CreateChangeInput, actorID string) (model.ChangeRequest, error) {
@@ -655,6 +703,9 @@ func (s *Service) Submit(id, actorID string) (model.ChangeRequest, error) {
 	}
 	if change.OrganizationID != actor.OrganizationID || change.SubmitterID != actor.ID || !s.canUseApplication(actor, change.ApplicationID, "submit") {
 		return model.ChangeRequest{}, ErrForbidden
+	}
+	if !trustedForRelease(change) {
+		return model.ChangeRequest{}, releaseSourceRefusal(change)
 	}
 	if change.Status != model.StatusDraft && change.Status != model.StatusCheckFailed {
 		return model.ChangeRequest{}, ErrInvalidState
@@ -1166,6 +1217,9 @@ func (s *Service) Approve(id, actorID, comment string) (model.ChangeRequest, err
 	if change.OrganizationID != actor.OrganizationID || !s.canUseApplication(actor, change.ApplicationID, "review") {
 		return model.ChangeRequest{}, ErrForbidden
 	}
+	if !trustedForRelease(change) {
+		return model.ChangeRequest{}, releaseSourceRefusal(change)
+	}
 	if change.Status != model.StatusWaitingApproval {
 		return model.ChangeRequest{}, ErrInvalidState
 	}
@@ -1217,6 +1271,9 @@ func (s *Service) Reject(id, actorID, comment string) (model.ChangeRequest, erro
 	}
 	if change.OrganizationID != actor.OrganizationID || !s.canUseApplication(actor, change.ApplicationID, "review") {
 		return model.ChangeRequest{}, ErrForbidden
+	}
+	if !trustedForRelease(change) {
+		return model.ChangeRequest{}, releaseSourceRefusal(change)
 	}
 	if change.Status != model.StatusWaitingApproval {
 		return model.ChangeRequest{}, ErrInvalidState

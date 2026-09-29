@@ -149,6 +149,60 @@ def test_edit_persistence_failure_keeps_disk_and_memory(service, context, monkey
     assert service._repository.get("task_one") == before
 
 
+def test_edit_cannot_overwrite_concurrent_archive(service, context, monkeypatch):
+    """等待确定性扫描期间任务被归档：编辑必须失败，且归档不能被旧记录覆盖。"""
+    seed(service)
+
+    async def race_archive(_record, _sql, _rollback):
+        await service.archive_task("task_one", context)
+        return DeterministicCheck(status="PASSED", source="local_scan")
+
+    monkeypatch.setattr(service, "_scan_material", race_archive)
+    with pytest.raises(TaskNotResumable):
+        run(service.edit_draft("task_one", context, DraftEditRequest(
+            expected_version=1, sql=CLEAN_SQL, rollback_sql=CLEAN_ROLLBACK)))
+    latest = service._repository.get("task_one")
+    assert latest["archived_at"], "并发归档被旧记录覆盖了"
+    assert latest["draft"]["version"] == 1, "编辑本不应生效"
+    assert [item["version"] for item in latest["draft_versions"]] == [1]
+
+
+def test_edit_merges_concurrent_writes_instead_of_losing_them(service, context, monkeypatch):
+    """等待期间由其它操作写入的字段必须保留，而不是被这次编辑的旧记录抹掉。"""
+    seed(service)
+
+    async def race_write(_record, _sql, _rollback):
+        record = service._repository.get("task_one")
+        record["change_links"] = [{
+            "change_request_id": "chg_race", "organization_id": "org_demo",
+            "linked_by": "alice", "linked_at": "2026-09-28T00:00:00+00:00",
+        }]
+        service._repository.save(record)
+        return DeterministicCheck(status="PASSED", source="local_scan")
+
+    monkeypatch.setattr(service, "_scan_material", race_write)
+    view = run(service.edit_draft("task_one", context, DraftEditRequest(
+        expected_version=1, sql=CLEAN_SQL, rollback_sql=CLEAN_ROLLBACK)))
+    assert view.draft.version == 2
+    assert [item.change_request_id for item in view.change_links] == ["chg_race"]
+
+
+def test_link_cannot_overwrite_concurrent_archive(service, context, monkeypatch):
+    """等待治理后端核对期间任务被归档：关联必须失败，归档不能被覆盖。"""
+    seed(service)
+
+    async def race_archive(_change_id, _ctx):
+        await service.archive_task("task_one", context)
+        return True
+
+    monkeypatch.setattr(service, "_change_exists", race_archive)
+    with pytest.raises(TaskNotResumable):
+        run(service.link_change("task_one", context, LinkChangeRequest(change_request_id="chg_1")))
+    latest = service._repository.get("task_one")
+    assert latest["archived_at"], "并发归档被旧记录覆盖了"
+    assert not latest.get("change_links")
+
+
 def test_edit_rejects_running_task(service, context):
     import asyncio
     from types import SimpleNamespace

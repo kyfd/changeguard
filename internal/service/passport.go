@@ -81,6 +81,10 @@ func (s *Service) IssuePassport(changeID, actorID string, ttlSeconds int) (model
 	if change.OrganizationID != actor.OrganizationID || !s.canUseApplication(actor, change.ApplicationID, "review") {
 		return model.PassportCredential{}, ErrForbidden
 	}
+	// 来源不被信任（例如评测 / 演示产物）时，不签发生产执行凭证。
+	if !trustedForRelease(change) {
+		return model.PassportCredential{}, releaseSourceRefusal(change)
+	}
 	if actor.ID == change.SubmitterID || change.ReviewerID == "" || actor.ID != change.ReviewerID {
 		return model.PassportCredential{}, fmt.Errorf("%w：只有实际审批人可以签发通行证", ErrForbidden)
 	}

@@ -376,7 +376,9 @@ def _draft_observed(draft: Any) -> dict[str, Any]:
     }
 
 
-async def run_case(case: dict[str, Any], args: argparse.Namespace, workdir: Path) -> dict[str, Any]:
+async def run_case(
+    case: dict[str, Any], args: argparse.Namespace, workdir: Path, overrides: dict[str, Any] | None = None
+) -> dict[str, Any]:
     started = time.perf_counter()
     providers = case.get("providers") or list(PROVIDERS)
     strategies = case.get("strategies") or list(STRATEGIES)
@@ -394,7 +396,9 @@ async def run_case(case: dict[str, Any], args: argparse.Namespace, workdir: Path
     if args.strategy not in strategies:
         return finish({"outcome": SKIPPED, "reason": f"用例不适用于 strategy={args.strategy}", "failures": []})
 
-    settings = build_settings(workdir, args, case.get("settings"))
+    # 用例级设置 < 调用方覆盖（评测中心的预算/超时）。build_settings 仍会强制评测来源与隔离路径。
+    merged = {**(case.get("settings") or {}), **(overrides or {})}
+    settings = build_settings(workdir, args, merged)
     provider = select_provider(args.provider, case, settings)
     if provider is None:
         return finish({"outcome": NOT_RUN, "reason": "live provider 未配置凭据", "failures": [], "observed": {}})
@@ -766,13 +770,15 @@ async def run_arm(
     expectations: dict[str, Any],
     *,
     strategy: str,
+    overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """在**同一份输入**上跑一遍某个策略。
 
     对照评测必须只改策略这一个变量：数据集、provider、生成设置与预算都相同。
+    `overrides` 供评测中心注入预算与超时；普通 CLI 调用保持 None，行为不变。
     """
     scoped = argparse.Namespace(**{**vars(args), "strategy": strategy})
-    results = [await run_case(case, scoped, args.workdir) for case in cases]
+    results = [await run_case(case, scoped, args.workdir, overrides) for case in cases]
     for item in results:
         item["expected_status"] = expectations.get(item["id"], {}).get("status")
     return {"strategy": strategy, "summary": summarize(results), "cases": results}

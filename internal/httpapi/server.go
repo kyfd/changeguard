@@ -1115,6 +1115,16 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 			writeServiceError(w, err)
 			return
 		}
+		// 按 Agent 任务关联过滤：关联是服务端记录的，这里只做同组织内查询。
+		if agentTask := strings.TrimSpace(r.URL.Query().Get("agent_task_id")); agentTask != "" {
+			filtered := make([]model.ChangeRequest, 0, len(changes))
+			for _, change := range changes {
+				if change.AgentTaskID == agentTask {
+					filtered = append(filtered, change)
+				}
+			}
+			changes = filtered
+		}
 		if r.URL.Query().Has("page") || r.URL.Query().Has("page_size") || r.URL.Query().Has("cursor") {
 			pageSize := 50
 			if raw := strings.TrimSpace(r.URL.Query().Get("page_size")); raw != "" {
@@ -1168,15 +1178,20 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "请求数据格式不正确")
 			return
 		}
-		// 幂等：携带 Idempotency-Key 时用持久化幂等记录创建。重复点击、并发请求、
-		// 超时重试与进程重启后的重试都只会得到同一个变更单，不会新建第二条。
+		actor := actorID(r)
 		key, ok := validatedIdempotencyKey(w, r)
 		if !ok {
 			return
 		}
 		if key == "" {
+			// 无幂等键：没有可重放的结果，先核对 Agent 任务再创建。
+			verifiedAgentTaskID, resolveErr := s.resolveVerifiedAgentTask(r.Context(), actor, input)
+			if resolveErr != nil {
+				writeServiceError(w, resolveErr)
+				return
+			}
 			w.Header().Set("Idempotency-Status", "not-requested")
-			change, err := s.service.Create(input, actorID(r))
+			change, err := s.service.CreateVerified(input, actor, verifiedAgentTaskID)
 			if err != nil {
 				writeServiceError(w, err)
 				return
@@ -1184,8 +1199,12 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusCreated, change)
 			return
 		}
+		// 幂等：先按（幂等键 + 请求摘要）判定重放——已经成功的创建必须原样返回，
+		// 不能因为下游暂时不可用就把一次成功的创建误报成失败。只有**首次创建**
+		// 才去核对 Agent 任务的当前材料（核对在 execute 内部执行）。
 		change, replayed, err := s.service.CreateIdempotent(
-			input, actorID(r), key, requestDigest("CREATE_CHANGE", "change", input),
+			input, actor, key, requestDigest("CREATE_CHANGE", "change", input),
+			func() (string, error) { return s.resolveVerifiedAgentTask(r.Context(), actor, input) },
 		)
 		if err != nil {
 			writeServiceError(w, err)
@@ -1728,7 +1747,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "记录不存在")
 	case errors.Is(err, service.ErrForbidden):
 		writeError(w, http.StatusForbidden, err.Error())
-	case errors.Is(err, service.ErrInvalidState), errors.Is(err, store.ErrConcurrentWrite), errors.Is(err, service.ErrRuleSetChanged), errors.Is(err, service.ErrPassportRevoked), errors.Is(err, service.ErrPassportReplay), errors.Is(err, store.ErrPassportInactive):
+	case errors.Is(err, service.ErrInvalidState), errors.Is(err, store.ErrConcurrentWrite), errors.Is(err, service.ErrRuleSetChanged), errors.Is(err, service.ErrPassportRevoked), errors.Is(err, service.ErrPassportReplay), errors.Is(err, store.ErrPassportInactive), errors.Is(err, service.ErrUntrustedAgentTask):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrPassportExpired), errors.Is(err, store.ErrPassportExpired):
 		writeError(w, http.StatusGone, err.Error())
