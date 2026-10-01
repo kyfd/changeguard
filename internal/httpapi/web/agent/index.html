@@ -74,7 +74,7 @@
             <summary>补充已知信息 <span class="optional-label">可选</span></summary>
             <p class="note-inline">应用、环境和表结构等信息可以稍后补充，缺失项会继续追问。</p>
             <div class="grid-2">
-              <label class="field"><span>应用</span><input id="optApplication" type="text" autocomplete="off" placeholder="order-service"></label>
+              <label class="field"><span>应用（从你有权限的应用中选择）</span><select id="optApplication"><option value="">不绑定应用</option></select></label>
               <label class="field"><span>环境</span><input id="optEnvironment" type="text" autocomplete="off" placeholder="生产"></label>
               <label class="field"><span>数据库</span>
                 <select id="optDatabase">
@@ -87,6 +87,9 @@
               <label class="field"><span>计划时间</span><input id="optPlannedAt" type="datetime-local"></label>
               <label class="field"><span>时区</span><input id="optTimezone" type="text" autocomplete="off" placeholder="Asia/Shanghai"></label>
             </div>
+            <p class="note-inline" id="appListFeedback" role="status" aria-live="polite"></p>
+            <div class="sql-actions"><button type="button" class="button button-small" id="refreshApps">刷新应用列表</button></div>
+            <label class="field"><span>知识库结构快照（可选；与手填快照二选一，选自你有权限的应用快照）</span><select id="optSnapshotKnowledge"><option value="">不使用知识库快照</option></select></label>
             <p class="note-inline" id="timeZoneHelp">计划时间按所填 IANA 时区解释；留空使用浏览器时区，并随请求发送。夏令时缺失或重复时刻会被拒绝。</p>
             <label class="field"><span>触发这次变更的查询 SQL</span><textarea id="optQuerySql" rows="3" placeholder="慢查询原文"></textarea></label>
             <label class="field"><span>表结构快照</span><textarea id="optSchema" rows="3" placeholder="粘贴字段列表或 CREATE TABLE。首版只使用上传快照，不接生产库实时探索。"></textarea></label>
@@ -110,7 +113,7 @@
                   <option value="schema">结构快照</option>
                 </select>
               </label>
-              <label class="field"><span>适用应用（可选）</span><input id="knowledgeApplication" type="text" maxlength="120" placeholder="order-service"></label>
+              <label class="field"><span>适用应用（可选）</span><select id="knowledgeApplication"><option value="">组织内通用</option></select></label>
             </div>
             <label class="field"><span>标题</span><input id="knowledgeTitle" type="text" maxlength="200" autocomplete="off"></label>
             <label class="field"><span>正文（Markdown）</span><textarea id="knowledgeBody" rows="4" placeholder="粘贴规范、案例或结构快照文本"></textarea></label>
@@ -120,6 +123,8 @@
           <div class="sql-actions"><button class="button button-small" type="button" id="knowledgeSearch">检索</button></div>
           <div id="knowledgeResults" class="stack"></div>
           <p class="note-inline" id="knowledgeFeedback" role="status" aria-live="polite"></p>
+          <div class="sql-actions"><button type="button" class="button button-small" id="refreshKnowledge">刷新知识列表</button></div>
+          <div id="knowledgeListHost" class="stack"></div>
         </details>
 
         <details class="details" id="evalBox">
