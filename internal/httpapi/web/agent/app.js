@@ -53,7 +53,9 @@ const TOOL_KIND_LABELS = {
 };
 
 const CLARIFY_FIELDS = [
-  { name: "application", label: "应用", type: "text", placeholder: "order-service" },
+  // 应用追问渲染为下拉（来自 /api/apps 的已授权应用），提交 canonical application_id；
+  // 绝不把展示名称当 ID 提交，也不按名称模糊匹配。
+  { name: "application", label: "应用", type: "application-select", placeholder: "" },
   { name: "environment", label: "环境", type: "text", placeholder: "生产" },
   {
     name: "database", label: "数据库", type: "select",
@@ -90,6 +92,14 @@ const state = {
   trace: null,
   versions: [],
   versionDiff: null,
+  // 3.1.2：已授权应用列表（GET /api/apps）、项目知识列表、本任务已创建的正式变更。
+  applications: [],
+  applicationsState: "loading",
+  knowledgeList: [],
+  knowledgeListState: "idle",
+  agentChanges: [],
+  // 创建正式变更后的恢复状态：变更已创建但关联回填失败（或结果未知）时用于重试。
+  changeRecovery: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -238,7 +248,7 @@ async function copyText(text, button) {
 async function api(path, options) {
   const opts = options || {};
   const method = opts.method || "GET";
-  const headers = { Accept: "application/json" };
+  const headers = { Accept: "application/json", ...(opts.headers || {}) };
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET") headers["X-CSRF-Token"] = (state.session && state.session.csrf_token) || "";
 
@@ -471,15 +481,25 @@ async function createTask(event) {
   }
 
   const payload = { requirement };
+  // 应用来自下拉（canonical ID）：选择才提交，空值表示不绑定应用。
+  const applicationId = $("optApplication").value.trim();
+  if (applicationId) payload.application_id = applicationId;
+  // 结构快照二选一：知识库快照与手填快照不能同时提供（服务端也会拒绝，前端先拦）。
+  const snapshotKnowledgeId = $("optSnapshotKnowledge").value.trim();
+  const schemaSnapshot = $("optSchema").value.trim();
+  if (snapshotKnowledgeId && schemaSnapshot) {
+    showError("结构快照只能二选一：请选择「知识库结构快照」或手填「表结构快照」，不能同时提供。");
+    return;
+  }
+  if (snapshotKnowledgeId) payload.snapshot_knowledge_id = snapshotKnowledgeId;
   const optional = {
-    application: $("optApplication").value.trim(),
     environment: $("optEnvironment").value.trim(),
     database: $("optDatabase").value,
     table: $("optTable").value.trim(),
     query_sql: $("optQuerySql").value.trim(),
     planned_at_timezone: $("optTimezone").value.trim(),
-    schema_snapshot: $("optSchema").value.trim(),
   };
+  if (schemaSnapshot) payload.schema_snapshot = schemaSnapshot;
   Object.keys(optional).forEach((key) => {
     if (optional[key]) payload[key] = optional[key];
   });
@@ -582,6 +602,8 @@ async function confirmMaterial() {
     handleActionError(error);
   } finally {
     state.busy = false;
+    // busy=true 期间局部刷新可能把创建入口渲染成禁用态；释放 busy 后同步一次。
+    renderChangeActions();
   }
 }
 
@@ -635,6 +657,7 @@ function adoptTask(task) {
   if (!sameTask || !sameDraft) {
     loadTrace();
     loadVersions();
+    loadAgentChanges();
   }
   if (TERMINAL.has(task.status) || isTaskReadOnly(task)) {
     stopPolling();
@@ -696,7 +719,8 @@ function refreshTaskView(previous) {
   }
   // 对话的其他数据发生变化时才刷新；保存正在填写的控件状态。
   const conversationData = (value) => [value.requirement, value.error, value.planned_at_missing,
-    value.questions, value.awaiting_input, value.restart_policy, value.status, value.source, value.archived_at, value.deleted_at];
+    value.questions, value.awaiting_input, value.restart_policy, value.status, value.source, value.archived_at, value.deleted_at,
+    value.application_binding, value.authorized_application, value.selected_snapshot, value.snapshot_source_kind];
   if (JSON.stringify(conversationData(previous)) !== JSON.stringify(conversationData(task))) {
     preserveView($("conversation"), renderConversation);
   }
@@ -713,12 +737,13 @@ function refreshTaskView(previous) {
       JSON.stringify([task.change_links, task.draft_version_count])) {
     preserveView($("draftBody"), renderDraft);
   }
-  if (JSON.stringify([previous.confirmations, previous.material_hash]) !==
-      JSON.stringify([task.confirmations, task.material_hash])) {
+  if (JSON.stringify([previous.confirmations, previous.material_hash, previous.application_binding, previous.selected_snapshot, previous.status]) !==
+      JSON.stringify([task.confirmations, task.material_hash, task.application_binding, task.selected_snapshot, task.status])) {
     const confirmation = $("taskConfirmation");
     if (confirmation) preserveView(confirmation, () => { confirmation.innerHTML = renderConfirmation(task); });
     const button = $("confirmButton");
     if (button) button.addEventListener("click", confirmMaterial);
+    renderChangeActions();
   }
 }
 
@@ -800,6 +825,7 @@ function renderConversation() {
     </article>
   `);
   blocks.push(renderLifecycle(task));
+  blocks.push(renderBindingCard(task));
 
   if (task.error) {
     blocks.push(`
@@ -833,6 +859,7 @@ function renderConversation() {
   }
 
   blocks.push(`<div id="taskTimeline">${renderTimeline(task)}</div>`);
+  blocks.push(renderSnapshotCard(task));
 
   const checkpointResumable = Boolean(task.awaiting_input) || task.restart_policy === "checkpoint_available";
   const actions = [];
@@ -916,7 +943,19 @@ function renderQuestions(task) {
     const inputName = `q_${esc(question.field)}_${index}`;
     const suggested = suggestedValue(question, field);
     let control;
-    if (field.type === "select") {
+    if (field.type === "application-select") {
+      // 应用追问：渲染已授权应用下拉。预填只做**精确名称匹配**到下拉项，
+      // 并标注"按名称匹配，请核对"——不做模糊匹配，也不把名称当 ID 提交。
+      const suggestedName = (question.suggested || "").trim();
+      const matched = suggestedName && (state.applications || []).find((app) => app.name === suggestedName);
+      const options = ['<option value="">不绑定应用</option>']
+        .concat((state.applications || []).map((app) =>
+          `<option value="${esc(app.id)}"${matched && app.id === matched.id ? " selected" : ""}>${esc(app.name)}（${esc(app.id)}）</option>`))
+        .join("");
+      control = `<select data-field="application" id="${inputName}">${options}</select>`
+        + (matched ? `<span class="note-inline note-suggested">已按需求中的名称「${esc(matched.name)}」精确匹配到应用，请核对后提交。</span>` : "")
+        + (!(state.applications || []).length ? '<span class="note-inline">应用列表不可用：请点击左栏「刷新应用列表」后重试，或选择「不绑定应用」。</span>' : "");
+    } else if (field.type === "select") {
       const options = field.options
         .map(([value, text]) => `<option value="${esc(value)}"${value === suggested ? " selected" : ""}>${esc(text)}</option>`)
         .join("");
@@ -972,7 +1011,10 @@ function wireQuestionForm() {
       const field = node.getAttribute("data-field");
       const value = (node.value || "").trim();
       if (!value) return;
-      payload[field] = value;
+      // 应用追问提交 canonical application_id（data-field=application），
+      // 绝不把下拉里的展示名当 application 文本提交。
+      if (field === "application") payload.application_id = value;
+      else payload[field] = value;
     });
     if (payload.planned_at || payload.planned_at_timezone) {
       try {
@@ -1065,7 +1107,7 @@ function renderDraft() {
       <p class="note"><strong>草案已生成，仅表示材料准备好可供人工确认。</strong>
       它不是审批结论，不会自动提交变更，也不代表可以在生产执行。</p>
       <dl class="kv">
-        <dt>应用</dt><dd>${esc(draft.application || "未提供")}</dd>
+        <dt>应用</dt><dd>${esc(draft.application || "未提供")}${task.slots && task.slots.application_id ? ` <span class="note-inline mono">ID ${esc(task.slots.application_id)}</span>` : ""}</dd>
         <dt>环境</dt><dd>${esc(draft.environment || "未提供")}</dd>
         <dt>数据库</dt><dd>${esc(draft.database || "unknown")}</dd>
         <dt>计划时间</dt><dd>${esc(formatPlannedDate(draft.planned_at, draft.planned_at_timezone))}</dd>
@@ -1127,6 +1169,7 @@ function renderDraft() {
   parts.push(`<div id="taskConfirmation">${renderConfirmation(task)}</div>`);
   parts.push(renderVersions(task));
   parts.push(renderChangeLinks(task));
+  parts.push('<div id="changeCreateCard" class="stack"></div>');
 
   if ((draft.revision_notes || []).length) {
     parts.push(`
@@ -1204,6 +1247,7 @@ function renderDraft() {
 
   const linkButton = $("linkChange");
   if (linkButton) linkButton.addEventListener("click", linkChange);
+  renderChangeActions();
 
   const closeDiff = $("closeDiff");
   if (closeDiff) closeDiff.addEventListener("click", () => { state.versionDiff = null; renderDraft(); });
@@ -1543,6 +1587,473 @@ async function linkChange() {
   } finally { state.busy = false; }
 }
 
+/* ---------- 3.1.2：统一应用选择、知识快照选用与草案→正式变更闭环 ---------- */
+
+/** 已授权应用列表（GET /api/apps，会话鉴权）。失败可重试；401 走登录失效处理。 */
+async function loadApplications(options) {
+  const quiet = Boolean(options && options.quiet);
+  if (!quiet) $("appListFeedback").textContent = "正在加载应用列表…";
+  try {
+    const apps = await api("/api/apps");
+    state.applications = Array.isArray(apps) ? apps : [];
+    state.applicationsState = "ready";
+    if (!quiet) {
+      $("appListFeedback").textContent = state.applications.length
+        ? `已加载 ${state.applications.length} 个你有权限的应用。`
+        : "当前组织没有你有权限访问的应用；可选择「不绑定应用」或先在控制台为成员分配应用。";
+    }
+    syncApplicationSelects();
+  } catch (error) {
+    state.applicationsState = "error";
+    if (error.status === 401) { handleActionError(error); return; }
+    if (!quiet) $("appListFeedback").textContent = `应用列表加载失败：${error.message}。请点击「刷新应用列表」重试。`;
+  }
+}
+
+/** 应用列表变化后同步所有静态下拉（创建表单、知识导入）。 */
+function syncApplicationSelects() {
+  const apps = state.applications || [];
+  const fill = (select, emptyLabel) => {
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = `<option value="">${esc(emptyLabel)}</option>` + apps.map((app) =>
+      `<option value="${esc(app.id)}">${esc(app.name)}（${esc(app.id)}）</option>`).join("");
+    if (apps.some((app) => app.id === current)) select.value = current;
+  };
+  fill($("optApplication"), "不绑定应用");
+  fill($("knowledgeApplication"), "组织内通用");
+}
+
+/** 创建表单的知识库结构快照下拉：仅列出 kind=schema 且生效中的知识。 */
+function syncSnapshotKnowledgeSelect() {
+  const select = $("optSnapshotKnowledge");
+  if (!select) return;
+  const current = select.value;
+  const schemas = (state.knowledgeList || []).filter((item) => item.kind === "schema" && item.status === "active");
+  select.innerHTML = '<option value="">不使用知识库快照</option>' + schemas.map((item) =>
+    `<option value="${esc(item.knowledge_id)}">${esc(item.title)}${item.version ? ` v${esc(item.version)}` : ""}</option>`).join("");
+  if (schemas.some((item) => item.knowledge_id === current)) select.value = current;
+}
+
+function appName(applicationId) {
+  const app = (state.applications || []).find((item) => item.id === applicationId);
+  return app ? app.name : (applicationId || "");
+}
+
+/** 项目知识列表：应用 / 类型 / 版本 / 有效状态 / 选用状态，以及知识快照选用入口。 */
+async function loadKnowledgeList() {
+  const host = $("knowledgeListHost");
+  if (!host) return;
+  host.innerHTML = '<p class="note-inline">正在加载知识列表…</p>';
+  try {
+    const items = await api("/api/agent/knowledge");
+    state.knowledgeList = Array.isArray(items) ? items : [];
+    state.knowledgeListState = "ready";
+  } catch (error) {
+    state.knowledgeList = [];
+    state.knowledgeListState = "error";
+    if (error.status === 401) { handleActionError(error); return; }
+    host.innerHTML = `<p class="note-inline">知识列表加载失败：${esc(error.message)}。请点击「刷新知识列表」重试。</p>`;
+    return;
+  }
+  renderKnowledgeList();
+  syncSnapshotKnowledgeSelect();
+}
+
+function renderKnowledgeList() {
+  const host = $("knowledgeListHost");
+  if (!host) return;
+  const items = state.knowledgeList || [];
+  if (!items.length) {
+    host.innerHTML = '<p class="note-inline">还没有导入项目知识。导入规范 / 案例 / 结构快照后会显示在这里。</p>';
+    return;
+  }
+  const task = state.task;
+  const selectedId = task && task.selected_snapshot ? task.selected_snapshot.knowledge_id : "";
+  const canSelect = task && !isTaskReadOnly(task);
+  const kindLabel = { norms: "规范", cases: "案例", schema: "结构快照" };
+  host.innerHTML = items.map((item) => {
+    const isSelected = selectedId && item.knowledge_id === selectedId;
+    const selectable = canSelect && item.kind === "schema" && item.status === "active" && !isSelected;
+    return `
+      <div class="check-item knowledge-row">
+        <span class="check-code">${esc(item.title)}${item.version ? ` <span class="note-inline">v${esc(item.version)}</span>` : ""}</span>
+        <span class="check-body">
+          <span>
+            <span class="badge badge-muted">${esc(kindLabel[item.kind] || item.kind)}</span>
+            ${item.status === "active" ? '<span class="badge badge-ok">生效中</span>' : '<span class="badge badge-danger">已失效</span>'}
+            ${isSelected ? '<span class="badge badge-confirm">当前任务已选用</span>' : ""}
+            <span class="note-inline">应用：${esc(item.application_id ? appName(item.application_id) || item.application_id : "组织内通用")}</span>
+          </span>
+          <span class="note-inline mono">${esc((item.content_hash || "").slice(0, 12))} · ${esc(formatDate(item.imported_at))}</span>
+          ${selectable ? `<span><button class="button button-small" type="button" data-select-snapshot="${esc(item.knowledge_id)}"${task.snapshot_source_kind === "manual" ? ' data-replace-manual="1"' : ""}>选用此快照</button>${task.snapshot_source_kind === "manual" ? ' <span class="note-inline">当前为手填快照：首次点击后需再次点击确认替换。</span>' : ""}</span>` : ""}
+        </span>
+      </div>`;
+  }).join("");
+}
+
+/** 选用知识库结构快照：走 clarify（服务端校验应用匹配、有效性、二选一冲突）。 */
+async function selectSnapshot(knowledgeId, replaceManual) {
+  const task = state.task;
+  if (!task || state.busy || isTaskReadOnly(task)) return;
+  // 当前正文来自手填快照时，替换需要显式确认（服务端要求同时置空 schema_snapshot）。
+  if (replaceManual && !selectSnapshot.confirming) {
+    selectSnapshot.confirming = knowledgeId;
+    renderKnowledgeList();
+    showError(`选用的快照将替换当前的手填快照（knowledge_id=${knowledgeId}）。请再次点击「选用此快照」确认替换。`);
+    return;
+  }
+  selectSnapshot.confirming = null;
+  const payload = { snapshot_knowledge_id: knowledgeId };
+  if (replaceManual || task.snapshot_source_kind === "manual") payload.schema_snapshot = "";
+  await clarify(payload);
+}
+
+/** 应用绑定状态卡：legacy 历史任务必须显式重新选择，unauthorized 必须重新授权，绝不模糊匹配。 */
+function renderBindingCard(task) {
+  const binding = task.application_binding || "none";
+  if (binding === "authorized") {
+    const name = task.authorized_application || appName(task.slots && task.slots.application_id) || (task.slots && task.slots.application_id) || "";
+    return name ? `<article class="card card-flat"><div class="card-title"><span>应用绑定</span><span class="badge badge-ok">已授权</span></div><p class="note-inline">当前任务绑定应用：${esc(name)}（${esc(task.slots && task.slots.application_id || "")}）。授权由服务端在每次补充 / 恢复时重新核验。</p></article>` : "";
+  }
+  if (binding === "none") return "";
+  const danger = binding === "unauthorized";
+  const title = danger ? "当前绑定应用的授权核对失败" : "历史任务仅有应用名称，尚未绑定应用 ID";
+  const hint = danger
+    ? "该应用可能已被撤权，或治理服务暂不可达。请重新选择你有权限的应用，或稍后重试。"
+    : "为避免错绑应用，请在下方从你已授权的应用列表中显式选择。检索与应用专属知识只认应用 ID，不按名称模糊匹配。";
+  return `
+    <article class="card ${danger ? "card-danger" : "card-warn"}">
+      <div class="card-title"><span>${esc(title)}</span><span class="badge ${danger ? "badge-danger" : "badge-warn"}">${danger ? "未授权" : "需重新选择"}</span></div>
+      <p>${esc(hint)}</p>
+      <div class="sql-actions">
+        <select id="bindingAppSelect" style="max-width:22rem"><option value="">选择应用…</option>${(state.applications || []).map((app) =>
+          `<option value="${esc(app.id)}"${app.id === (task.slots && task.slots.application_id) ? " selected" : ""}>${esc(app.name)}（${esc(app.id)}）</option>`).join("")}</select>
+        <button class="button button-small button-primary" type="button" id="bindingAppButton"${(state.applications || []).length ? "" : " disabled"}>绑定所选应用并继续</button>
+      </div>
+      ${(state.applications || []).length ? "" : '<p class="note-inline">应用列表不可用：请点击左栏「刷新应用列表」后重试。</p>'}
+    </article>
+  `;
+}
+
+/** 结构快照卡：显示当前来源，提供知识快照切换 / 清除与手填替换入口。 */
+function renderSnapshotCard(task) {
+  if (isTaskReadOnly(task)) return "";
+  const selected = task.selected_snapshot;
+  const kind = task.snapshot_source_kind || "";
+  const current = selected
+    ? `知识库快照：${esc(selected.title)}${selected.version ? ` v${esc(selected.version)}` : ""}（${esc((selected.content_hash || "").slice(0, 12))}）`
+    : kind === "manual"
+      ? "手填快照（导入 / 粘贴的文本）"
+      : "未提供";
+  const schemas = (state.knowledgeList || []).filter((item) => item.kind === "schema" && item.status === "active"
+    && (!item.application_id || item.application_id === (task.slots && task.slots.application_id || "")));
+  const bindingId = task.slots && task.slots.application_id || "";
+  const needsApp = bindingId ? "" : '<p class="note-inline">绑定应用后才能选用应用专属快照；未绑定应用时只能使用组织通用快照或手填。</p>';
+  return `
+    <article class="card">
+      <div class="card-title"><span>结构快照来源</span><span class="badge badge-muted">生成输入之一</span></div>
+      <p class="note-inline">当前来源：${current}。生成草案时实际使用这份结构；快照失效或更新后再次生成会被服务端拒绝并要求重新选择。</p>
+      ${needsApp}
+      <div class="sql-actions">
+        <select id="snapshotKnowledgeSelect" style="max-width:22rem">
+          <option value="__keep__">保持当前快照不变</option>
+          <option value="">清除选用（改用手填或无快照）</option>
+          ${schemas.map((item) => `<option value="${esc(item.knowledge_id)}">${esc(item.title)}${item.version ? ` v${esc(item.version)}` : ""}</option>`).join("")}
+        </select>
+        <button class="button button-small" type="button" id="snapshotApply">更新结构快照</button>
+      </div>
+      <label class="field"><span>手填快照替换（可选）</span>
+        <textarea id="snapshotManualInput" rows="3" placeholder="留空保持现有手填快照不变；填入内容则替换手填快照。与知识库快照二选一。"></textarea>
+      </label>
+      <p class="note-inline">${schemas.length ? "" : "当前应用下没有可选的结构快照（或知识列表尚未加载）。"}更新快照会改变生成输入：旧草案、旧检查结果与旧确认随之失效并保留审计。</p>
+    </article>
+  `;
+}
+
+/** 提交结构快照变更（clarify）。服务端会校验二选一、应用匹配与有效性。 */
+async function applySnapshotChange() {
+  const task = state.task;
+  if (!task || state.busy || isTaskReadOnly(task)) return;
+  const select = $("snapshotKnowledgeSelect");
+  const manual = $("snapshotManualInput");
+  if (!select) return;
+  const knowledgeId = select.value;
+  const manualText = (manual && manual.value.trim()) || "";
+  if (knowledgeId === "__keep__" && !manualText) {
+    showError("请选择要切换的知识快照、选择清除，或填入手填快照内容。");
+    return;
+  }
+  if (knowledgeId !== "__keep__" && knowledgeId && manualText) {
+    showError("结构快照只能二选一：不能同时选择知识快照和手填快照。");
+    return;
+  }
+  const payload = {};
+  if (knowledgeId === "") {
+    // 显式清除选用；若同时填了手填内容，即为替换。
+    payload.snapshot_knowledge_id = "";
+    if (manualText) payload.schema_snapshot = manualText;
+  } else if (knowledgeId && knowledgeId !== "__keep__") {
+    payload.snapshot_knowledge_id = knowledgeId;
+    if (task.snapshot_source_kind === "manual") payload.schema_snapshot = "";
+  } else if (manualText) {
+    payload.schema_snapshot = manualText;
+  }
+  await clarify(payload);
+}
+
+/* ---------- 3.1.2：草案 → 正式变更闭环 ---------- */
+
+/** 创建正式变更的前置条件（服务端会独立再验，前端只做提示性 gating）。 */
+function changeCreationBlockers(task) {
+  const blockers = [];
+  if (isTaskReadOnly(task)) blockers.push("任务只读（已归档或已删除）");
+  if (!task.draft) blockers.push("还没有草案");
+  if (!(task.slots && (task.slots.application_id || "").strip === undefined && task.slots.application_id)) {
+    // 仅提示性判断：canonical 绑定。
+  }
+  if (!task.slots || !task.slots.application_id) blockers.push("任务尚未绑定应用 ID");
+  else if (task.application_binding !== "authorized") blockers.push("应用授权未通过（请在补充信息中重新选择应用）");
+  if (task.draft && task.draft.deterministic_check && task.draft.deterministic_check.status !== "PASSED") {
+    blockers.push(`确定性检查未通过（状态 ${task.draft.deterministic_check.status || "NOT_RUN"}）`);
+  }
+  const activeConfirmation = (task.confirmations || []).some((item) => !item.invalidated_at
+    && (!task.material_hash || item.material_hash === task.material_hash));
+  if (!activeConfirmation) blockers.push("还没有对当前材料的有效人工确认");
+  return blockers;
+}
+
+/** 稳定幂等键：同键 + 同请求可安全重放；材料变化（版本/哈希）后键随之变化。 */
+function changeIdempotencyKey(task) {
+  return `agent-${String(task.task_id).replace(/_/g, "-")}-v${task.draft.version}-${String(task.material_hash || "").slice(0, 8)}`;
+}
+
+async function createFormalChange() {
+  const task = state.task;
+  if (!task || state.busy || !task.draft) return;
+  const blockers = changeCreationBlockers(task);
+  if (blockers.length) {
+    showError("还不能创建正式变更：" + blockers.join("；") + "。");
+    return;
+  }
+  const title = ($("changeCreateTitle") && $("changeCreateTitle").value.trim())
+    || `Agent 任务 ${task.task_id} 的变更草案 v${task.draft.version}`;
+  const key = changeIdempotencyKey(task);
+  const body = {
+    title,
+    application_id: task.slots.application_id,
+    environment: task.draft.environment || task.slots.environment || "生产",
+    change_type: "SQL",
+    sql: task.draft.sql,
+    rollback_sql: task.draft.rollback_sql,
+    agent_task_id: task.task_id,
+  };
+  clearError();
+  state.busy = true;
+  renderChangeActions();
+  try {
+    const change = await api("/api/changes", {
+      method: "POST",
+      headers: { "Idempotency-Key": key },
+      body,
+    });
+    state.changeRecovery = { changeId: change.id, key, status: "created" };
+    // 创建成功后立即回填工作台关联；失败不重创建，走恢复路径。
+    try {
+      const updated = await api(`/api/agent/tasks/${encodeURIComponent(task.task_id)}/change-links`, {
+        method: "POST",
+        body: { change_request_id: change.id, idempotency_key: `link-${key}` },
+      });
+      state.changeRecovery = null;
+      if (state.task && state.task.task_id === task.task_id) adoptTask(updated);
+      loadAgentChanges();
+      showChangeSuccess(change);
+    } catch (linkError) {
+      state.changeRecovery = { changeId: change.id, key, status: "linkback_failed", error: linkError.message };
+      renderChangeActions();
+      showError(`正式变更 ${change.id} 已创建，但工作台关联回填失败：${linkError.message}。请点击「重试回填关联」恢复；不会重复创建变更单。`);
+    }
+  } catch (error) {
+    if (error.status === undefined) {
+      // 网络中断 / 超时：创建结果未知。同键 + 同请求可安全重放（Go 幂等键保证）。
+      state.changeRecovery = { changeId: null, key, status: "unknown", body };
+      renderChangeActions();
+      showError(`创建请求未得到响应（${error.message}）：变更单可能已创建。请点击「用相同请求重试」安全重放（不会重复创建），或点击「查询已创建的变更」核对。`);
+    } else {
+      handleActionError(error);
+    }
+  } finally {
+    state.busy = false;
+    renderChangeActions();
+  }
+}
+
+/** 恢复路径：按同一幂等键重试（已创建则原样返回），或重试关联回填。 */
+async function retryChangeRecovery() {
+  const recovery = state.changeRecovery;
+  if (!recovery || state.busy) return;
+  if (recovery.status === "linkback_failed") {
+    state.busy = true;
+    try {
+      const updated = await api(`/api/agent/tasks/${encodeURIComponent(state.task.task_id)}/change-links`, {
+        method: "POST",
+        body: { change_request_id: recovery.changeId, idempotency_key: `link-${recovery.key}` },
+      });
+      state.changeRecovery = null;
+      if (state.task && state.task.task_id === state.task.task_id) adoptTask(updated);
+      loadAgentChanges();
+    } catch (error) {
+      handleActionError(error);
+    } finally { state.busy = false; renderChangeActions(); }
+    return;
+  }
+  // status === "unknown"：用同一幂等键 + 同一请求体重放。
+  const task = state.task;
+  if (!task || !recovery.body) return;
+  state.busy = true;
+  renderChangeActions();
+  try {
+    const change = await api("/api/changes", {
+      method: "POST",
+      headers: { "Idempotency-Key": recovery.key },
+      body: recovery.body,
+    });
+    state.changeRecovery = { changeId: change.id, key: recovery.key, status: "created" };
+    try {
+      const updated = await api(`/api/agent/tasks/${encodeURIComponent(task.task_id)}/change-links`, {
+        method: "POST",
+        body: { change_request_id: change.id, idempotency_key: `link-${recovery.key}` },
+      });
+      state.changeRecovery = null;
+      if (state.task && state.task.task_id === task.task_id) adoptTask(updated);
+      loadAgentChanges();
+      showChangeSuccess(change);
+    } catch (linkError) {
+      state.changeRecovery = { changeId: change.id, key: recovery.key, status: "linkback_failed", error: linkError.message };
+      showError(`正式变更 ${change.id} 已创建，但关联回填失败：${linkError.message}。请点击「重试回填关联」恢复。`);
+    }
+  } catch (error) {
+    handleActionError(error);
+  } finally {
+    state.busy = false;
+    renderChangeActions();
+  }
+}
+
+function showChangeSuccess(change) {
+  showError(`正式变更 ${change.id} 已创建（状态 ${change.status || "未知"}）。创建不等于提交审批；查看与审批在治理控制台：`, "");
+  const banner = $("errorBanner");
+  if (banner) {
+    banner.innerHTML = `正式变更 <span class="mono">${esc(change.id)}</span> 已创建（状态 ${esc(change.status || "未知")}）。`
+      + `<strong>创建不等于提交审批，更不等于获批或执行。</strong> `
+      + `<a href="/#/changes/${encodeURIComponent(change.id)}">在控制台查看该变更</a>`;
+    banner.hidden = false;
+  }
+}
+
+/** 本任务已创建的正式变更（同组织，会话权限过滤）。用于关联回填失败的恢复核对。 */
+async function loadAgentChanges() {
+  const task = state.task;
+  if (!task) { state.agentChanges = []; return; }
+  try {
+    const changes = await api(`/api/changes?agent_task_id=${encodeURIComponent(task.task_id)}`);
+    state.agentChanges = Array.isArray(changes) ? changes : [];
+  } catch (error) {
+    state.agentChanges = [];
+    if (error.status === 401) handleActionError(error);
+  }
+  renderChangeActions();
+}
+
+/** 渲染「创建正式变更」卡与恢复区。重复点击由 busy 状态阻止。 */
+function renderChangeActions() {
+  const host = $("changeCreateCard");
+  if (!host) return;
+  const task = state.task;
+  if (!task) { host.innerHTML = ""; return; }
+  const links = task.change_links || [];
+  const recovery = state.changeRecovery;
+  const blockers = changeCreationBlockers(task);
+  const canCreate = !blockers.length;
+  const linkedIds = new Set(links.map((item) => item.change_request_id));
+  const unlinked = (state.agentChanges || []).filter((change) => !linkedIds.has(change.id));
+  const parts = [];
+  if (recovery) {
+    parts.push(`
+      <article class="card card-warn">
+        <div class="card-title"><span>创建恢复</span><span class="badge badge-warn">不会重复创建</span></div>
+        ${recovery.status === "linkback_failed"
+          ? `<p>正式变更 <span class="mono">${esc(recovery.changeId)}</span> 已创建，但关联回填失败${recovery.error ? `：${esc(recovery.error)}` : ""}。</p>
+             <div class="sql-actions"><button class="button button-small" type="button" id="retryRecovery" ${state.busy ? "disabled" : ""}>重试回填关联</button>
+             <button class="button button-small" type="button" id="refreshAgentChanges">查询已创建的变更</button></div>`
+          : `<p>创建请求未得到响应，变更单是否已创建未知。同一幂等键 + 同一请求可安全重放；材料变化后幂等键会变化，不会误用旧请求。</p>
+             <div class="sql-actions"><button class="button button-small" type="button" id="retryRecovery" ${state.busy ? "disabled" : ""}>用相同请求重试</button>
+             <button class="button button-small" type="button" id="refreshAgentChanges">查询已创建的变更</button></div>`}
+      </article>
+    `);
+  }
+  if (unlinked.length) {
+    parts.push(`
+      <article class="card card-warn">
+        <div class="card-title"><span>发现未回填关联的正式变更</span></div>
+        <p>以下变更单由本任务创建但工作台关联缺失（可能是回填时网络中断或服务重启）。确认无误后点击建立关联：</p>
+        <ul>${unlinked.map((change) => `
+          <li><span class="mono">${esc(change.id)}</span> · ${esc(change.title || "")} · ${esc(change.status || "")}
+            <button class="button button-small" type="button" data-link-change="${esc(change.id)}" ${state.busy ? "disabled" : ""}>建立关联</button></li>`).join("")}</ul>
+      </article>
+    `);
+  }
+  if (links.length) {
+    parts.push(`
+      <article class="card card-flat">
+        <div class="card-title"><span>已创建的正式变更</span><span class="badge badge-ok">已关联</span></div>
+        <ul>${links.map((item) => `<li><span class="mono"><a href="/#/changes/${encodeURIComponent(item.change_request_id)}">${esc(item.change_request_id)}</a></span> · ${esc(formatDate(item.linked_at))}</li>`).join("")}</ul>
+      </article>
+    `);
+  }
+  parts.push(`
+    <article class="card">
+      <div class="card-title"><span>创建正式变更</span><span class="badge badge-muted">创建 ≠ 提交审批</span></div>
+      <p class="note-inline">复用治理服务的创建接口与持久化幂等：同一创建意图（同任务、同草案版本、同材料）重复点击 / 网络超时 / 页面刷新都会安全重放，不会产生重复变更单。服务端会独立校验任务归属、成员与组织权限、应用与材料一致性。</p>
+      ${canCreate
+        ? `<label class="field"><span>变更标题</span><input id="changeCreateTitle" type="text" maxlength="200" placeholder="默认：Agent 任务 {id} 的变更草案 v{版本}"></label>
+           <div class="sql-actions"><button class="button button-primary" type="button" id="createChangeButton" ${state.busy ? "disabled" : ""}>创建正式变更</button></div>`
+        : `<p class="note-inline">还不能创建：<strong>${esc(blockers.join("；"))}</strong>。满足条件后这里会出现创建入口。</p>`}
+      ${state.busy && canCreate ? '<p class="note-inline">正在提交创建请求……请勿重复点击。</p>' : ""}
+    </article>
+  `);
+  host.innerHTML = parts.join("");
+  const createButton = $("createChangeButton");
+  if (createButton) createButton.addEventListener("click", createFormalChange);
+  const retryButton = $("retryRecovery");
+  if (retryButton) retryButton.addEventListener("click", retryChangeRecovery);
+  const refreshButton = $("refreshAgentChanges");
+  if (refreshButton) refreshButton.addEventListener("click", () => loadAgentChanges());
+  host.querySelectorAll("[data-link-change]").forEach((button) => {
+    button.addEventListener("click", () => linkExistingChange(button.dataset.linkChange));
+  });
+}
+
+/** 把已有变更单回填关联（服务端按 change_request_id 幂等去重，不产生重复记录）。 */
+async function linkExistingChange(changeId) {
+  const task = state.task;
+  if (!task || state.busy || !changeId) return;
+  state.busy = true;
+  renderChangeActions();
+  try {
+    const updated = await api(`/api/agent/tasks/${encodeURIComponent(task.task_id)}/change-links`, {
+      method: "POST", body: { change_request_id: changeId },
+    });
+    if (state.task && state.task.task_id === task.task_id) adoptTask(updated);
+  } catch (error) {
+    handleActionError(error);
+  } finally {
+    state.busy = false;
+    renderChangeActions();
+  }
+}
+
+/** 执行轨迹与预算：实际用了什么策略、为什么停下、花了多少。 */
 /** 执行轨迹与预算：实际用了什么策略、为什么停下、花了多少。 */
 function renderTrajectory(task) {
   const investigation = task.investigation || null;
@@ -1801,6 +2312,12 @@ function sourceLabel(source) {
   return { production: "正式", evaluation: "评测", demo: "演示", legacy: "历史未分类" }[source] || "历史未分类";
 }
 function isTaskReadOnly(task) { return Boolean(task?.archived_at || task?.deleted_at); }
+/** 任务列表里的应用标签：已核对名称优先，其次 canonical ID，最后遗留名称。 */
+function taskApplicationLabel(task) {
+  return (task && (task.authorized_application
+    || (task.slots && task.slots.application_id)
+    || (task.slots && task.slots.application))) || "";
+}
 function renderLifecycle(task) {
   const label = task.deleted_at ? "回收站 · 只读" : task.archived_at ? "已归档 · 只读" : "活跃任务";
   const controls = task.deleted_at
@@ -1894,7 +2411,7 @@ async function refreshTaskHistory() {
     if (generation !== historyGeneration) return;
     if (!Array.isArray(tasks)) throw new Error("任务列表响应格式不正确");
     select.innerHTML = '<option value="">选择任务…</option>' + tasks.map(task =>
-      `<option value="${esc(task.task_id)}">${esc(task.task_id)} · ${esc(STATUS_META[task.status]?.label || task.status)} · ${esc(sourceLabel(task.source))}</option>`
+      `<option value="${esc(task.task_id)}">${esc(task.task_id)} · ${esc(STATUS_META[task.status]?.label || task.status)} · ${esc(sourceLabel(task.source))}${taskApplicationLabel(task) ? ` · ${esc(taskApplicationLabel(task))}` : ""}</option>`
     ).join("");
     select.value = state.task?.task_id || "";
     if (feedback) feedback.textContent = tasks.length ? `${tasks.length} 条任务${state.task && !tasks.some(task => task.task_id === state.task.task_id) ? " · 当前查看的任务不在筛选结果中" : ""}` : "没有符合条件的任务。可调整筛选条件，当前材料不会丢失。";
@@ -1917,10 +2434,11 @@ async function importKnowledge(event) {
   try {
     const created = await api("/api/agent/knowledge", {
       method: "POST",
-      body: { kind: $("knowledgeKind").value, title, body, application_id: $("knowledgeApplication").value.trim() },
+      body: { kind: $("knowledgeKind").value, title, body, application_id: $("knowledgeApplication").value },
     });
     $("knowledgeFeedback").textContent = `已导入 ${created.knowledge_id}（${created.snippet_count} 个片段；命中的注入模式已作为数据风险记录，不提升权限）`;
     $("knowledgeBody").value = "";
+    loadKnowledgeList();
   } catch (error) {
     handleActionError(error);
   } finally { state.busy = false; }
@@ -1995,6 +2513,13 @@ async function init() {
   $("knowledgeForm").addEventListener("submit", importKnowledge);
   $("knowledgeSearch").addEventListener("click", searchKnowledgePanel);
   $("evalRun").addEventListener("click", runEval);
+  $("refreshApps")?.addEventListener("click", () => loadApplications());
+  $("refreshKnowledge")?.addEventListener("click", () => loadKnowledgeList());
+  // 知识列表的「选用此快照」按钮动态生成：事件委托。
+  $("knowledgeListHost")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-select-snapshot]");
+    if (button) selectSnapshot(button.dataset.selectSnapshot, button.dataset.replaceManual === "1");
+  });
   wireRequirementCounter();
   $("timeZoneHelp").textContent = `计划时间是所填时区的墙钟时间；时区留空明确使用浏览器时区 ${browserTimezone() || "（无法识别，请手动填写）"}，并随请求发送。支持 2000—2099 年，夏令时缺失或重复时刻会被拒绝。`;
   $("healthChip").addEventListener("click", () => {
@@ -2017,6 +2542,8 @@ async function init() {
   }
 
   await refreshHealth();
+  await loadApplications();
+  loadKnowledgeList();
   $("refreshTasks")?.addEventListener("click", refreshTaskHistory);
   $("historyFilters")?.addEventListener("submit", event => { event.preventDefault(); refreshTaskHistory(); });
   $("historyFilters")?.addEventListener("input", invalidateDeletePreview);

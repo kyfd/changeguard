@@ -50,6 +50,10 @@ class TaskSlots(BaseModel):
     缺失判定只看这里，不看模型"觉得自己懂了"。
     """
 
+    # 应用的 canonical ID（来自治理服务）。展示名称继续放在 application；
+    # 授权核对、关联与检索只认这个 ID，绝不按名称模糊匹配。
+    application_id: str | None = None
+    # 应用展示名称（仅用于界面展示与历史兼容；授权核对与检索只认 application_id）。
     application: str | None = None
     environment: str | None = None
     database: DatabaseKind | None = None
@@ -61,7 +65,9 @@ class TaskSlots(BaseModel):
     def missing(self) -> list[str]:
         """返回仍然缺失的必填槽位名。"""
         missing: list[str] = []
-        if not (self.application or "").strip():
+        # 历史兼容：名称-only 的任务标记 legacy 后允许继续走流程（授权核对与
+        # 检索只认 application_id，不用应用专属知识）；两者都缺才算缺失。
+        if not (self.application_id or "").strip() and not (self.application or "").strip():
             missing.append("application")
         if not (self.environment or "").strip():
             missing.append("environment")
@@ -214,6 +220,10 @@ class DraftVersion(BaseModel):
     check_blocking_count: int = 0
     evidence_ids: list[str] = Field(default_factory=list)
     revision_notes: list[str] = Field(default_factory=list)
+    # 该版本生成时实际使用的结构快照来源（knowledge_id/title/version/content_hash/
+    # selected_at/selected_by）。None 表示未使用知识库快照（手填快照或无快照）。
+    # 历史版本保留当时的来源记录：快照随后失效/更新不影响既有版本的追溯。
+    snapshot_source: dict[str, Any] | None = None
 
 
 class TraceStep(BaseModel):
@@ -313,6 +323,25 @@ class ChangeLink(BaseModel):
     idempotency_key: str | None = None
 
 
+class SelectedSnapshot(BaseModel):
+    """任务明确选用的知识库结构快照记录。
+
+    只保存选用时的快照身份与内容摘要，便于追溯"生成时用的到底是哪份结构"；
+    快照正文不在这里保存——生成时按 knowledge_id 从知识库读取，并核对
+    content_hash 一致后才进入生成输入。快照后续失效或更新不影响已生成版本
+    的来源记录，也不改变任何治理或检查规则。
+    """
+
+    knowledge_id: str
+    title: str
+    version: str
+    content_hash: str
+    # 选用时任务绑定的应用 ID，防止跨应用误用快照。
+    application_id: str = ""
+    selected_at: datetime
+    selected_by: str = ""
+
+
 class TaskView(BaseModel):
     """对外暴露的任务视图。"""
 
@@ -353,6 +382,17 @@ class TaskView(BaseModel):
     investigation: dict[str, Any] | None = None
     # usage 与预算：provider 未提供时是 unknown，不填 0。
     usage: dict[str, Any] | None = None
+    # 应用绑定状态：authorized（已绑定且授权核对通过）/ unauthorized（上次核对失败）/
+    # legacy（仅有名称的历史任务，等待用户显式重新选择）/ none（未绑定应用）。
+    # 判定权威在服务端，前端据此提示重新选择，绝不按名称模糊匹配。
+    application_binding: str = "none"
+    # 授权核对通过时服务端回填的展示名称；未核对通过时保持空串。
+    authorized_application: str = ""
+    # 明确选用的知识库结构快照（校验通过后才写入）。手填 schema_snapshot 与之互斥。
+    selected_snapshot: SelectedSnapshot | None = None
+    # 当前表结构快照的来源类型：knowledge（知识库选用）/ manual（手填）/ ""（未提供）。
+    # 供工作台展示与替换决策；判定权威在服务端记录，前端只展示。
+    snapshot_source_kind: str = ""
 
 
 class CreateTaskRequest(BaseModel):
@@ -360,6 +400,11 @@ class CreateTaskRequest(BaseModel):
 
     requirement: str = Field(min_length=1, max_length=4000)
     application: str | None = None
+    # 应用的 canonical ID：提供时由治理服务核对授权；留空表示不绑定应用（检索只看组织通用知识）。
+    application_id: str | None = None
+    # 明确选用知识库中的一份结构快照（kind=schema、生效中）。与手填 schema_snapshot 互斥：
+    # 两者同时提供会被服务端拒绝，由用户二选一，不静默覆盖或拼接。
+    snapshot_knowledge_id: str | None = None
     environment: str | None = None
     database: DatabaseKind | None = None
     table: str | None = None
@@ -376,6 +421,10 @@ class ClarifyRequest(BaseModel):
     """补充信息。字段都可选，只覆盖提供的那部分。"""
 
     application: str | None = None
+    # 重新选择应用：提供 canonical ID。核对授权与绑定一律以 ID 为准。
+    application_id: str | None = None
+    # 重新选择结构快照：提供 ID 切换为知识快照，空串清除选用，缺省保持不变。
+    snapshot_knowledge_id: str | None = None
     environment: str | None = None
     database: DatabaseKind | None = None
     table: str | None = None

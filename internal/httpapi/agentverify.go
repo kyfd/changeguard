@@ -28,12 +28,33 @@ type verifiedAgentTask struct {
 	Source string `json:"source"`
 	Status string `json:"status"`
 	Slots  struct {
-		Application string `json:"application"`
+		ApplicationID string `json:"application_id"`
+		Application   string `json:"application"`
 	} `json:"slots"`
 	Draft *struct {
-		SQL         string `json:"sql"`
-		RollbackSQL string `json:"rollback_sql"`
+		SQL                string `json:"sql"`
+		RollbackSQL        string `json:"rollback_sql"`
+		DeterministicCheck struct {
+			Status string `json:"status"`
+		} `json:"deterministic_check"`
 	} `json:"draft"`
+	Confirmations []verifiedAgentConfirmation `json:"confirmations"`
+}
+
+// verifiedAgentConfirmation 只取核对所需的最小字段：确认是否仍然有效。
+type verifiedAgentConfirmation struct {
+	InvalidatedAt *string `json:"invalidated_at"`
+}
+
+// hasActiveAgentConfirmation 判断确认记录里是否至少有一条未被作废的有效确认。
+// 确认列表为空（旧任务、未确认）一律视为没有有效确认：宁可不建立关联。
+func hasActiveAgentConfirmation(confirmations []verifiedAgentConfirmation) bool {
+	for i := range confirmations {
+		if at := confirmations[i].InvalidatedAt; at == nil || strings.TrimSpace(*at) == "" {
+			return true
+		}
+	}
+	return false
 }
 
 const verifyAgentTaskTimeout = 5 * time.Second
@@ -102,9 +123,20 @@ func (s *Server) verifyAgentTask(ctx context.Context, actorID, organizationID st
 	if source := strings.TrimSpace(task.Source); source != "production" {
 		return false, fmt.Sprintf("Agent 任务来源为 %q：评测 / 演示来源的任务不能用于正式变更", source)
 	}
-	application := strings.TrimSpace(task.Slots.Application)
-	if application == "" || application != strings.TrimSpace(input.ApplicationID) {
-		return false, "Agent 任务的应用与本次变更不一致：不能在另一个应用下建立可信关联"
+	// 应用一致性：canonical ID 优先。任务还没有 canonical ID（历史名称-only 任务）
+	// 时退回与提交值的严格相等比对（3.1.1 兼容；只做相等判定，不做模糊匹配）。
+	changeApplication := strings.TrimSpace(input.ApplicationID)
+	switch {
+	case strings.TrimSpace(task.Slots.ApplicationID) != "":
+		if task.Slots.ApplicationID != changeApplication {
+			return false, "Agent 任务的应用与本次变更不一致：不能在另一个应用下建立可信关联"
+		}
+	case strings.TrimSpace(task.Slots.Application) != "":
+		if task.Slots.Application != changeApplication {
+			return false, "Agent 任务的应用与本次变更不一致：请在变更准备服务中为该任务重新选择应用后重试"
+		}
+	default:
+		return false, "Agent 任务没有绑定应用：请先在变更准备服务中选择应用"
 	}
 	if task.Draft == nil || strings.TrimSpace(task.Draft.SQL) == "" {
 		return false, "Agent 任务没有可核对的草案材料"
@@ -112,6 +144,15 @@ func (s *Server) verifyAgentTask(ctx context.Context, actorID, organizationID st
 	if strings.TrimSpace(task.Draft.SQL) != strings.TrimSpace(input.SQL) ||
 		strings.TrimSpace(task.Draft.RollbackSQL) != strings.TrimSpace(input.RollbackSQL) {
 		return false, "提交的材料与 Agent 任务当前草案不一致：请使用任务当前版本的 SQL 与回滚方案"
+	}
+	// 只有「至少一条有效人工确认」且「确定性检查通过」的草案才能进入正式变更。
+	// 两个事实都来自变更准备服务的响应（服务端核对），不由客户端声明，也不能被
+	// 模型输出替代；确认 ≠ 审批 ≠ 执行许可，创建正式变更同样不触发任何治理放行。
+	if !hasActiveAgentConfirmation(task.Confirmations) {
+		return false, "Agent 任务的当前草案还没有有效的人工确认：请先在变更准备服务完成确认"
+	}
+	if checkStatus := strings.TrimSpace(task.Draft.DeterministicCheck.Status); checkStatus != "PASSED" {
+		return false, "Agent 任务的确定性检查未通过（状态 " + checkStatus + "）：通过检查后才能创建正式变更"
 	}
 	return true, ""
 }

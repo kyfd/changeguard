@@ -83,7 +83,7 @@ test('archived task stops polling even if legacy status is nonterminal', () => {
 
 test('new task creation invalidates an in-flight history response', async () => {
   const h = setup();
-  for (const id of ['requirement', 'optApplication', 'optEnvironment', 'optDatabase', 'optTable', 'optQuerySql', 'optTimezone', 'optSchema', 'optPlannedAt', 'createButton']) h.node(id);
+  for (const id of ['requirement', 'optApplication', 'optEnvironment', 'optDatabase', 'optTable', 'optQuerySql', 'optTimezone', 'optSchema', 'optSnapshotKnowledge', 'optPlannedAt', 'createButton']) h.node(id);
   h.nodes.get('requirement').value = 'new task';
   h.context.created = task({ task_id: 'new' });
   vm.runInContext('clearError = () => {}; browserTimezone = () => "UTC"; globalThis.pendingHistory = {}; api = path => path === "/api/agent/tasks" ? Promise.resolve(created) : new Promise(resolve => { globalThis.pendingHistory[path] = resolve; });', h.context);

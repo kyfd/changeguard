@@ -8,7 +8,7 @@ function setup() {
   const nodes = new Map();
   const fields = [];
   const requests = [];
-  for (const id of ['requirement', 'optApplication', 'optEnvironment', 'optDatabase', 'optTable', 'optQuerySql', 'optTimezone', 'optSchema', 'optPlannedAt', 'createButton', 'errorBanner', 'clarifyButton', 'clarifyNote']) {
+  for (const id of ['requirement', 'optApplication', 'optEnvironment', 'optDatabase', 'optTable', 'optQuerySql', 'optTimezone', 'optSchema', 'optSnapshotKnowledge', 'optPlannedAt', 'createButton', 'errorBanner', 'clarifyButton', 'clarifyNote']) {
     nodes.set(id, { value: '', addEventListener(type, fn) { this[type] = fn; } });
   }
   const context = vm.createContext({ document: { readyState: 'loading', addEventListener() {}, getElementById: id => nodes.get(id), querySelectorAll: () => fields },

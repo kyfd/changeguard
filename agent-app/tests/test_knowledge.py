@@ -4,7 +4,13 @@ from __future__ import annotations
 import pytest
 
 from app.schemas.knowledge import KnowledgeImportRequest
-from app.service import KnowledgeForbidden, KnowledgeInvalid, KnowledgeNotFound, KnowledgeStateUnavailable
+from app.service import (
+    ApplicationNotAuthorized,
+    KnowledgeForbidden,
+    KnowledgeInvalid,
+    KnowledgeNotFound,
+    KnowledgeStateUnavailable,
+)
 from app.tools.registry import TrustedContext
 from tests.conftest import run
 
@@ -199,34 +205,36 @@ def test_task_retrieval_uses_only_authorized_application(service, monkeypatch):
 
 
 def test_application_authorization_is_rechecked_on_every_execution(service, monkeypatch):
-    """撤销授权后，旧任务不能在补充信息 / 恢复时继续沿用历史授权读取该应用的知识。"""
+    """撤销授权后，旧任务在补充信息 / 恢复时被阻断：不能沿用历史授权读取该应用的知识。"""
     from app.schemas.drafts import ClarifyRequest, DatabaseKind
     from tests.conftest import PLANNED_AT, SCHEMA_SNAPSHOT, SLOW_QUERY, bare_request
+    from tests.test_application_binding import grant_applications
 
     alice = TrustedContext(user_id="alice", organization_id="org_demo")
-    grant_apps(service, monkeypatch, {"order-service"})
+    grant_applications(service, monkeypatch, allowed={"order-service"})
     import_knowledge(service, alice, application_id="order-service")
 
-    # 两个任务都在授权存在时创建，记录下已核对通过的应用。
-    resume_target, _ = run(service.create_task(bare_request(application="order-service"), alice))
-    clarify_target, _ = run(service.create_task(bare_request(application="order-service"), alice))
+    # 两个任务都在授权存在时创建：canonical ID 绑定与授权在创建时核对通过。
+    resume_target, _ = run(service.create_task(bare_request(application_id="order-service"), alice))
+    clarify_target, _ = run(service.create_task(bare_request(application_id="order-service"), alice))
     for task_id in (resume_target.task_id, clarify_target.task_id):
         assert service._repository.get(task_id)["authorized_application"] == "order-service"
 
-    # 撤销授权；此后payload**不再重新填写应用**。
-    grant_apps(service, monkeypatch, set())
+    # 撤销授权；此后 payload 不再重新填写应用。
+    grant_applications(service, monkeypatch, allowed=set())
     payload = ClarifyRequest(
         environment="生产", database=DatabaseKind.POSTGRESQL, table="orders",
         query_sql=SLOW_QUERY, planned_at=PLANNED_AT, schema_snapshot=SCHEMA_SNAPSHOT,
     )
-    run(service.resume(resume_target.task_id, alice, payload))
-    run(service.clarify(clarify_target.task_id, payload, alice))
-
-    for task_id in (resume_target.task_id, clarify_target.task_id):
-        record = service._repository.get(task_id)
-        assert record["authorized_application"] == "", f"{task_id}: 撤销授权后不得沿用历史授权"
-        retriever = service._retriever_for(record["organization_id"], record["authorized_application"])
-        assert not any(chunk.doc_id.startswith("norms/kb_") for chunk in retriever._keyword._chunks), task_id
+    before_resume = service._repository.get(resume_target.task_id)
+    before_clarify = service._repository.get(clarify_target.task_id)
+    # 重新核验失败即阻断（fail-closed）：不降级继续、不沿用历史授权，记录原样保留。
+    with pytest.raises(ApplicationNotAuthorized):
+        run(service.resume(resume_target.task_id, alice, payload))
+    with pytest.raises(ApplicationNotAuthorized):
+        run(service.clarify(clarify_target.task_id, payload, alice))
+    assert service._repository.get(resume_target.task_id) == before_resume
+    assert service._repository.get(clarify_target.task_id) == before_clarify
 
 
 def test_api_application_knowledge_requires_grant(tmp_path, monkeypatch):
