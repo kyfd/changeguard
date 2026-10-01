@@ -262,3 +262,56 @@ def test_knowledge_case_material_feeds_case_retrieval(service, context):
     assert hits and hits[0].knowledge_id == imported.knowledge_id
     # 规范作用域不会返回案例。
     assert run(service.search_knowledge(context, "回滚窗口", kind="norms")) == []
+
+# -- 白盒补充：list_knowledge 的过滤参数分支 --------------------------------
+
+
+def test_list_knowledge_filters_by_kind_and_status(service, context, monkeypatch):
+    """kind / status 过滤是列表的对外契约分支：参数必须真的过滤，而不是被忽略。"""
+    grant_apps(service, monkeypatch, {"order-service"})
+    norms = import_knowledge(service, context, kind="norms")
+    cases = import_knowledge(service, context, kind="cases", title="历史案例")
+    scoped = import_knowledge(service, context, application_id="order-service")
+
+    # kind 过滤：只返回指定类型。
+    norms_only = run(service.list_knowledge(context, kind="norms"))
+    assert {item.knowledge_id for item in norms_only} == {norms.knowledge_id}
+    cases_only = run(service.list_knowledge(context, kind="cases"))
+    assert {item.knowledge_id for item in cases_only} == {cases.knowledge_id}
+
+    # status 过滤：生效中的知识在 active 下可见，deprecated 下才出现。
+    run(service.deprecate_knowledge(scoped.knowledge_id, context))
+    active = run(service.list_knowledge(context, application_id="order-service", status="active"))
+    assert scoped.knowledge_id not in {item.knowledge_id for item in active}
+    deprecated = run(service.list_knowledge(context, application_id="order-service", status="deprecated"))
+    assert {item.knowledge_id for item in deprecated} == {scoped.knowledge_id}
+
+
+def test_list_knowledge_without_organization_returns_empty(service, context):
+    """没有组织身份的上下文一律返回空列表，而不是抛错或返回全量。"""
+    import_knowledge(service, context)
+    anonymous = TrustedContext(user_id="alice", organization_id="")
+
+    assert run(service.list_knowledge(anonymous)) == []
+
+
+def test_deprecate_is_idempotent_and_records_timestamp(service, context):
+    """重复失效同一条知识不报错、不改写首次失效时间（幂等）。"""
+    imported = import_knowledge(service, context)
+
+    first = run(service.deprecate_knowledge(imported.knowledge_id, context))
+    assert first.status == "deprecated"
+    second = run(service.deprecate_knowledge(imported.knowledge_id, context))
+    assert second.status == "deprecated"
+    assert second.deprecated_at == first.deprecated_at, "重复失效不得改写首次失效时间"
+
+
+def test_get_knowledge_hides_cross_organization_records(service, context, monkeypatch):
+    """跨组织读取按"不存在"处理（不区分，避免探测）。"""
+    imported = import_knowledge(service, context)
+    outsider = TrustedContext(user_id="mallory", organization_id="org_other")
+
+    with pytest.raises(KnowledgeNotFound):
+        run(service.get_knowledge(imported.knowledge_id, outsider))
+    with pytest.raises(KnowledgeNotFound):
+        run(service.deprecate_knowledge(imported.knowledge_id, outsider))
