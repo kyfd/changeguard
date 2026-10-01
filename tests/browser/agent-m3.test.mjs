@@ -19,6 +19,7 @@ test('workbench M3: knowledge import/search and eval center', async () => {
       const name = url.pathname === '/agent/' ? 'index.html' : url.pathname.split('/').pop();
       if (files[name]) return route.fulfill({ body: files[name], contentType: name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' });
       if (url.pathname === '/api/auth/status') return route.fulfill({ json: { enabled: false } });
+      if (url.pathname === '/api/apps') return route.fulfill({ json: [{ id: 'order-service', name: '订单服务' }] });
       if (url.pathname === '/api/agent/tasks') return route.fulfill({ json: [] });
       if (url.pathname === '/api/agent/knowledge' && route.request().method() === 'POST') {
         posts.push(route.request().postDataJSON());
@@ -44,7 +45,7 @@ test('workbench M3: knowledge import/search and eval center', async () => {
     await page.locator('#knowledgeBox summary').click();
     await page.locator('#knowledgeTitle').fill('索引并发规范');
     await page.locator('#knowledgeBody').fill('# 索引并发规范\n\n文档版本：v3.1\n适用范围：PostgreSQL 生产库\n\n## 1.1 热表并发建索引\n\n并发建索引必须使用 CREATE INDEX CONCURRENTLY。\n');
-    await page.locator('#knowledgeApplication').fill('order-service');
+    await page.locator('#knowledgeApplication').selectOption('order-service');
     await page.locator('#knowledgeImport').click();
     await page.locator('#knowledgeFeedback').filter({ hasText: 'kb_fixture_1' }).waitFor();
     assert.equal(posts[0].kind, 'norms');
