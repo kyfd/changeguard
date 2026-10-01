@@ -1645,8 +1645,11 @@ async function loadKnowledgeList() {
   const host = $("knowledgeListHost");
   if (!host) return;
   host.innerHTML = '<p class="note-inline">正在加载知识列表…</p>';
+  // 应用专属知识只有提供应用 ID 时服务端才返回（逐条核对授权，失败关闭）。
+  // 列表随当前任务绑定的应用加载；无绑定任务时只展示组织通用知识。
+  const taskApp = (state.task && ((state.task.slots && state.task.slots.application_id) || "")) || "";
   try {
-    const items = await api("/api/agent/knowledge");
+    const items = await api("/api/agent/knowledge" + (taskApp ? `?application_id=${encodeURIComponent(taskApp)}` : ""));
     state.knowledgeList = Array.isArray(items) ? items : [];
     state.knowledgeListState = "ready";
   } catch (error) {
@@ -1670,7 +1673,10 @@ function renderKnowledgeList() {
   }
   const task = state.task;
   const selectedId = task && task.selected_snapshot ? task.selected_snapshot.knowledge_id : "";
-  const canSelect = task && !isTaskReadOnly(task);
+  // 服务端只允许 NEEDS_INFO / CHECK_BLOCKED / FAILED(或无草案)状态补充信息；
+  // DRAFT_READY 是确认阶段，补充入口不渲染——否则按钮出现但提交必然失败。
+  const canClarifyState = task && (!task.draft || RESUMABLE.has(task.status));
+  const canSelect = task && !isTaskReadOnly(task) && canClarifyState;
   const kindLabel = { norms: "规范", cases: "案例", schema: "结构快照" };
   host.innerHTML = items.map((item) => {
     const isSelected = selectedId && item.knowledge_id === selectedId;
@@ -1739,6 +1745,9 @@ function renderBindingCard(task) {
 /** 结构快照卡：显示当前来源，提供知识快照切换 / 清除与手填替换入口。 */
 function renderSnapshotCard(task) {
   if (isTaskReadOnly(task)) return "";
+  // DRAFT_READY 是确认阶段:服务端不允许此状态补充信息,更新快照的入口不渲染,
+  // 否则按钮出现但提交必然 409。可恢复状态(或无草案)才显示。
+  if (task.draft && !RESUMABLE.has(task.status)) return "";
   const selected = task.selected_snapshot;
   const kind = task.snapshot_source_kind || "";
   const current = selected
