@@ -14,6 +14,8 @@ from typing import Any, Mapping, TypedDict
 from app.schemas.drafts import ClarificationQuestion, TaskSlots
 
 SLOT_FIELDS = (
+    # application_id 是 canonical 身份；application 只是展示名称，由服务端核对授权后回填。
+    "application_id",
     "application",
     "environment",
     "database",
@@ -62,9 +64,9 @@ def material_hash(sql: str, rollback_sql: str) -> str:
 QUESTION_TEMPLATES: dict[str, ClarificationQuestion] = {
     "application": ClarificationQuestion(
         field="application",
-        question="这次变更属于哪个应用？",
-        reason="应用决定权限范围、依赖关系与发布窗口，必须明确。",
-        examples=["order-service"],
+        question="这次变更属于哪个应用？请从你被授权的应用列表中选择。",
+        reason="应用决定权限范围、依赖关系与发布窗口；系统按 canonical ID 核对授权，不按名称模糊匹配。",
+        examples=[],
     ),
     "environment": ClarificationQuestion(
         field="environment",

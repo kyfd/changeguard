@@ -33,6 +33,7 @@ from app.schemas.knowledge import (
 )
 from app.service import (
     AgentService,
+    ApplicationNotAuthorized,
     EvalInvalid,
     EvalNotFound,
     EvalStateUnavailable,
@@ -41,6 +42,7 @@ from app.service import (
     KnowledgeNotFound,
     KnowledgeStateUnavailable,
     TaskCancelRejected,
+    TaskInputInvalid,
     TaskNotConfirmable,
     TaskNotFound,
     TaskNotResumable,
@@ -159,7 +161,19 @@ async def tools(request: Request) -> dict:
 async def create_task(payload: CreateTaskRequest, request: Request) -> TaskView:
     context = await resolve_context(request)
     _enforce_usage(request, context)
-    view, _ = await _service(request).create_task(payload, context)
+    try:
+        view, _ = await _service(request).create_task(payload, context)
+    except KnowledgeNotFound as error:
+        # 创建时选用的知识快照不存在（或不在本组织）：404，不提供存在性探测。
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="选用的知识快照不存在") from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    except TaskInputInvalid as error:
+        # 快照二选一等输入冲突：422，附可操作的修正提示。
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    except ApplicationNotAuthorized as error:
+        # 创建前核对应用授权失败：任务不创建（失败关闭），用户换应用或先去申请授权。
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     return view
 
 
@@ -292,6 +306,17 @@ async def clarify(task_id: str, payload: ClarifyRequest, request: Request) -> Ta
         return await _service(request).clarify(task_id, payload, context)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
+    except KnowledgeNotFound as error:
+        # 补充时切换知识快照：目标不存在（或不在本组织）时明确指向重新选择。
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="选用的知识快照不存在") from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    except TaskInputInvalid as error:
+        # 快照二选一、替换确认、空应用 ID 等输入冲突：422，附可操作的修正提示。
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    except ApplicationNotAuthorized as error:
+        # 应用授权每次补充都重新核对：被回收或治理服务不可达都会阻断（失败关闭）。
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     except TaskNotResumable as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except TaskStateUnavailable as error:
@@ -330,6 +355,17 @@ async def resume(task_id: str, request: Request, payload: ClarifyRequest | None 
         return await _service(request).resume(task_id, context, payload)
     except TaskNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在") from error
+    except KnowledgeNotFound as error:
+        # 恢复时重新校验选用的知识快照：被删/无权时明确指向重新选择，而不是模糊 500。
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="选用的知识快照不存在") from error
+    except KnowledgeForbidden as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    except TaskInputInvalid as error:
+        # 输入冲突（快照二选一、空应用 ID 等）：422，附可操作的修正提示。
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    except ApplicationNotAuthorized as error:
+        # 应用授权在每次补充/恢复时重新核对：被回收或治理服务不可达都阻断（失败关闭）。
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     except TaskNotResumable as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except TaskStateUnavailable as error:

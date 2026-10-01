@@ -29,8 +29,14 @@ func agentChangeInput(taskID string) model.CreateChangeInput {
 func agentTaskPayload(overrides map[string]any) map[string]any {
 	task := map[string]any{
 		"task_id": "task_prod_1", "source": "production", "status": "DRAFT_READY",
-		"slots": map[string]any{"application": "app_order"},
-		"draft": map[string]any{"sql": agentChangeSQL, "rollback_sql": agentChangeRollback},
+		"slots": map[string]any{"application_id": "app_order", "application": "app_order"},
+		"draft": map[string]any{
+			"sql": agentChangeSQL, "rollback_sql": agentChangeRollback,
+			"deterministic_check": map[string]any{"status": "PASSED"},
+		},
+		// 正式变更只接受「至少一条有效人工确认 + 确定性检查通过」的草案；
+		// 两个事实都由变更准备服务的响应提供，不由客户端声明。
+		"confirmations": []map[string]any{{"confirmed_by": "usr_developer"}},
 	}
 	for key, value := range overrides {
 		task[key] = value
@@ -237,6 +243,12 @@ func TestAgentTaskAssociationMustBeVerified(t *testing.T) {
 		{"cross application is refused", map[string]any{"slots": map[string]any{"application": "another_app"}}},
 		{"material mismatch is refused", map[string]any{"draft": map[string]any{"sql": "SELECT 1;", "rollback_sql": agentChangeRollback}}},
 		{"missing draft is refused", map[string]any{"draft": nil}},
+		{"no active confirmation is refused", map[string]any{"confirmations": []map[string]any{{"invalidated_at": "2026-01-01T00:00:00Z"}}}},
+		{"empty confirmations are refused", map[string]any{"confirmations": []any{}}},
+		{"failed deterministic check is refused", map[string]any{"draft": map[string]any{"sql": agentChangeSQL, "rollback_sql": agentChangeRollback, "deterministic_check": map[string]any{"status": "BLOCKED"}}}},
+		{"missing deterministic check is refused", map[string]any{"draft": map[string]any{"sql": agentChangeSQL, "rollback_sql": agentChangeRollback}}},
+		{"cross application id is refused", map[string]any{"slots": map[string]any{"application_id": "app_billing", "application": "app_billing"}}},
+		{"legacy name-only task is refused", map[string]any{"slots": map[string]any{"application": "order-service"}}},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			server, _, data := newIdempotencyHTTPServer(t)

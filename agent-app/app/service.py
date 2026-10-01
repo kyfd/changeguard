@@ -70,6 +70,7 @@ from app.schemas.drafts import (
     DraftVersion,
     DraftVersionDiff,
     LinkChangeRequest,
+    SelectedSnapshot,
     TaskSlots,
     TaskStatus,
     TaskTrace,
@@ -160,6 +161,22 @@ class KnowledgeForbidden(Exception):
     """调用方对该应用没有授权（或无法核对授权）。"""
 
 
+class ApplicationNotAuthorized(Exception):
+    """调用方对所声明的应用没有授权（或无法核对授权）。
+
+    应用 ID 只是"要访问谁"的声明；是否允许由治理服务按成员与应用授权判定，
+    无法核对时失败关闭。HTTP 层映射为 403。
+    """
+
+
+class TaskInputInvalid(Exception):
+    """任务输入的业务校验失败（例如快照二选一冲突、所选快照已失效）。
+
+    请求格式合法但业务规则不满足，错误消息必须给出可执行的下一步提示。
+    HTTP 层映射为 422。
+    """
+
+
 @dataclass
 class _Execution:
     """一次受管理的执行。"""
@@ -238,12 +255,55 @@ class AgentService:
         self, request: CreateTaskRequest, context: TrustedContext
     ) -> tuple[TaskView, TaskSlots]:
         slots = self._slots_from_request(request)
-        slots_payload = slots.model_dump(mode="json")
         requirement = request.requirement.strip()
-        schema_snapshot = request.schema_snapshot or ""
-        # 应用由请求声明，检索前必须核对授权；无法核对时按"未授权"处理（失败关闭），
-        # 只会看到组织通用知识，而不会看到该应用专属知识。
-        authorized_application = await self._authorized_application(context, slots.application or "")
+        # 快照二选一：知识库快照与手填快照不能同时提供（不静默覆盖、不拼接）。
+        snapshot_knowledge_id = (request.snapshot_knowledge_id or "").strip()
+        manual_snapshot = (request.schema_snapshot or "").strip()
+        if snapshot_knowledge_id and manual_snapshot:
+            raise TaskInputInvalid(
+                "结构快照只能二选一：请只提供知识库快照（snapshot_knowledge_id）或手填快照（schema_snapshot）之一"
+            )
+        # 应用绑定只认 canonical ID：提供时由治理服务核对授权，通过后回填展示名称；
+        # 只给名称（历史习惯）不再建立绑定——绝不按名称模糊匹配。
+        application_id = (request.application_id or "").strip()
+        if application_id:
+            verified = await self._verify_application(context, application_id)
+            if verified is None:
+                raise ApplicationNotAuthorized(
+                    "无法确认你对所选应用的授权（未授权或治理服务暂不可达），任务未创建"
+                )
+            slots.application_id = application_id
+            slots.application = verified.get("name") or ""
+            authorized_application = application_id
+            application_binding = "authorized"
+        else:
+            # 未提供 canonical ID：不建立应用绑定（名称仅作展示），检索只看组织通用知识。
+            authorized_application = ""
+            application_binding = "legacy" if (slots.application or "").strip() else "none"
+        # 结构快照：选用知识快照时校验（组织、类型、状态、应用匹配、授权）后把正文物化
+        # 为任务材料；此后由任务记录持有这份内容，知识库后续失效不影响已生成版本的追溯。
+        selected_snapshot: dict[str, Any] | None = None
+        snapshot_source_kind = ""
+        schema_snapshot = ""
+        if snapshot_knowledge_id:
+            selected_snapshot, schema_snapshot = await self._select_snapshot(
+                snapshot_knowledge_id, context, application_id
+            )
+            snapshot_source_kind = "knowledge"
+        elif manual_snapshot:
+            schema_snapshot = request.schema_snapshot or ""
+            snapshot_source_kind = "manual"
+        slots_payload = slots.model_dump(mode="json")
+        events = [event("created", "任务已创建")]
+        if selected_snapshot is not None:
+            events.append(
+                event(
+                    "snapshot_selected",
+                    f"选用知识库结构快照 {selected_snapshot.get('title') or ''}"
+                    f"（版本 {selected_snapshot.get('version') or ''}，"
+                    f"knowledge_id={selected_snapshot.get('knowledge_id')}）",
+                )
+            )
         record: dict[str, Any] = {
             "task_id": f"task_{uuid.uuid4().hex[:12]}",
             "source": self._settings.task_source,
@@ -253,12 +313,18 @@ class AgentService:
             "requirement": requirement,
             "slots": slots_payload,
             "schema_snapshot": schema_snapshot,
-            # 已核对通过的应用；检索只使用这个值，不回退到请求里声明的应用。
+            # 已核对通过的应用（canonical ID）；检索只使用这个值，不回退到请求里声明的名称。
             "authorized_application": authorized_application,
+            # 应用绑定状态：authorized / unauthorized / legacy / none。
+            "application_binding": application_binding,
+            # 明确选用的知识库结构快照（元数据 + 内容摘要；正文物化到 schema_snapshot）。
+            "selected_snapshot": selected_snapshot,
+            # 当前快照材料来源：knowledge（知识库选用）/ manual（手填）/ ""（无快照）。
+            "snapshot_source_kind": snapshot_source_kind,
             "status": TaskStatus.RECEIVED.value,
             "questions": [],
             "draft": None,
-            "events": [event("created", "任务已创建")],
+            "events": events,
             "revisions": 0,
             "error": None,
             # 输入与材料版本：恢复前必须与记录当前值一致，否则拒绝带着陈旧上下文继续。
@@ -281,11 +347,10 @@ class AgentService:
         if status not in RESUMABLE_STATUSES:
             raise TaskNotResumable(f"当前状态 {status} 不允许补充信息")
 
-        # 应用授权**每次都重新核对**（历史授权不是长期凭据）：即使本次没有重新填写应用，
-        # 也要按任务当前的应用重新判定。核对是一次外部调用（await），之后必须基于**最新**
-        # 记录重新校验并写入，避免等待期间并发的归档 / 关联被这份旧记录覆盖。
-        candidate = merge_slot_data(TaskSlots.model_validate(record.get("slots") or {}), request.model_dump())
-        authorized_application = await self._authorized_application(context, candidate.application or "")
+        # 应用授权**每次都重新核对**（历史授权不是长期凭据）。核对是一次外部调用（await），
+        # 之后必须基于**最新**记录重新校验并写入，避免等待期间并发的归档 / 关联被旧记录覆盖。
+        current_slots = TaskSlots.model_validate(record.get("slots") or {})
+        resolved_application = await self._resolve_request_application(context, request, current_slots)
         record = self._reload_for_mutation(task_id)
         self._ensure_active(record)
         if record.get("status") != status:
@@ -293,13 +358,19 @@ class AgentService:
 
         slots = TaskSlots.model_validate(record.get("slots") or {})
         updated = merge_slot_data(slots, request.model_dump())
+        if request.application_id is not None:
+            # 以服务端核对结果为准回填 canonical ID 与展示名称（不信任客户端提交的名称）。
+            updated.application_id = resolved_application[0]
+            updated.application = resolved_application[1] or updated.application
         record["slots"] = updated.model_dump(mode="json")
-        # 只记录本次核对结果；未授权时为空串，检索不会使用请求里声明的应用。
-        record["authorized_application"] = authorized_application
-        # 表结构快照是任务级材料而非槽位，但必须能在补充阶段补齐；
-        # 只有显式提供才覆盖，避免把已有快照清空。
-        if request.schema_snapshot is not None:
-            record["schema_snapshot"] = request.schema_snapshot
+        # 只记录本次核对结果；未授权时为空串，检索不会使用应用专属知识。
+        record["authorized_application"] = resolved_application[0]
+        record["application_binding"] = resolved_application[2]
+        # 新增输入要过与入口一致的筛查：检查点让旧节点不必重跑，
+        # 但**不能**因为走了检查点就跳过对新输入的校验。
+        _screen_new_input(request.note or "", request.schema_snapshot or "")
+        # 表结构快照与知识快照选择：冲突显式拒绝，不静默覆盖或拼接（规则见方法注释）。
+        await self._apply_clarify_snapshot(record, request, context, resolved_application[0])
         # 自由文本说明：以前被接收后直接丢弃。现在写进任务记录，
         # 并在下一次执行时作为「补充说明」拼进需求文本，模型确实能看到它。
         note = (request.note or "").strip()
@@ -308,24 +379,24 @@ class AgentService:
             notes.append(note)
             record["clarification_notes"] = notes
         events = list(record.get("events") or [])
-        # 新增输入要过与入口一致的筛查：检查点让旧节点不必重跑，
-        # 但**不能**因为走了检查点就跳过对新输入的校验。
-        _screen_new_input(request.note or "", request.schema_snapshot or "")
         provided = [
             name
             for name in (
-                "application",
+                "application_id",
                 "environment",
                 "database",
                 "table",
                 "query_sql",
                 "planned_at",
+                "snapshot_knowledge_id",
                 "schema_snapshot",
                 "note",
             )
             if getattr(request, name, None) is not None
         ]
         events.append(event("clarified", f"补充信息：{', '.join(provided) or '无字段变化'}"))
+        # 已选用的知识快照在重新执行前重新校验；失效/被删/内容更新则阻断并提示重新选择。
+        self._validate_selected_snapshot(record)
         # 输入/材料变了就作废旧草案与旧结果——不能带着陈旧上下文继续。
         _apply_input_version(record)
         record["events"] = events
@@ -375,22 +446,27 @@ class AgentService:
         # 已有执行在跑：直接拒绝，绝不在同一个 thread_id 上再起一次图。
         if self._has_live_execution(task_id):
             raise TaskNotResumable("该任务已有执行在进行中，本次恢复未生效，请等待或先取消")
+        current_slots = TaskSlots.model_validate(record.get("slots") or {})
+        resolved_application = await self._resolve_request_application(context, request, current_slots)
         if request is not None:
             _screen_new_input(request.note or "", request.schema_snapshot or "")
             slots = TaskSlots.model_validate(record.get("slots") or {})
-            record["slots"] = merge_slot_data(slots, request.model_dump()).model_dump(mode="json")
-            if request.schema_snapshot is not None:
-                record["schema_snapshot"] = request.schema_snapshot
+            updated = merge_slot_data(slots, request.model_dump())
+            if request.application_id is not None:
+                # 以服务端核对结果为准回填 canonical ID 与展示名称。
+                updated.application_id = resolved_application[0]
+                updated.application = resolved_application[1] or updated.application
+            record["slots"] = updated.model_dump(mode="json")
+            # 快照选择/切换规则与补充信息一致：冲突显式拒绝，不静默覆盖或拼接。
+            await self._apply_clarify_snapshot(record, request, context, resolved_application[0])
             note = (request.note or "").strip()
             if note:
                 notes = list(record.get("clarification_notes") or [])
                 notes.append(note)
                 record["clarification_notes"] = notes
-        # 应用授权**每次恢复都重新核对**（历史授权不是长期凭据）：按合并后的任务当前应用判定，
-        # 而不是继续沿用上次的结果。未授权时按空串处理（失败关闭，只看组织通用知识）。
-        authorized_application = await self._authorized_application(
-            context, str((record.get("slots") or {}).get("application") or "")
-        )
+        authorized_application, application_binding = resolved_application[0], resolved_application[2]
+        # 已选用的知识快照在恢复执行前重新校验；失效/被删/内容更新则阻断并提示重新选择。
+        self._validate_selected_snapshot(record)
         _apply_input_version(record)
 
         # 下面读检查点是一个 await：期间可能有另一个请求抢先派发。记下此刻的"代际 + 状态"，
@@ -436,11 +512,16 @@ class AgentService:
                 latest["schema_snapshot"] = record["schema_snapshot"]
             if "clarification_notes" in record:
                 latest["clarification_notes"] = record["clarification_notes"]
+            if "selected_snapshot" in record:
+                latest["selected_snapshot"] = record["selected_snapshot"]
+            if "snapshot_source_kind" in record:
+                latest["snapshot_source_kind"] = record["snapshot_source_kind"]
         # 合并后的输入若与最新记录不同，旧的草案/检查结果同样要作废。
         _apply_input_version(latest)
         if mode == RESUME_INTERRUPT:
             value = _resume_value(latest)
         latest["authorized_application"] = authorized_application
+        latest["application_binding"] = application_binding
         latest["awaiting_input"] = False
         latest["status"] = TaskStatus.RUNNING.value
         latest["error"] = None
@@ -889,6 +970,200 @@ class AgentService:
         if not application:
             return ""
         return application if await self._application_authorized(context, application) else ""
+
+
+    async def _verify_application(self, context: TrustedContext, application_id: str) -> dict[str, Any] | None:
+        """向治理服务核对应用授权，通过时返回 {"id","name"}；否则 None（失败关闭）。
+
+        应用 ID 由调用方给出，只是"要访问谁"的声明；是否允许由治理服务按成员与
+        应用授权判定。展示名称也以治理服务返回为准，不信任客户端提交的名称。
+        """
+        application = (application_id or "").strip()
+        token = self._settings.upstream_token.strip()
+        if not application or not token:
+            return None
+        url = f"{self._settings.governance_base_url}/api/agent-tools/applications/{application}"
+        headers = dict(context.as_headers())
+        headers["X-Agent-Upstream-Token"] = token
+        try:
+            async with httpx.AsyncClient(timeout=self._settings.governance_timeout_seconds) as client:
+                response = await client.get(url, headers=headers)
+        except Exception:  # noqa: BLE001 - 核验不了就当作没有授权
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return {"id": application, "name": str(payload.get("name") or "")}
+
+    async def _resolve_request_application(
+        self, context: TrustedContext, request: ClarifyRequest | None, current: TaskSlots
+    ) -> tuple[str, str, str]:
+        """解析补充/恢复请求带来的应用绑定变更，返回 (authorized_application, name, binding)。
+
+        - 请求显式提供 application_id：核对授权，失败抛 `ApplicationNotAuthorized`（不落盘）；
+        - 未提供：按任务当前绑定的 canonical ID 重新核对——撤权或不可达同样阻断，
+          绝不带着上一次的授权结果继续；
+        - 任务从未绑定 canonical ID：legacy（仅名称）/ none，不做应用授权，
+          检索只看组织通用知识。
+        """
+        requested = request.application_id if request is not None else None
+        if requested is not None:
+            requested = requested.strip()
+            if not requested:
+                raise TaskInputInvalid(
+                    "application_id 不能为空串：要更换应用请提供有效应用 ID，或省略该字段保持不变"
+                )
+            verified = await self._verify_application(context, requested)
+            if verified is None:
+                raise ApplicationNotAuthorized(
+                    "无法确认你对所选应用的授权（未授权或治理服务暂不可达），本次操作未生效"
+                )
+            return requested, verified.get("name") or "", "authorized"
+        binding = (current.application_id or "").strip()
+        if not binding:
+            return "", "", ("legacy" if (current.application or "").strip() else "none")
+        verified = await self._verify_application(context, binding)
+        if verified is None:
+            raise ApplicationNotAuthorized(
+                "当前绑定应用的授权核对失败（可能已被撤权或治理服务暂不可达）。"
+                "请重新选择你有权限的应用，或稍后重试"
+            )
+        return binding, verified.get("name") or "", "authorized"
+
+    async def _select_snapshot(
+        self, knowledge_id: str, context: TrustedContext, task_application_id: str
+    ) -> tuple[dict[str, Any], str]:
+        """校验并解析一份可供任务选用的知识库结构快照，返回 (元数据, 正文)。
+
+        校验（失败关闭，逐项给出可执行提示）：
+        - 存在且属于调用方组织（不存在与跨组织同样按"不存在"处理，不提供探测）；
+        - kind 必须是 schema、status 必须是生效中；
+        - 快照绑定应用时，任务必须绑定同一应用（先选应用再选快照）；
+        - 快照的应用授权在任务绑定环节已通过治理服务核对（同一 ID，不重复请求）。
+        正文按不可信数据处理：只进入生成输入，不改变工具权限或治理规则。
+        """
+        record = self._require_knowledge(knowledge_id, context)
+        if str(record.get("kind") or "") != "schema":
+            raise TaskInputInvalid("所选知识不是结构快照（kind=schema），请从结构快照中选择")
+        if str(record.get("status") or "") != "active":
+            raise TaskInputInvalid("所选结构快照已失效，请选择生效中的快照或改用手填快照")
+        knowledge_application = str(record.get("application_id") or "")
+        task_application = (task_application_id or "").strip()
+        if knowledge_application and knowledge_application != task_application:
+            if not task_application:
+                raise TaskInputInvalid("该结构快照属于特定应用：请先为任务选择应用，再选用快照")
+            raise TaskInputInvalid("所选结构快照属于其他应用，请选择当前应用下的快照")
+        return (
+            {
+                "knowledge_id": str(record.get("knowledge_id") or ""),
+                "title": str(record.get("title") or ""),
+                "version": str(record.get("version") or ""),
+                "content_hash": str(record.get("content_hash") or ""),
+                "application_id": knowledge_application,
+                "selected_at": datetime.now(timezone.utc).isoformat(),
+                "selected_by": context.user_id,
+            },
+            str(record.get("body") or ""),
+        )
+
+    def _validate_selected_snapshot(self, record: dict[str, Any]) -> None:
+        """再次执行前复核已选用的知识快照仍然有效（存在、生效、内容未变）。
+
+        快照失效不是"尽力继续"的理由：生成输入将包含这份结构，失效快照会让生成
+        建立在过期事实上。失败时给出可执行的下一步（重新选择或改手填）。
+        """
+        meta = record.get("selected_snapshot")
+        if not meta:
+            return
+        knowledge_id = str(meta.get("knowledge_id") or "")
+        body = self._knowledge.get(knowledge_id)
+        if (
+            body is None
+            or str(body.get("status") or "") != "active"
+            or str(body.get("content_hash") or "") != str(meta.get("content_hash") or "")
+        ):
+            raise TaskInputInvalid(
+                f"所选知识库结构快照已失效或内容已更新（knowledge_id={knowledge_id}）。"
+                "请重新选择生效中的快照，或改用手填快照后再继续"
+            )
+
+    async def _apply_clarify_snapshot(
+        self,
+        record: dict[str, Any],
+        request: ClarifyRequest,
+        context: TrustedContext,
+        application_id: str,
+    ) -> None:
+        """补充/恢复阶段的快照生命周期：切换、清除或替换知识快照与手填快照。
+
+        冲突一律显式拒绝，绝不静默覆盖或拼接：
+        - `snapshot_knowledge_id` 非空：切换为知识快照。已有手填快照时必须同时把
+          schema_snapshot 显式置空，表示"确认替换"；
+        - `snapshot_knowledge_id` 为空串：清除选用；正文来自知识快照时一并清空；
+        - `schema_snapshot` 非空：覆盖手填正文；当前正文来自知识快照时先清除选用；
+        - `schema_snapshot` 空串：清空手填正文。
+        """
+        snapshot_knowledge_id = (request.snapshot_knowledge_id or "").strip()
+        schema_snapshot = request.schema_snapshot
+        current_kind = str(record.get("snapshot_source_kind") or "")
+        events = list(record.get("events") or [])
+
+        if snapshot_knowledge_id:
+            if schema_snapshot is not None and schema_snapshot.strip():
+                raise TaskInputInvalid(
+                    "结构快照只能二选一：不能同时提供 snapshot_knowledge_id 和 schema_snapshot"
+                )
+            if (
+                current_kind == "manual"
+                and str(record.get("schema_snapshot") or "").strip()
+                and schema_snapshot is None
+            ):
+                raise TaskInputInvalid(
+                    "当前已有一份手填快照：如确认改用知识库快照，请在提交 snapshot_knowledge_id 的同时"
+                    "把 schema_snapshot 显式置空（表示确认替换）；或继续使用手填快照"
+                )
+            meta, body = await self._select_snapshot(snapshot_knowledge_id, context, application_id)
+            record["selected_snapshot"] = meta
+            record["snapshot_source_kind"] = "knowledge"
+            record["schema_snapshot"] = body
+            events.append(
+                event(
+                    "snapshot_selected",
+                    f"选用知识库结构快照 {meta.get('title') or ''}"
+                    f"（版本 {meta.get('version') or ''}，knowledge_id={meta.get('knowledge_id')}）",
+                )
+            )
+            record["events"] = events
+            return
+
+        if request.snapshot_knowledge_id is not None:
+            # 空串：显式清除选用；不能再同时提供手填正文（分两步，避免歧义）。
+            if schema_snapshot is not None and schema_snapshot.strip():
+                raise TaskInputInvalid(
+                    "已请求清除知识快照选用，不能同时提供手填 schema_snapshot；请分两步提交"
+                )
+            if current_kind == "knowledge":
+                record["schema_snapshot"] = ""
+                record["snapshot_source_kind"] = ""
+            record["selected_snapshot"] = None
+            events.append(event("snapshot_cleared", "已清除知识库快照选用"))
+            record["events"] = events
+            return
+
+        if schema_snapshot is None:
+            return
+        if current_kind == "knowledge":
+            raise TaskInputInvalid(
+                "当前正文来自知识库快照：请先清除选用（snapshot_knowledge_id 提交空串），再提交手填快照"
+            )
+        record["schema_snapshot"] = schema_snapshot
+        record["snapshot_source_kind"] = "manual" if schema_snapshot.strip() else ""
+        if not schema_snapshot.strip():
+            record["selected_snapshot"] = None
+        record["events"] = events
 
     def _reload_for_mutation(self, task_id: str) -> dict[str, Any]:
         """在等待外部 I/O 之后重新读取记录，用于"基于最新状态合并写入"。
@@ -1553,6 +1828,10 @@ class AgentService:
         `recovery_semantics=at_least_once`（见 `resume` / `clarify`），并把不确定性留在事件里。
         """
         task_id = record["task_id"]
+        # dispatch 前已持久化的事件轨迹：检查点恢复时图返回的事件**不含** dispatch
+        # 之前的增量（clarify 写入的 snapshot_selected/cleared 等），直接覆盖会丢审计；
+        # 结束时用 _merge_event_lists 按最长公共前缀合并（审计只增不减）。
+        pre_events = list(record.get("events") or [])
         initial_state: dict[str, Any] = {
             "task_id": task_id,
             "requirement": _effective_requirement(record),
@@ -1611,7 +1890,7 @@ class AgentService:
             record["questions"] = payload.get("questions") or []
             record["error"] = None
             record["awaiting_input"] = True
-            events = list(result.get("events") or record.get("events") or [])
+            events = _merge_event_lists(pre_events, result.get("events") or record.get("events") or [])
             events.append(event("awaiting_input", "图停在节点级中断上，等待用户补充信息后从该节点继续"))
             record["events"] = events
             _annotate_recovery(record)
@@ -1624,7 +1903,7 @@ class AgentService:
                 "status": result.get("status", TaskStatus.FAILED.value),
                 "questions": result.get("questions") or [],
                 "draft": result.get("draft"),
-                "events": result.get("events") or record.get("events") or [],
+                "events": _merge_event_lists(pre_events, result.get("events") or record.get("events") or []),
                 "revisions": int(result.get("revisions") or 0),
                 "error": result.get("error"),
                 "evidence_note": result.get("evidence_note"),
@@ -1724,8 +2003,10 @@ class AgentService:
         return record
 
     @staticmethod
+    @staticmethod
     def _slots_from_request(request: CreateTaskRequest) -> TaskSlots:
         return TaskSlots(
+            application_id=request.application_id or "",
             application=request.application,
             environment=request.environment,
             database=request.database,
@@ -1736,6 +2017,19 @@ class AgentService:
         )
 
     def _view(self, record: dict[str, Any]) -> TaskView:
+        slots_model = TaskSlots.model_validate(record.get("slots") or {})
+        binding = str(record.get("application_binding") or "")
+        if not binding:
+            # 旧记录没有显式绑定状态：按已核对应用与槽位回退推导（只影响展示，不改存储）。
+            authorized = str(record.get("authorized_application") or "")
+            if authorized and authorized == slots_model.application_id:
+                binding = "authorized"
+            elif slots_model.application_id:
+                binding = "unauthorized"
+            elif (slots_model.application or "").strip():
+                binding = "legacy"
+            else:
+                binding = "none"
         return TaskView.model_validate(
             {
                 "task_id": record["task_id"],
@@ -1752,7 +2046,7 @@ class AgentService:
                 "events": record.get("events") or [],
                 "revisions": int(record.get("revisions") or 0),
                 "error": record.get("error"),
-                "planned_at_missing": "planned_at" in (TaskSlots.model_validate(record.get("slots") or {}).missing()),
+                "planned_at_missing": "planned_at" in slots_model.missing(),
                 "awaiting_input": bool(record.get("awaiting_input")),
                 "resume_mode": record.get("resume_mode"),
                 # 恢复的执行语义：外部模型请求不保证 exactly-once，恢复过就是 at-least-once。
@@ -1765,6 +2059,11 @@ class AgentService:
                 "strategy": record.get("strategy") or self._settings.investigation_strategy,
                 "investigation": record.get("investigation"),
                 "usage": record.get("usage"),
+                # 应用绑定与身份：canonical ID、绑定状态、选用的知识快照溯源。
+                "application_binding": binding,
+                "authorized_application": record.get("authorized_application") or "",
+                "selected_snapshot": record.get("selected_snapshot"),
+                "snapshot_source_kind": str(record.get("snapshot_source_kind") or ""),
             }
         )
 
@@ -1872,7 +2171,13 @@ def _material_summary(draft: dict[str, Any]) -> str:
 
 
 def _draft_version_entry(
-    draft: dict[str, Any], *, origin: str, actor: str, reason: str, created_at: datetime | None = None
+    draft: dict[str, Any],
+    *,
+    origin: str,
+    actor: str,
+    reason: str,
+    created_at: datetime | None = None,
+    snapshot_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """把一份草案物化成不可变版本快照。"""
     check = draft.get("deterministic_check") or {}
@@ -1892,6 +2197,8 @@ def _draft_version_entry(
         "check_blocking_count": int(check.get("blocking_count") or 0),
         "evidence_ids": [str(item.get("evidence_id")) for item in (draft.get("evidence") or [])],
         "revision_notes": list(draft.get("revision_notes") or []),
+        # 快照溯源：该版本草案依据的知识快照（元数据+内容摘要），历史版本不随后续变更漂移。
+        "snapshot_source": snapshot_source,
     }
 
 
@@ -1913,7 +2220,14 @@ def _record_draft_version(
     resolved = draft if draft is not None else (record.get("draft") or {})
     if not resolved:
         return False
-    entry = _draft_version_entry(resolved, origin=origin, actor=actor, reason=reason, created_at=created_at)
+    entry = _draft_version_entry(
+        resolved,
+        origin=origin,
+        actor=actor,
+        reason=reason,
+        created_at=created_at,
+        snapshot_source=record.get("selected_snapshot"),
+    )
     versions = list(record.get("draft_versions") or [])
     if origin == "agent" and versions and versions[-1].get("content_hash") == entry["content_hash"]:
         return False
@@ -1935,6 +2249,34 @@ def _invalidate_stale_confirmations(record: dict[str, Any], reason: str) -> bool
             item["invalidate_reason"] = reason
             changed = True
     return changed
+
+
+def _same_event(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """事件相等：at/kind/detail 逐值比较（at 带微秒时间戳，碰撞概率可忽略）。"""
+    return (
+        left.get("at") == right.get("at")
+        and left.get("kind") == right.get("kind")
+        and left.get("detail") == right.get("detail")
+    )
+
+
+def _merge_event_lists(pre: list[dict[str, Any]], produced: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """合并 dispatch 前的事件轨迹与图执行返回的事件轨迹，审计只增不减。
+
+    - 全新执行：图从 initial_state 出发，produced 完整继承 pre，前缀逐项相等，
+      直接采用 produced（pre + produced[common:] 恰好还原 produced，不重复）。
+    - 检查点恢复：produced 只含检查点里的旧轨迹与恢复后的增量，**不含** dispatch 前
+      写入的增量（clarified / snapshot_selected / snapshot_cleared 等）→ 取最长公共
+      前缀后拼接，避免用旧轨迹覆盖掉补充信息阶段新写入的审计事件。
+    """
+    if not produced:
+        return list(pre)
+    common = 0
+    for old, new in zip(pre, produced):
+        if not _same_event(old, new):
+            break
+        common += 1
+    return list(pre) + list(produced[common:])
 
 
 def _resume_value(record: dict[str, Any]) -> dict[str, Any]:
