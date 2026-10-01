@@ -375,3 +375,96 @@ def test_draft_versions_carry_snapshot_provenance():
     entry = record["draft_versions"][0]
     assert entry["snapshot_source"]["knowledge_id"] == "k1"
     assert entry["snapshot_source"]["content_hash"] == "abc"
+
+def test_clarify_rejects_snapshot_id_and_manual_body_together(service, context, monkeypatch):
+    """二选一：同一个请求里既选知识快照又给手填正文，必须显式拒绝，不能猜用户想用哪个。"""
+    grant_applications(service, monkeypatch, allowed={"app-orders"})
+    snap = import_snapshot(service, context, application_id="app-orders")
+    view, _ = run(service.create_task(bare_request(application_id="app-orders"), context))
+
+    with pytest.raises(TaskInputInvalid, match="二选一"):
+        run(
+            service.clarify(
+                view.task_id,
+                ClarifyRequest(snapshot_knowledge_id=snap.knowledge_id, schema_snapshot=MANUAL_BODY),
+                context,
+            )
+        )
+    stored = service._repository.get(view.task_id)
+    assert stored.get("selected_snapshot") in (None, {}) or not stored.get("selected_snapshot")
+    assert stored.get("schema_snapshot") in (None, ""), "被拒绝的请求不得留下任何快照正文"
+
+
+def test_clarify_clear_selection_rejects_simultaneous_manual_body(service, context, monkeypatch):
+    """清除选用与给手填正文是两步：一步做完会让"清空"与"替换"语义混淆，必须分两步。"""
+    grant_applications(service, monkeypatch, allowed={"app-orders"})
+    snap = import_snapshot(service, context, application_id="app-orders")
+    view, _ = run(
+        service.create_task(
+            bare_request(application_id="app-orders", snapshot_knowledge_id=snap.knowledge_id), context
+        )
+    )
+
+    with pytest.raises(TaskInputInvalid, match="清除"):
+        run(
+            service.clarify(
+                view.task_id,
+                ClarifyRequest(snapshot_knowledge_id="", schema_snapshot=MANUAL_BODY),
+                context,
+            )
+        )
+    stored = service._repository.get(view.task_id)
+    assert stored["selected_snapshot"]["knowledge_id"] == snap.knowledge_id, "被拒绝的请求不得改变选用状态"
+
+
+def test_clarify_switch_to_knowledge_snapshot_requires_explicit_manual_clear(service, context, monkeypatch):
+    """当前是手填快照时改用知识快照，必须把 schema_snapshot 显式置空表示确认替换。"""
+    grant_applications(service, monkeypatch, allowed={"app-orders"})
+    snap = import_snapshot(service, context, application_id="app-orders")
+    view, _ = run(
+        service.create_task(
+            bare_request(application_id="app-orders", schema_snapshot=MANUAL_BODY), context
+        )
+    )
+    stored = service._repository.get(view.task_id)
+    assert stored["snapshot_source_kind"] == "manual"
+
+    # 没有显式置空：拒绝，并说明该怎么做。
+    with pytest.raises(TaskInputInvalid, match="显式置空"):
+        run(
+            service.clarify(
+                view.task_id, ClarifyRequest(snapshot_knowledge_id=snap.knowledge_id), context
+            )
+        )
+    assert service._repository.get(view.task_id)["snapshot_source_kind"] == "manual"
+
+    # 显式置空表示确认替换：此时才允许切换，并记录快照溯源。
+    run(
+        service.clarify(
+            view.task_id,
+            ClarifyRequest(snapshot_knowledge_id=snap.knowledge_id, schema_snapshot=""),
+            context,
+        )
+    )
+    replaced = service._repository.get(view.task_id)
+    assert replaced["snapshot_source_kind"] == "knowledge"
+    assert replaced["selected_snapshot"]["knowledge_id"] == snap.knowledge_id
+    assert replaced["schema_snapshot"] == SCHEMA_BODY, "切换后正文化为知识快照内容"
+
+
+def test_clarify_manual_body_only_path_marks_source(service, context, monkeypatch):
+    """只给手填正文（不涉及知识快照）：来源标记为 manual，且不写 selected_snapshot。"""
+    grant_applications(service, monkeypatch, allowed={"app-orders"})
+    view, _ = run(service.create_task(bare_request(application_id="app-orders"), context))
+
+    run(service.clarify(view.task_id, ClarifyRequest(schema_snapshot=MANUAL_BODY), context))
+    stored = service._repository.get(view.task_id)
+    assert stored["schema_snapshot"] == MANUAL_BODY
+    assert stored["snapshot_source_kind"] == "manual"
+    assert not stored.get("selected_snapshot"), "手填快照不应产生知识快照溯源"
+
+    # 手填正文置空：来源回到未提供。
+    run(service.clarify(view.task_id, ClarifyRequest(schema_snapshot=""), context))
+    cleared = service._repository.get(view.task_id)
+    assert cleared["schema_snapshot"] == ""
+    assert cleared["snapshot_source_kind"] == ""
