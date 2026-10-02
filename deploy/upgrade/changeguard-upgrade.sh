@@ -1,29 +1,18 @@
 #!/usr/bin/env bash
-# ChangeGuard 一键升级脚本
+# ChangeGuard 核心升级（Python Agent 必须另行同步部署）
 #
-# 用法：
-#   sudo bash changeguard-upgrade.sh \
-#     --version 2026.08.10.1 \
-#     --archive-url https://github.com/<owner>/<repo>/releases/download/v2026.08.10.1/changeguard-2026.08.10.1.tar.gz \
-#     --expected-sha256 <64位哈希> \
-#     [--release-root /opt/changeguard/releases] \
-#     [--current-link /opt/changeguard/current] \
-#     [--service changeguard] \
-#     [--health-url http://127.0.0.1:8080/health/ready] \
-#     [--keep-archives 3]
-#
-# 流程：
-#   1. 下载升级包并校验 SHA256
-#   2. 调用 changeguard-core-install.sh 原子安装到 releases/<release_id>
-#   3. 备份当前软链指向的 release
-#   4. 切换 current 软链 → systemctl restart
-#   5. 健康检查（默认 60s）；失败自动回滚到上一版本
-#   6. 清理旧版本（保留最近 N 个）
+# 用法：sudo bash deploy/upgrade/changeguard-upgrade.sh \
+#   --version 3.1.3 \
+#   --archive-url https://github.com/<owner>/<repo>/releases/download/v3.1.3/changeguard-3-1-3.tar.gz \
+#   --expected-sha256 <64位哈希>
+# 可选：--release-root --current-link --service --health-url
+#       --health-timeout（默认 60 秒） --keep-archives（默认 3，至少 2）
+# 必须已有可回滚版本。脚本不备份数据，不执行数据库迁移。
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRODUCTION_DIR="$(cd "$SCRIPT_DIR/../production" && pwd)"
-
 version=""
 archive_url=""
 expected_sha256=""
@@ -34,116 +23,119 @@ health_url="http://127.0.0.1:8080/health/ready"
 health_timeout=60
 keep_archives=3
 
-usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-  exit 64
-}
-
+fail() { printf 'upgrade_error=%s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --version) version="$2"; shift 2 ;;
-    --archive-url) archive_url="$2"; shift 2 ;;
-    --expected-sha256) expected_sha256="$2"; shift 2 ;;
-    --release-root) release_root="$2"; shift 2 ;;
-    --current-link) current_link="$2"; shift 2 ;;
-    --service) service_name="$2"; shift 2 ;;
-    --health-url) health_url="$2"; shift 2 ;;
-    --health-timeout) health_timeout="$2"; shift 2 ;;
-    --keep-archives) keep_archives="$2"; shift 2 ;;
-    -h|--help) usage ;;
-    *) printf 'unknown option: %s\n' "$1" >&2; usage ;;
+    -h|--help) usage; exit 0 ;;
+    --version|--archive-url|--expected-sha256|--release-root|--current-link|--service|--health-url|--health-timeout|--keep-archives)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || fail "missing value for $1"
+      case "$1" in
+        --version) version="$2" ;;
+        --archive-url) archive_url="$2" ;;
+        --expected-sha256) expected_sha256="$2" ;;
+        --release-root) release_root="$2" ;;
+        --current-link) current_link="$2" ;;
+        --service) service_name="$2" ;;
+        --health-url) health_url="$2" ;;
+        --health-timeout) health_timeout="$2" ;;
+        --keep-archives) keep_archives="$2" ;;
+      esac
+      shift 2 ;;
+    *) fail "unknown option: $1" ;;
   esac
 done
 
-[ -n "$version" ] || { printf '--version is required\n' >&2; usage; }
-[ -n "$archive_url" ] || { printf '--archive-url is required\n' >&2; usage; }
-[ -n "$expected_sha256" ] || { printf '--expected-sha256 is required\n' >&2; usage; }
-[[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || { printf 'expected-sha256 must be 64 hex chars\n' >&2; exit 1; }
-[ "$(id -u)" -eq 0 ] || { printf 'must run as root\n' >&2; exit 1; }
-
+# Release 工作流使用连字符目录，但标签使用语义版本；兼容两种命令行写法。
+if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  version="${version//./-}"
+fi
+[[ "$version" =~ ^[0-9]+-[0-9]+-[0-9]+$ ]] || fail 'version must use X.Y.Z or X-Y-Z'
+[[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || fail 'expected-sha256 must be 64 hex chars'
+[[ "$archive_url" == https://* ]] || fail 'archive-url must use HTTPS'
+[[ "$health_url" == http://* || "$health_url" == https://* ]] || fail 'invalid health-url'
+[[ "$health_timeout" =~ ^[1-9][0-9]{0,3}$ ]] || fail 'health-timeout must be 1..9999'
+[[ "$keep_archives" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$keep_archives" -ge 2 ] || fail 'keep-archives must be 2..999'
+[[ "$service_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.@-]*$ ]] || fail 'invalid service name'
+[[ "$release_root" == /* && "$current_link" == /* ]] || fail 'release-root and current-link must be absolute'
+[ "$(id -u)" -eq 0 ] || fail 'must run as root'
+for tool in curl python3 sha256sum systemctl flock; do
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
+done
+[ -d "$release_root" ] && [ ! -L "$release_root" ] || fail 'release-root must be an existing directory, not a symlink'
+release_root="$(readlink -f -- "$release_root")"
+case "$release_root" in /|/opt|/opt/changeguard|/etc|/usr|/var) fail 'unsafe release-root' ;; esac
+[ "$(stat -c %u -- "$release_root")" -eq 0 ] || fail 'release-root must be owned by root'
+root_mode="$(stat -c %a -- "$release_root")"
+(( (8#$root_mode & 022) == 0 )) || fail 'release-root must not be group/world writable'
+# 与 watcher 共用锁；不允许安装、切换和清理交错。
+[ ! -L "$release_root/.upgrade.lock" ] || fail 'upgrade lock must not be a symlink'
+exec 9>"$release_root/.upgrade.lock"
+flock -n 9 || fail 'another upgrade is running'
+[ -L "$current_link" ] || fail 'current-link must reference an existing release'
+current_target="$(readlink -e -- "$current_link")" || fail 'current release is missing'
+[ -d "$current_target" ] && [ "$(dirname "$current_target")" = "$release_root" ] || fail 'current release must be directly inside release-root'
+current_id="$(basename "$current_target")"
+[[ "$current_id" == changeguard-* ]] || fail 'unexpected current release name'
 release_id="changeguard-${version}"
-archive="/tmp/changeguard-${version}.tar.gz"
-download_dir="/var/cache/changeguard-upgrades"
+[ ! -e "$release_root/$release_id" ] && [ ! -L "$release_root/$release_id" ] || fail 'release target already exists'
 install_script="$PRODUCTION_DIR/changeguard-core-install.sh"
+[ -f "$install_script" ] || fail "install script missing: $install_script"
 
-[ -f "$install_script" ] || { printf 'install script missing: %s\n' "$install_script" >&2; exit 1; }
-
-printf '==> ChangeGuard upgrade to %s\n' "$version"
-printf '    archive: %s\n' "$archive_url"
-
-# 1. 下载
-install -d -m 0755 "$download_dir"
-if [ -f "$archive" ]; then
-  printf '==> Using cached archive %s\n' "$archive"
-else
-  printf '==> Downloading upgrade archive...\n'
-  command -v curl >/dev/null 2>&1 || { printf 'curl is required\n' >&2; exit 1; }
-  curl -fL --retry 3 --connect-timeout 15 -o "$archive.part" "$archive_url"
-  mv "$archive.part" "$archive"
-fi
-
-# 2. 校验下载包 SHA256
+# 私有临时目录放在 release-root 内，避免 root 写入可预测的 /tmp 文件。
+download_dir="$(mktemp -d "$release_root/.download-XXXXXX")"
+link_tmp="${current_link}.upgrade-$$"
+cleanup() {
+  rm -f -- "$link_tmp"
+  rm -rf -- "$download_dir"
+}
+trap cleanup EXIT
+archive="$download_dir/$release_id.tar.gz"
+printf '==> Downloading %s\n' "$release_id"
+curl -fL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 -o "$archive" "$archive_url"
 actual="$(sha256sum "$archive" | awk '{print $1}')"
-if [ "$actual" != "$expected_sha256" ]; then
-  printf 'error: archive SHA256 mismatch\n  expected: %s\n  actual:   %s\n' "$expected_sha256" "$actual" >&2
-  rm -f "$archive"
-  exit 1
-fi
-printf '==> Archive SHA256 verified (%s)\n' "${actual:0:16}…"
-
-# 3. 原子安装到 releases/<release_id>
-printf '==> Installing release %s ...\n' "$release_id"
+[ "$actual" = "$expected_sha256" ] || fail 'archive SHA256 mismatch'
 bash "$install_script" "$archive" "$expected_sha256" "$release_root" "$release_id"
 
-# 4. 记录当前版本（备份用）
-current_target="$(readlink -f "$current_link" 2>/dev/null || true)"
-current_id="$(basename "$current_target" 2>/dev/null || echo none)"
-printf '==> Current release: %s\n' "$current_id"
-
-# 5. 切换软链
-printf '==> Switching %s -> %s/%s ...\n' "$current_link" "$release_root" "$release_id"
-ln -sfn "$release_root/$release_id" "$current_link"
-printf '==> Restarting %s.service ...\n' "$service_name"
-systemctl restart "$service_name"
-
-# 6. 健康检查 + 自动回滚
-printf '==> Waiting for healthy start (timeout %ss)...\n' "$health_timeout"
-healthy=0
-for i in $(seq 1 "$health_timeout"); do
-  if curl -sf --max-time 2 "$health_url" >/dev/null 2>&1; then
-    healthy=1
-    break
-  fi
-  sleep 1
-done
-
-if [ "$healthy" -eq 1 ]; then
-  printf '==> Health check passed. Upgrade to %s complete.\n' "$version"
-  systemctl --no-pager --lines=5 status "$service_name" | tail -6 || true
-else
-  printf 'error: health check failed after %ss\n' "$health_timeout" >&2
-  if [ -n "$current_id" ] && [ "$current_id" != "none" ]; then
-    printf '==> Rolling back to %s ...\n' "$current_id"
-    ln -sfn "$release_root/$current_id" "$current_link"
-    systemctl restart "$service_name"
-    sleep 3
-    if curl -sf --max-time 5 "$health_url" >/dev/null 2>&1; then
-      printf '==> Rollback to %s successful.\n' "$current_id"
-    else
-      printf 'error: rollback also failed; manual intervention required\n' >&2
-      exit 1
+switch_release() {
+  ln -s -- "$1" "$link_tmp" && mv -Tf -- "$link_tmp" "$current_link"
+}
+wait_healthy() {
+  local deadline=$((SECONDS + health_timeout))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if curl -sf --max-time 2 "$health_url" >/dev/null 2>&1; then
+      return 0
     fi
+    sleep 1
+  done
+  return 1
+}
+
+printf '==> Switching to %s (previous: %s)\n' "$release_id" "$current_id"
+switch_release "$release_root/$release_id" || fail 'could not switch current-link'
+# restart 必须位于显式条件中；否则 set -e 会在回滚前终止脚本。
+if systemctl restart "$service_name" && wait_healthy; then
+  printf '==> Health check passed.\n'
+else
+  printf 'error: restart or health check failed; rolling back to %s\n' "$current_id" >&2
+  if switch_release "$current_target" && systemctl restart "$service_name" && wait_healthy; then
+    printf 'upgrade_status=rolled_back version=%s previous=%s\n' "$version" "$current_id" >&2
+  else
+    printf 'upgrade_status=rollback_failed version=%s previous=%s manual_intervention_required=true\n' "$version" "$current_id" >&2
   fi
   exit 1
 fi
 
-# 7. 清理旧版本（保留最近 N 个 release）
-printf '==> Pruning old releases (keep %s)...\n' "$keep_archives"
-ls -1dt "$release_root"/changeguard-* 2>/dev/null | tail -n +"$((keep_archives + 1))" | while read -r old; do
-  if [ "$(readlink -f "$current_link")" != "$old" ]; then
-    printf '    removing %s\n' "$(basename "$old")"
+# 保留当前和上一版本，再按 mtime 留最近版本；只删除真实直属目录。
+retained=2
+while IFS= read -r -d '' entry; do
+  old="${entry#* }"
+  [ "$old" != "$current_target" ] && [ "$old" != "$release_root/$release_id" ] || continue
+  if [ "$retained" -lt "$keep_archives" ]; then
+    retained=$((retained + 1))
+  else
+    printf '==> Removing old release %s\n' "$(basename "$old")"
     rm -rf -- "$old"
   fi
-done
-
+done < <(find "$release_root" -mindepth 1 -maxdepth 1 -type d -name 'changeguard-*' -printf '%T@ %p\0' | sort -z -nr)
 printf 'upgrade_status=ok version=%s\n' "$version"

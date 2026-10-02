@@ -76,26 +76,65 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
 }
 
+wait_healthy() {
+  local deadline=$((SECONDS + HEALTH_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if curl -sf --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+switch_release() {
+  local temporary="${CURRENT_LINK}.upgrade-$$"
+  ln -s -- "$1" "$temporary" && mv -Tf -- "$temporary" "$CURRENT_LINK"
+}
+trap 'rm -f -- "${CURRENT_LINK}.upgrade-$$"' EXIT
+
+[ "$(id -u)" -eq 0 ] || { log 'must run as root'; exit 1; }
+[[ "$HEALTH_TIMEOUT" =~ ^[1-9][0-9]{0,3}$ ]] || { log 'invalid health timeout'; exit 1; }
+[[ "$RELEASE_ROOT" == /* && "$CURRENT_LINK" == /* ]] || { log 'release paths must be absolute'; exit 1; }
+[ -d "$RELEASE_ROOT" ] && [ ! -L "$RELEASE_ROOT" ] || { log 'invalid release root'; exit 1; }
+RELEASE_ROOT="$(readlink -f -- "$RELEASE_ROOT")"
+case "$RELEASE_ROOT" in /|/opt|/opt/changeguard|/etc|/usr|/var) log 'unsafe release root'; exit 1 ;; esac
+[ "$(stat -c %u -- "$RELEASE_ROOT")" -eq 0 ] || { log 'release root must be owned by root'; exit 1; }
+root_mode="$(stat -c %a -- "$RELEASE_ROOT")"
+(( (8#$root_mode & 022) == 0 )) || { log 'release root must not be group/world writable'; exit 1; }
+command -v flock >/dev/null 2>&1 || { log 'flock is required'; exit 1; }
+[ ! -L "$RELEASE_ROOT/.upgrade.lock" ] || { log 'upgrade lock must not be a symlink'; exit 1; }
+
 [ -f "$INSTALL_SCRIPT" ] || INSTALL_SCRIPT="$(find /opt/changeguard -name changeguard-core-install.sh 2>/dev/null | head -1)"
 [ -n "$INSTALL_SCRIPT" ] && [ -f "$INSTALL_SCRIPT" ] || { log "install script not found"; exit 1; }
 
 log "upgrade watcher started root=$UPGRADE_ROOT install=$INSTALL_SCRIPT"
 
 while true; do
+  # 每轮释放上一次操作的锁，CLI 与 watcher 使用同一把锁。
+  exec 9>&-
   if [ ! -f "$TRIGGER_FILE" ]; then
+    sleep "$POLL_INTERVAL"
+    continue
+  fi
+
+  exec 9>"$RELEASE_ROOT/.upgrade.lock"
+  if ! flock -n 9; then
     sleep "$POLL_INTERVAL"
     continue
   fi
 
   archive_name="$(cat "$TRIGGER_FILE" 2>/dev/null || true)"
   rm -f "$TRIGGER_FILE"
-  if [ -z "$archive_name" ]; then
-    log "trigger missing archive name"
+  if [[ ! "$archive_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.tar\.gz$ ]]; then
+    log "invalid archive name"
+    json_set state failed
+    json_set message "升级包文件名无效"
     continue
   fi
 
   archive="$PENDING_DIR/$archive_name"
-  if [ ! -f "$archive" ]; then
+  if [ ! -f "$archive" ] || [ -L "$archive" ]; then
     log "archive missing: $archive"
     json_set state failed
     json_set message "升级包文件缺失: $archive_name"
@@ -105,8 +144,14 @@ while true; do
   # 校验状态文件中的 SHA256（Go 服务上传时写入）
   expected_sha="$(json_get archive_sha256)"
   version="$(json_get version)"
+  if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then version="${version//./-}"; fi
+  if [[ ! "$version" =~ ^[0-9]+-[0-9]+-[0-9]+$ ]]; then
+    json_set state failed
+    json_set message "升级版本号无效"
+    continue
+  fi
   actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
-  if [ -z "$expected_sha" ] || [ "$actual_sha" != "$expected_sha" ]; then
+  if [[ ! "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || [ "$actual_sha" != "$expected_sha" ]; then
     log "archive sha256 mismatch: $actual_sha vs $expected_sha"
     json_set state failed
     json_set message "升级包校验失败（SHA256 不匹配）"
@@ -114,19 +159,21 @@ while true; do
   fi
 
   release_id="changeguard-${version}"
-  previous_target="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
-  previous_id="$(basename "$previous_target" 2>/dev/null || echo "")"
+  previous_target="$(readlink -e -- "$CURRENT_LINK" 2>/dev/null || true)"
+  previous_id="$(basename "$previous_target")"
+  if [ ! -L "$CURRENT_LINK" ] || [ ! -d "$previous_target" ] || [ "$(dirname "$previous_target")" != "$RELEASE_ROOT" ] || [[ "$previous_id" != changeguard-* ]]; then
+    json_set state failed
+    json_set message "缺少有效的上一版本，拒绝无法回滚的升级"
+    record_history "$version" failed "上一版本无效" "$previous_id"
+    continue
+  fi
   log "applying upgrade version=$version archive=$archive_name"
 
   json_set state applying
   json_set message "正在安装 $version ..."
   json_set previous_version "$previous_id"
 
-  if bash "$INSTALL_SCRIPT" "$archive" "$actual_sha" "$RELEASE_ROOT" "$release_id"; then
-    log "install ok, switching symlink"
-    ln -sfn "$RELEASE_ROOT/$release_id" "$CURRENT_LINK"
-    systemctl restart "$SERVICE_NAME"
-  else
+  if ! bash "$INSTALL_SCRIPT" "$archive" "$actual_sha" "$RELEASE_ROOT" "$release_id"; then
     log "install failed"
     json_set state failed
     json_set message "升级包安装失败，请检查日志"
@@ -134,30 +181,31 @@ while true; do
     continue
   fi
 
-  # 健康检查 + 自动回滚
-  healthy=0
-  for i in $(seq 1 "$HEALTH_TIMEOUT"); do
-    if curl -sf --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
-      healthy=1
-      break
-    fi
-    sleep 1
-  done
+  if ! switch_release "$RELEASE_ROOT/$release_id"; then
+    json_set state failed
+    json_set message "切换版本失败，需人工检查"
+    record_history "$version" failed "切换版本失败" "$previous_id"
+    continue
+  fi
 
-  if [ "$healthy" -eq 1 ]; then
+  # 显式处理 restart 的非零退出，不能让 set -e 跳过回滚。
+  if systemctl restart "$SERVICE_NAME" && wait_healthy; then
     log "health check passed, upgrade complete"
     json_set state success
     json_set message "升级成功：$version"
     record_history "$version" success "健康检查通过" "$previous_id"
     rm -f "$archive"
   else
-    log "health check failed, rolling back to $previous_id"
-    json_set state rollback
-    json_set message "健康检查失败，已回滚到 $previous_id"
-    if [ -n "$previous_id" ]; then
-      ln -sfn "$RELEASE_ROOT/$previous_id" "$CURRENT_LINK"
-      systemctl restart "$SERVICE_NAME"
+    log "restart or health check failed, rolling back to $previous_id"
+    json_set message "新版本启动失败，正在回滚到 $previous_id"
+    if switch_release "$previous_target" && systemctl restart "$SERVICE_NAME" && wait_healthy; then
+      json_set message "升级失败；已回滚到 $previous_id 并通过健康检查"
+      json_set state rollback
+      record_history "$version" rollback "上一版本健康检查通过" "$previous_id"
+    else
+      json_set message "升级失败且回滚未恢复健康，需人工处理"
+      json_set state failed
+      record_history "$version" failed "回滚失败，需人工处理" "$previous_id"
     fi
-    record_history "$version" rollback "健康检查失败，自动回滚" "$previous_id"
   fi
 done
