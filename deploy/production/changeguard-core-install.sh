@@ -130,7 +130,7 @@ find "$extracted" -type d -exec chmod 0755 {} +
 find "$extracted" -type f -exec chmod 0644 {} +
 chmod 0755 "$extracted/dbguard"
 
-python3 - "$extracted" <<'PY'
+python3 - "$extracted" "$release_id" <<'PY'
 import json
 import pathlib
 import re
@@ -167,6 +167,10 @@ if verification.get("schema") != "changeguard-core-verification/v1" or verificat
 for field in ("version", "tag", "commit", "source_sha256"):
     if not manifest.get(field) or manifest.get(field) != verification.get(field):
         raise SystemExit(f"release identity mismatch: {field}")
+if sys.argv[2] != f"changeguard-{manifest['version']}":
+    raise SystemExit("release directory does not match manifest version")
+if manifest['tag'] != 'v' + manifest['version'].replace('-', '.'):
+    raise SystemExit("release tag does not match manifest version")
 artifact = manifest.get("files", {}).get("dbguard", "")
 if not re.fullmatch(r"[0-9a-f]{64}", artifact):
     raise SystemExit("release manifest artifact digest is invalid")

@@ -122,9 +122,25 @@ jobs:
       - name: Build agent container image
         run: docker build -t changeguard-agent:ci -f agent-app/Dockerfile .
 
+  quality-deploy:
+    name: quality-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check upgrade shell syntax
+        run: |
+          bash -n deploy/production/changeguard-core-install.sh
+          bash -n deploy/upgrade/changeguard-upgrade.sh
+          bash -n deploy/upgrade/changeguard-upgrade-watcher.sh
+      - name: Exercise isolated install and rollback failures
+        run: sudo python3 -B -m unittest discover -s tests/deploy -v
+
   quality:
     name: quality
-    needs: [quality-go, quality-js, quality-agent]
+    needs: [quality-go, quality-js, quality-agent, quality-deploy]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -133,6 +149,7 @@ jobs:
           test "${{ needs.quality-go.result }}" = "success"
           test "${{ needs.quality-js.result }}" = "success"
           test "${{ needs.quality-agent.result }}" = "success"
+          test "${{ needs.quality-deploy.result }}" = "success"
 
   integration:
     name: integration

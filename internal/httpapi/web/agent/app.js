@@ -634,6 +634,18 @@ function adoptTask(task) {
   const previous = state.task;
   if (JSON.stringify(previous) !== JSON.stringify(task)) invalidateDeletePreview();
   const sameTask = previous && previous.task_id === task.task_id;
+  const sameApplication = sameTask && (previous.slots?.application_id || "") === (task.slots?.application_id || "");
+  if (!sameTask) {
+    state.changeRecovery = null;
+    state.agentChanges = [];
+    agentChangesGeneration++;
+  }
+  if (!sameApplication) {
+    state.knowledgeList = [];
+    state.knowledgeListState = "idle";
+    knowledgeListGeneration++;
+    selectSnapshot.confirming = null;
+  }
   const sameDraft = sameTask && JSON.stringify(previous.draft || null) === JSON.stringify(task.draft || null);
   if (!sameDraft) resetEdits();
   if (!sameTask || !sameDraft) {
@@ -659,6 +671,8 @@ function adoptTask(task) {
     loadVersions();
     loadAgentChanges();
   }
+  if (!sameApplication) loadKnowledgeList();
+  else renderKnowledgeList();
   if (TERMINAL.has(task.status) || isTaskReadOnly(task)) {
     stopPolling();
   } else {
@@ -1644,15 +1658,22 @@ function appName(applicationId) {
 async function loadKnowledgeList() {
   const host = $("knowledgeListHost");
   if (!host) return;
+  const generation = ++knowledgeListGeneration;
+  const taskID = state.task && state.task.task_id;
   host.innerHTML = '<p class="note-inline">正在加载知识列表…</p>';
   // 应用专属知识只有提供应用 ID 时服务端才返回（逐条核对授权，失败关闭）。
   // 列表随当前任务绑定的应用加载；无绑定任务时只展示组织通用知识。
   const taskApp = (state.task && ((state.task.slots && state.task.slots.application_id) || "")) || "";
+  const isCurrent = () => generation === knowledgeListGeneration
+    && taskID === (state.task && state.task.task_id)
+    && taskApp === (state.task?.slots?.application_id || "");
   try {
     const items = await api("/api/agent/knowledge" + (taskApp ? `?application_id=${encodeURIComponent(taskApp)}` : ""));
+    if (!isCurrent()) return;
     state.knowledgeList = Array.isArray(items) ? items : [];
     state.knowledgeListState = "ready";
   } catch (error) {
+    if (!isCurrent()) return;
     state.knowledgeList = [];
     state.knowledgeListState = "error";
     if (error.status === 401) { handleActionError(error); return; }
@@ -1673,14 +1694,13 @@ function renderKnowledgeList() {
   }
   const task = state.task;
   const selectedId = task && task.selected_snapshot ? task.selected_snapshot.knowledge_id : "";
-  // 服务端只允许 NEEDS_INFO / CHECK_BLOCKED / FAILED(或无草案)状态补充信息；
-  // DRAFT_READY 是确认阶段，补充入口不渲染——否则按钮出现但提交必然失败。
-  const canClarifyState = task && (!task.draft || RESUMABLE.has(task.status));
-  const canSelect = task && !isTaskReadOnly(task) && canClarifyState;
+  // 快照选用走 clarify：只对服务端可补充信息的任务状态开放。
+  const canSelect = canSelectSnapshot(task);
   const kindLabel = { norms: "规范", cases: "案例", schema: "结构快照" };
   host.innerHTML = items.map((item) => {
     const isSelected = selectedId && item.knowledge_id === selectedId;
-    const selectable = canSelect && item.kind === "schema" && item.status === "active" && !isSelected;
+    const selectable = canSelect && item.kind === "schema" && item.status === "active" && !isSelected
+      && (!item.application_id || item.application_id === (task.slots?.application_id || ""));
     return `
       <div class="check-item knowledge-row">
         <span class="check-code">${esc(item.title)}${item.version ? ` <span class="note-inline">v${esc(item.version)}</span>` : ""}</span>
@@ -1701,7 +1721,7 @@ function renderKnowledgeList() {
 /** 选用知识库结构快照：走 clarify（服务端校验应用匹配、有效性、二选一冲突）。 */
 async function selectSnapshot(knowledgeId, replaceManual) {
   const task = state.task;
-  if (!task || state.busy || isTaskReadOnly(task)) return;
+  if (!canSelectSnapshot(task) || state.busy) return;
   // 当前正文来自手填快照时，替换需要显式确认（服务端要求同时置空 schema_snapshot）。
   if (replaceManual && !selectSnapshot.confirming) {
     selectSnapshot.confirming = knowledgeId;
@@ -1713,6 +1733,10 @@ async function selectSnapshot(knowledgeId, replaceManual) {
   const payload = { snapshot_knowledge_id: knowledgeId };
   if (replaceManual || task.snapshot_source_kind === "manual") payload.schema_snapshot = "";
   await clarify(payload);
+}
+
+function canSelectSnapshot(task) {
+  return Boolean(task && !isTaskReadOnly(task) && RESUMABLE.has(task.status));
 }
 
 /** 应用绑定状态卡：legacy 历史任务必须显式重新选择，unauthorized 必须重新授权，绝不模糊匹配。 */
@@ -1744,10 +1768,7 @@ function renderBindingCard(task) {
 
 /** 结构快照卡：显示当前来源，提供知识快照切换 / 清除与手填替换入口。 */
 function renderSnapshotCard(task) {
-  if (isTaskReadOnly(task)) return "";
-  // DRAFT_READY 是确认阶段:服务端不允许此状态补充信息,更新快照的入口不渲染,
-  // 否则按钮出现但提交必然 409。可恢复状态(或无草案)才显示。
-  if (task.draft && !RESUMABLE.has(task.status)) return "";
+  if (!canSelectSnapshot(task)) return "";
   const selected = task.selected_snapshot;
   const kind = task.snapshot_source_kind || "";
   const current = selected
@@ -1783,7 +1804,7 @@ function renderSnapshotCard(task) {
 /** 提交结构快照变更（clarify）。服务端会校验二选一、应用匹配与有效性。 */
 async function applySnapshotChange() {
   const task = state.task;
-  if (!task || state.busy || isTaskReadOnly(task)) return;
+  if (!canSelectSnapshot(task) || state.busy) return;
   const select = $("snapshotKnowledgeSelect");
   const manual = $("snapshotManualInput");
   if (!select) return;
@@ -1840,6 +1861,7 @@ function changeIdempotencyKey(task) {
 async function createFormalChange() {
   const task = state.task;
   if (!task || state.busy || !task.draft) return;
+  const isCurrent = () => state.task?.task_id === task.task_id;
   const blockers = changeCreationBlockers(task);
   if (blockers.length) {
     showError("还不能创建正式变更：" + blockers.join("；") + "。");
@@ -1866,26 +1888,30 @@ async function createFormalChange() {
       headers: { "Idempotency-Key": key },
       body,
     });
-    state.changeRecovery = { changeId: change.id, key, status: "created" };
+    if (!isCurrent()) return; // 返回原任务时由 loadAgentChanges 查询已创建的变更。
+    state.changeRecovery = { taskId: task.task_id, changeId: change.id, key, status: "created" };
     // 创建成功后立即回填工作台关联；失败不重创建，走恢复路径。
     try {
       const updated = await api(`/api/agent/tasks/${encodeURIComponent(task.task_id)}/change-links`, {
         method: "POST",
         body: { change_request_id: change.id, idempotency_key: `link-${key}` },
       });
+      if (!isCurrent()) return;
       state.changeRecovery = null;
       if (state.task && state.task.task_id === task.task_id) adoptTask(updated);
       loadAgentChanges();
       showChangeSuccess(change);
     } catch (linkError) {
-      state.changeRecovery = { changeId: change.id, key, status: "linkback_failed", error: linkError.message };
+      if (!isCurrent()) return;
+      state.changeRecovery = { taskId: task.task_id, changeId: change.id, key, status: "linkback_failed", error: linkError.message };
       renderChangeActions();
       showError(`正式变更 ${change.id} 已创建，但工作台关联回填失败：${linkError.message}。请点击「重试回填关联」恢复；不会重复创建变更单。`);
     }
   } catch (error) {
+    if (!isCurrent()) return;
     if (error.status === undefined) {
       // 网络中断 / 超时：创建结果未知。同键 + 同请求可安全重放（Go 幂等键保证）。
-      state.changeRecovery = { changeId: null, key, status: "unknown", body };
+      state.changeRecovery = { taskId: task.task_id, changeId: null, key, status: "unknown", body };
       renderChangeActions();
       showError(`创建请求未得到响应（${error.message}）：变更单可能已创建。请点击「用相同请求重试」安全重放（不会重复创建），或点击「查询已创建的变更」核对。`);
     } else {
@@ -1900,24 +1926,27 @@ async function createFormalChange() {
 /** 恢复路径：按同一幂等键重试（已创建则原样返回），或重试关联回填。 */
 async function retryChangeRecovery() {
   const recovery = state.changeRecovery;
-  if (!recovery || state.busy) return;
+  const task = state.task;
+  if (!recovery || !task || state.busy || recovery.taskId !== task.task_id) return;
+  const isCurrent = () => state.task?.task_id === task.task_id;
   if (recovery.status === "linkback_failed") {
     state.busy = true;
     try {
-      const updated = await api(`/api/agent/tasks/${encodeURIComponent(state.task.task_id)}/change-links`, {
+      const updated = await api(`/api/agent/tasks/${encodeURIComponent(task.task_id)}/change-links`, {
         method: "POST",
         body: { change_request_id: recovery.changeId, idempotency_key: `link-${recovery.key}` },
       });
+      if (!isCurrent()) return;
       state.changeRecovery = null;
-      if (state.task && state.task.task_id === state.task.task_id) adoptTask(updated);
+      adoptTask(updated);
       loadAgentChanges();
     } catch (error) {
+      if (!isCurrent()) return;
       handleActionError(error);
     } finally { state.busy = false; renderChangeActions(); }
     return;
   }
   // status === "unknown"：用同一幂等键 + 同一请求体重放。
-  const task = state.task;
   if (!task || !recovery.body) return;
   state.busy = true;
   renderChangeActions();
@@ -1927,21 +1956,25 @@ async function retryChangeRecovery() {
       headers: { "Idempotency-Key": recovery.key },
       body: recovery.body,
     });
-    state.changeRecovery = { changeId: change.id, key: recovery.key, status: "created" };
+    if (!isCurrent()) return;
+    state.changeRecovery = { taskId: task.task_id, changeId: change.id, key: recovery.key, status: "created" };
     try {
       const updated = await api(`/api/agent/tasks/${encodeURIComponent(task.task_id)}/change-links`, {
         method: "POST",
         body: { change_request_id: change.id, idempotency_key: `link-${recovery.key}` },
       });
+      if (!isCurrent()) return;
       state.changeRecovery = null;
       if (state.task && state.task.task_id === task.task_id) adoptTask(updated);
       loadAgentChanges();
       showChangeSuccess(change);
     } catch (linkError) {
-      state.changeRecovery = { changeId: change.id, key: recovery.key, status: "linkback_failed", error: linkError.message };
+      if (!isCurrent()) return;
+      state.changeRecovery = { taskId: task.task_id, changeId: change.id, key: recovery.key, status: "linkback_failed", error: linkError.message };
       showError(`正式变更 ${change.id} 已创建，但关联回填失败：${linkError.message}。请点击「重试回填关联」恢复。`);
     }
   } catch (error) {
+    if (!isCurrent()) return;
     handleActionError(error);
   } finally {
     state.busy = false;
@@ -1963,11 +1996,14 @@ function showChangeSuccess(change) {
 /** 本任务已创建的正式变更（同组织，会话权限过滤）。用于关联回填失败的恢复核对。 */
 async function loadAgentChanges() {
   const task = state.task;
+  const generation = ++agentChangesGeneration;
   if (!task) { state.agentChanges = []; return; }
   try {
     const changes = await api(`/api/changes?agent_task_id=${encodeURIComponent(task.task_id)}`);
+    if (generation !== agentChangesGeneration || state.task?.task_id !== task.task_id) return;
     state.agentChanges = Array.isArray(changes) ? changes : [];
   } catch (error) {
+    if (generation !== agentChangesGeneration || state.task?.task_id !== task.task_id) return;
     state.agentChanges = [];
     if (error.status === 401) handleActionError(error);
   }
@@ -2314,6 +2350,8 @@ let healthTimer = null;
 
 let taskSelectionGeneration = 0;
 let historyGeneration = 0;
+let knowledgeListGeneration = 0;
+let agentChangesGeneration = 0;
 let deletionGeneration = 0;
 let deletionPreview = null;
 

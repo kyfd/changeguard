@@ -25,7 +25,7 @@ function setup() {
     $: (id) => document.getElementById(id),
     CSS: { escape: (value) => String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&') },
   });
-  vm.runInContext(source + '\n globalThis.agent = { state, adoptTask, pollOnce, preserveView, draftSql, isLocallyEdited, refreshHealth, confirmMaterial, openHistoricalTask, refreshTaskHistory, createTask, saveDraft, linkChange, renderTrace, renderVersions, loadTrace, loadVersions };', context);
+  vm.runInContext(source + '\n globalThis.agent = { state, adoptTask, pollOnce, preserveView, draftSql, isLocallyEdited, refreshHealth, confirmMaterial, openHistoricalTask, refreshTaskHistory, createTask, saveDraft, linkChange, renderTrace, renderVersions, loadTrace, loadVersions, loadKnowledgeList, renderKnowledgeList, renderSnapshotCard, selectSnapshot, applySnapshotChange, createFormalChange, retryChangeRecovery, changeIdempotencyKey, loadAgentChanges };', context);
   vm.runInContext('render = () => { globalThis.fullRenders = (globalThis.fullRenders || 0) + 1; };', context);
   return { ...context.agent, context, nodes, document, node };
 }
@@ -306,3 +306,175 @@ test('in-flight response cannot restore an old task after switching', async () =
    assert.equal(next.value, 'order-service');
    assert.equal(h.document.activeElement, next);
  });
+
+test('snapshot controls and requests only allow backend resumable states, with or without a draft', async () => {
+  for (const draft of [null, task().draft]) {
+    for (const status of ['NEEDS_INFO', 'FAILED', 'CHECK_BLOCKED', 'RUNNING', 'RECEIVED', 'DRAFT_READY', 'CANCELLED', 'INPUT_REJECTED']) {
+      const h = setup();
+      h.node('knowledgeListHost');
+      h.node('snapshotKnowledgeSelect').value = 'schema-1';
+      h.state.task = task({ status, draft });
+      h.state.knowledgeList = [{ knowledge_id: 'schema-1', kind: 'schema', status: 'active', title: 'schema' }];
+      h.renderKnowledgeList();
+      const allowed = ['NEEDS_INFO', 'FAILED', 'CHECK_BLOCKED'].includes(status);
+      assert.equal(/data-select-snapshot=/.test(h.nodes.get('knowledgeListHost').innerHTML), allowed, `${status} draft=${Boolean(draft)}`);
+      assert.equal(/snapshotApply/.test(h.renderSnapshotCard(h.state.task)), allowed);
+      h.context.nextTask = h.state.task;
+      vm.runInContext('globalThis.calls = []; api = async (path, options) => { calls.push({ path, options }); return nextTask; };', h.context);
+      await h.selectSnapshot('schema-1', false);
+      await h.applySnapshotChange();
+      assert.equal(h.context.calls.filter(c => c.path.endsWith('/clarify')).length, allowed ? 2 : 0);
+    }
+  }
+});
+
+test('archived/deleted tasks, inactive knowledge and other applications have no selection entry', async () => {
+  for (const extra of [{ archived_at: '2030-01-01' }, { deleted_at: '2030-01-01' }, {}]) {
+    const h = setup();
+    h.node('knowledgeListHost');
+    h.state.task = task({ status: 'NEEDS_INFO', slots: { application_id: 'app-a' }, ...extra });
+    h.state.knowledgeList = [
+      { knowledge_id: 'inactive', kind: 'schema', status: 'deprecated' },
+      { knowledge_id: 'norm', kind: 'norms', status: 'active' },
+      { knowledge_id: 'other-app', application_id: 'app-b', kind: 'schema', status: 'active' },
+    ];
+    h.renderKnowledgeList();
+    assert.doesNotMatch(h.nodes.get('knowledgeListHost').innerHTML, /data-select-snapshot=/);
+    if (extra.archived_at || extra.deleted_at) {
+      vm.runInContext('globalThis.calls = []; api = async (...args) => { calls.push(args); };', h.context);
+      await h.selectSnapshot('schema-1', false);
+      assert.equal(h.context.calls.length, 0);
+    }
+  }
+});
+
+test('late knowledge response cannot replace the newer application/task list', { timeout: 3000 }, async () => {
+  const h = setup();
+  h.node('knowledgeListHost');
+  h.state.task = task({ status: 'NEEDS_INFO', slots: { application_id: 'app-a' } });
+  vm.runInContext('globalThis.pendingKnowledge = []; api = path => path.startsWith("/api/agent/knowledge") ? new Promise(resolve => pendingKnowledge.push({ path, resolve })) : Promise.resolve([]);', h.context);
+  const oldLoad = h.loadKnowledgeList();
+  h.state.task = task({ task_id: 'B', status: 'NEEDS_INFO', slots: { application_id: 'app-b' } });
+  const newLoad = h.loadKnowledgeList();
+  h.context.pendingKnowledge[1].resolve([{ knowledge_id: 'b', kind: 'schema', status: 'active', title: 'B' }]);
+  await newLoad;
+  h.context.pendingKnowledge[0].resolve([{ knowledge_id: 'a', kind: 'schema', status: 'active', title: 'A' }]);
+  await oldLoad;
+  assert.equal(h.state.knowledgeList[0].knowledge_id, 'b');
+  assert.equal(h.context.pendingKnowledge[0].path, '/api/agent/knowledge?application_id=app-a');
+  assert.equal(h.context.pendingKnowledge[1].path, '/api/agent/knowledge?application_id=app-b');
+});
+
+test('same-task application rebinding discards old knowledge response even without a second load', async () => {
+  const h = setup();
+  h.node('knowledgeListHost');
+  h.state.task = task({ slots: { application_id: 'app-a' } });
+  vm.runInContext('api = () => new Promise(resolve => { globalThis.resolveKnowledge = resolve; });', h.context);
+  const loading = h.loadKnowledgeList();
+  h.state.task = task({ slots: { application_id: 'app-b' } });
+  h.context.resolveKnowledge([{ knowledge_id: 'a', application_id: 'app-a' }]);
+  await loading;
+  assert.equal((h.state.knowledgeList || []).length, 0);
+});
+
+function formalHarness() {
+  const h = setup();
+  h.node('changeCreateTitle');
+  h.node('changeCreateCard');
+  h.node('draftBody');
+  h.state.task = task({ status: 'DRAFT_READY', material_hash: '12345678abcdef',
+    slots: { application_id: 'app-1' }, application_binding: 'authorized',
+    draft: { sql: 'select 1', rollback_sql: '', version: 2, deterministic_check: { status: 'PASSED' } },
+    confirmations: [{ material_hash: '12345678abcdef' }] });
+  h.context.taskResponse = { ...h.state.task, change_links: [{ change_request_id: 'chg-1' }] };
+  vm.runInContext('globalThis.calls = [];', h.context);
+  return h;
+}
+
+test('formal change uses a stable key across reloads and prevents double clicks', async () => {
+  const h = formalHarness();
+  const key = h.changeIdempotencyKey(h.state.task);
+  const reloaded = formalHarness();
+  assert.equal(key, reloaded.changeIdempotencyKey(reloaded.state.task));
+  assert.notEqual(key, h.changeIdempotencyKey({ ...h.state.task, draft: { ...h.state.task.draft, version: 3 } }));
+  vm.runInContext('api = (path, options) => { calls.push({ path, options }); if (path === "/api/changes") return new Promise(resolve => { globalThis.resolveCreate = resolve; }); return Promise.resolve(path.endsWith("/change-links") ? taskResponse : []); };', h.context);
+  const first = h.createFormalChange();
+  const second = h.createFormalChange();
+  assert.equal(h.context.calls.filter(c => c.path === '/api/changes').length, 1);
+  h.context.resolveCreate({ id: 'chg-1', status: 'DRAFT' });
+  await Promise.all([first, second]);
+  assert.equal(h.context.calls.find(c => c.path === '/api/changes').options.headers['Idempotency-Key'], key);
+  assert.equal(h.state.task.change_links[0].change_request_id, 'chg-1');
+  assert.equal(h.state.changeRecovery, null);
+});
+
+test('created change retries failed linkback without creating a duplicate', async () => {
+  const h = formalHarness();
+  vm.runInContext('api = async (path, options) => { calls.push({ path, options }); if (path === "/api/changes") return { id: "chg-1" }; if (path.endsWith("/change-links")) { if (calls.filter(c => c.path.endsWith("/change-links")).length === 1) throw new Error("link down"); return taskResponse; } return []; };', h.context);
+  await h.createFormalChange();
+  assert.equal(h.state.changeRecovery.status, 'linkback_failed');
+  await h.retryChangeRecovery();
+  assert.equal(h.state.changeRecovery, null);
+  assert.equal(h.context.calls.filter(c => c.path === '/api/changes').length, 1);
+  assert.equal(h.context.calls.filter(c => c.path.endsWith('/change-links')).length, 2);
+});
+
+test('unknown create result retries exactly the original body and key', async () => {
+  const h = formalHarness();
+  vm.runInContext('api = async (path, options) => { calls.push({ path, options }); if (path === "/api/changes") { if (calls.filter(c => c.path === path).length === 1) throw new Error("timeout"); return { id: "chg-1" }; } return path.endsWith("/change-links") ? taskResponse : []; };', h.context);
+  await h.createFormalChange();
+  assert.equal(h.state.changeRecovery.status, 'unknown');
+  h.nodes.get('changeCreateTitle').value = 'changed after timeout';
+  await h.retryChangeRecovery();
+  const posts = h.context.calls.filter(c => c.path === '/api/changes');
+  assert.equal(posts.length, 2);
+  assert.deepEqual(posts[1].options, posts[0].options);
+  assert.equal(h.state.changeRecovery, null);
+});
+
+test('switching tasks clears recovery and late create success cannot populate another task', async () => {
+  const h = formalHarness();
+  vm.runInContext('api = (path, options) => { calls.push({ path, options }); return path === "/api/changes" ? new Promise(resolve => { globalThis.resolveCreate = resolve; }) : Promise.resolve([]); };', h.context);
+  const creating = h.createFormalChange();
+  h.adoptTask(task({ task_id: 'B' }));
+  h.context.resolveCreate({ id: 'chg-1' });
+  await creating;
+  assert.equal(h.state.task.task_id, 'B');
+  assert.equal(h.state.changeRecovery, null);
+  assert.doesNotMatch(h.nodes.get('errorBanner').innerHTML, /chg-1/);
+  assert.equal(h.context.calls.filter(c => c.path.endsWith('/change-links')).length, 0);
+});
+
+test('late linkback retry response cannot switch the user back to the old task', async () => {
+  const h = formalHarness();
+  h.state.changeRecovery = { taskId: 'A', changeId: 'chg-1', key: 'key-a', status: 'linkback_failed' };
+  vm.runInContext('api = (path, options) => { calls.push({ path, options }); return path.endsWith("/change-links") ? new Promise(resolve => { globalThis.resolveLink = resolve; }) : Promise.resolve([]); };', h.context);
+  const linking = h.retryChangeRecovery();
+  h.adoptTask(task({ task_id: 'B' }));
+  assert.equal(h.state.changeRecovery, null);
+  h.context.resolveLink(h.context.taskResponse);
+  await linking;
+  assert.equal(h.state.task.task_id, 'B');
+  assert.equal(h.state.changeRecovery, null);
+});
+
+test('recovery scoped to another task is never sent', async () => {
+  const h = formalHarness();
+  h.state.changeRecovery = { taskId: 'B', changeId: 'chg-b', key: 'key-b', status: 'linkback_failed' };
+  vm.runInContext('api = async (...args) => { calls.push(args); return taskResponse; };', h.context);
+  await h.retryChangeRecovery();
+  assert.equal(h.context.calls.length, 0);
+});
+
+test('late associated change list cannot replace the current task list', async () => {
+  const h = formalHarness();
+  vm.runInContext('globalThis.pending = []; api = path => new Promise(resolve => pending.push({ path, resolve }));', h.context);
+  const first = h.loadAgentChanges();
+  h.state.task = task({ task_id: 'B' });
+  const second = h.loadAgentChanges();
+  h.context.pending[1].resolve([{ id: 'chg-b' }]);
+  await second;
+  h.context.pending[0].resolve([{ id: 'chg-a' }]);
+  await first;
+  assert.equal(h.state.agentChanges[0].id, 'chg-b');
+});
