@@ -7,7 +7,14 @@
 #   --expected-sha256 <64位哈希>
 # 可选：--release-root --current-link --service --health-url
 #       --health-timeout（默认 60 秒） --keep-archives（默认 3，至少 2）
+#       --agent-health-url --agent-token-env（默认 AGENT_UPSTREAM_TOKEN）
+#       --skip-preflight
 # 必须已有可回滚版本。脚本不备份数据，不执行数据库迁移。
+#
+# 下载并通过 SHA256 校验后、安装与切换**之前**默认运行同目录的
+# changeguard-upgrade-preflight.sh：核对当前核心与 Agent 的运行身份、可回滚
+# 能力与包身份。预检失败（failed）即中止，不切换服务；预检未完成（incomplete，
+# 例如未提供 Agent 地址）会打印警告但继续，因为并非每个部署都含 Agent。
 set -euo pipefail
 umask 022
 
@@ -22,14 +29,18 @@ service_name="changeguard"
 health_url="http://127.0.0.1:8080/health/ready"
 health_timeout=60
 keep_archives=3
+core_health_url="http://127.0.0.1:8080/health/ready"
+agent_health_url="${CHANGEGUARD_AGENT_HEALTH_URL:-}"
+agent_token_env="AGENT_UPSTREAM_TOKEN"
+core_only=0
+skip_preflight=0
 
 fail() { printf 'upgrade_error=%s\n' "$*" >&2; exit 1; }
-usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --version|--archive-url|--expected-sha256|--release-root|--current-link|--service|--health-url|--health-timeout|--keep-archives)
-      [ "$#" -ge 2 ] && [ -n "$2" ] || fail "missing value for $1"
+    --version|--archive-url|--expected-sha256|--release-root|--current-link|--service|--health-url|--health-timeout|--keep-archives|--agent-health-url|--agent-token-env|--core-health-url)
       case "$1" in
         --version) version="$2" ;;
         --archive-url) archive_url="$2" ;;
@@ -40,8 +51,13 @@ while [ "$#" -gt 0 ]; do
         --health-url) health_url="$2" ;;
         --health-timeout) health_timeout="$2" ;;
         --keep-archives) keep_archives="$2" ;;
+        --agent-health-url) agent_health_url="$2" ;;
+        --agent-token-env) agent_token_env="$2" ;;
+        --core-health-url) core_health_url="$2" ;;
       esac
       shift 2 ;;
+    --skip-preflight) skip_preflight=1; shift ;;
+    --core-only) core_only=1; shift ;;
     *) fail "unknown option: $1" ;;
   esac
 done
@@ -95,6 +111,42 @@ printf '==> Downloading %s\n' "$release_id"
 curl -fL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 -o "$archive" "$archive_url"
 actual="$(sha256sum "$archive" | awk '{print $1}')"
 [ "$actual" = "$expected_sha256" ] || fail 'archive SHA256 mismatch'
+# 预检放在安装与切换**之前**：它只读，不写版本目录、不动软链、不重启服务。
+# 失败即中止，此时 current 仍指向旧版本，也不会留下失败的新版本目录。
+preflight_script="$SCRIPT_DIR/changeguard-upgrade-preflight.sh"
+if [ "$skip_preflight" -eq 1 ]; then
+  printf '==> Preflight skipped by --skip-preflight (risks not checked)\n'
+elif [ ! -f "$preflight_script" ]; then
+  fail "preflight script missing: $preflight_script (or pass --skip-preflight)"
+else
+  printf '==> Running preflight checks\n'
+  preflight_args=(
+    --core-health-url "$core_health_url"
+    --archive "$archive"
+    --expected-sha256 "$expected_sha256"
+    --target-version "${version//-/.}"
+    --release-root "$release_root"
+    --current-link "$current_link"
+  )
+  if [ -n "$agent_health_url" ]; then
+    preflight_args+=(--agent-health-url "$agent_health_url" --agent-token-env "$agent_token_env")
+  fi
+  if [ "$core_only" -eq 1 ]; then
+    # 显式声明本部署不含 Agent：预检把 Agent/配套项记为 not_applicable，
+    # 其余检查仍然失败关闭；core-only 与 Agent 地址互斥。
+    preflight_args+=(--core-only)
+  fi
+  set +e
+  bash "$preflight_script" "${preflight_args[@]}"
+  preflight_status=$?
+  set -e
+  case "$preflight_status" in
+    0) ;;
+    3) fail "preflight incomplete (exit=3): 未执行的检查不是通过；补齐 --agent-health-url 或声明 --core-only" ;;
+    *) fail "preflight failed (exit=$preflight_status); current release unchanged" ;;
+  esac
+fi
+
 bash "$install_script" "$archive" "$expected_sha256" "$release_root" "$release_id"
 
 switch_release() {

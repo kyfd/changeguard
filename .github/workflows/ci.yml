@@ -133,6 +133,7 @@ jobs:
       - name: Check upgrade shell syntax
         run: |
           bash -n deploy/production/changeguard-core-install.sh
+          bash -n deploy/upgrade/changeguard-upgrade-preflight.sh
           bash -n deploy/upgrade/changeguard-upgrade.sh
           bash -n deploy/upgrade/changeguard-upgrade-watcher.sh
       - name: Exercise isolated install and rollback failures

@@ -16,6 +16,11 @@ Environment=CHANGEGUARD_SERVICE=changeguard
 Environment=CHANGEGUARD_HEALTH_URL=http://127.0.0.1:8080/health/ready
 Environment=CHANGEGUARD_HEALTH_TIMEOUT=90
 Environment=CHANGEGUARD_POLL_INTERVAL=2
+# 升级前只读预检：与安装器同目录部署 changeguard-upgrade-preflight.sh。
+# 声明 Agent 健康地址后，预检会核对核心与 Agent 的运行身份是否配套；
+# 该端点要求共享凭据（与核心使用同一份 AGENT_UPSTREAM_TOKEN）。
+Environment=CHANGEGUARD_PREFLIGHT_SCRIPT=/usr/local/libexec/changeguard/changeguard-upgrade-preflight.sh
+EnvironmentFile=-/etc/changeguard/upgrade-watcher.env
 NoNewPrivileges=false
 PrivateTmp=true
 LimitNOFILE=65536

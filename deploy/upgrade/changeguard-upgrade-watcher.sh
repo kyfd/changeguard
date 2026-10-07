@@ -21,6 +21,14 @@ SERVICE_NAME="${CHANGEGUARD_SERVICE:-changeguard}"
 HEALTH_URL="${CHANGEGUARD_HEALTH_URL:-http://127.0.0.1:8080/health/ready}"
 HEALTH_TIMEOUT="${CHANGEGUARD_HEALTH_TIMEOUT:-90}"
 INSTALL_SCRIPT="${CHANGEGUARD_INSTALL_SCRIPT:-/usr/local/libexec/changeguard/changeguard-core-install.sh}"
+# 升级前只读预检。默认与安装器同目录；未部署该脚本时升级失败关闭，
+# 除非显式设置 CHANGEGUARD_SKIP_PREFLIGHT=1 承担未校验的风险。
+PREFLIGHT_SCRIPT="${CHANGEGUARD_PREFLIGHT_SCRIPT:-}"
+AGENT_HEALTH_URL="${CHANGEGUARD_AGENT_HEALTH_URL:-}"
+AGENT_TOKEN_ENV="${CHANGEGUARD_AGENT_TOKEN_ENV:-AGENT_UPSTREAM_TOKEN}"
+CORE_ONLY="${CHANGEGUARD_CORE_ONLY:-0}"
+SKIP_PREFLIGHT="${CHANGEGUARD_SKIP_PREFLIGHT:-0}"
+POLL_INTERVAL="${CHANGEGUARD_POLL_INTERVAL:-2}"
 POLL_INTERVAL="${CHANGEGUARD_POLL_INTERVAL:-2}"
 
 log() { printf '[changeguard-upgrade] %s\n' "$*" >&2; }
@@ -108,7 +116,18 @@ command -v flock >/dev/null 2>&1 || { log 'flock is required'; exit 1; }
 [ -f "$INSTALL_SCRIPT" ] || INSTALL_SCRIPT="$(find /opt/changeguard -name changeguard-core-install.sh 2>/dev/null | head -1)"
 [ -n "$INSTALL_SCRIPT" ] && [ -f "$INSTALL_SCRIPT" ] || { log "install script not found"; exit 1; }
 
-log "upgrade watcher started root=$UPGRADE_ROOT install=$INSTALL_SCRIPT"
+# 预检默认与安装器同目录；缺失即失败关闭，除非显式声明跳过。
+if [ -z "$PREFLIGHT_SCRIPT" ]; then
+  PREFLIGHT_SCRIPT="$(dirname "$INSTALL_SCRIPT")/changeguard-upgrade-preflight.sh"
+fi
+if [ "$SKIP_PREFLIGHT" = "1" ]; then
+  log "preflight disabled by CHANGEGUARD_SKIP_PREFLIGHT=1; identity and rollback checks will not run"
+elif [ ! -f "$PREFLIGHT_SCRIPT" ]; then
+  log "preflight script not found: $PREFLIGHT_SCRIPT (set CHANGEGUARD_SKIP_PREFLIGHT=1 to override)"
+  exit 1
+fi
+
+log "upgrade watcher started root=$UPGRADE_ROOT install=$INSTALL_SCRIPT preflight=$PREFLIGHT_SCRIPT"
 
 while true; do
   # 每轮释放上一次操作的锁，CLI 与 watcher 使用同一把锁。
@@ -168,6 +187,32 @@ while true; do
     continue
   fi
   log "applying upgrade version=$version archive=$archive_name"
+
+  # 安装与切换之前先做只读预检：身份、可回滚能力与包身份。
+  if [ "$SKIP_PREFLIGHT" != "1" ]; then
+    preflight_args=(--core-health-url "$HEALTH_URL" --archive "$archive"
+                    --expected-sha256 "$actual_sha" --target-version "${version//-/.}"
+                    --release-root "$RELEASE_ROOT" --current-link "$CURRENT_LINK")
+    if [ -n "$AGENT_HEALTH_URL" ]; then
+      preflight_args+=(--agent-health-url "$AGENT_HEALTH_URL" --agent-token-env "$AGENT_TOKEN_ENV")
+    fi
+    if [ "$CORE_ONLY" = "1" ]; then
+      # 显式声明本部署不含 Agent：预检把 Agent/配套项记为 not_applicable。
+      preflight_args+=(--core-only)
+    fi
+    set +e
+    bash "$PREFLIGHT_SCRIPT" "${preflight_args[@]}"
+    preflight_status=$?
+    set -e
+    if [ "$preflight_status" -ne 0 ]; then
+      # incomplete (3) 也拒绝安装：未执行的检查不是通过。
+      log "preflight did not pass (exit $preflight_status); no install and no switch"
+      json_set state failed
+      json_set message "升级前预检未通过（exit=$preflight_status），未安装也未切换"
+      record_history "$version" failed "预检未通过" "$previous_id"
+      continue
+    fi
+  fi
 
   json_set state applying
   json_set message "正在安装 $version ..."
