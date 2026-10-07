@@ -1180,10 +1180,10 @@ function renderDraft() {
 
   parts.push(renderAssumptions(draft));
   parts.push(renderAdvice(draft));
-  parts.push(`<div id="taskConfirmation">${renderConfirmation(task)}</div>`);
   parts.push(renderVersions(task));
   parts.push(renderChangeLinks(task));
   parts.push('<div id="changeCreateCard" class="stack"></div>');
+  parts.push(`<div id="taskConfirmation">${renderConfirmation(task)}</div>`);
 
   if ((draft.revision_notes || []).length) {
     parts.push(`

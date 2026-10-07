@@ -91,7 +91,7 @@ test("agent: responsive forms, long content, keyboard focus and reduced motion",
       }
       assert.ok(result.dateWidth >= result.intrinsic, `${width}px date ${result.dateWidth} < intrinsic ${result.intrinsic}`);
       assert.equal(result.columns, width === 768 || width === 860 ? 2 : 1, `${width}px columns`);
-      assert.equal(result.radius, "6px");
+      assert.equal(result.radius, "8px");
       if (process.env.AGENT_LAYOUT_SCREENSHOTS) await page.screenshot({ path: `${process.env.AGENT_LAYOUT_SCREENSHOTS}/agent-layout-${width}.png`, fullPage: true });
     }
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -129,7 +129,7 @@ test("agent: responsive forms, long content, keyboard focus and reduced motion",
     });
     assert.equal(focus.style, "solid");
     assert.equal(focus.width, "2px");
-    assert.match(focus.color, /47,\s*109,\s*246|2f6df6/i);
+    assert.match(focus.color, /79,\s*70,\s*229|4f46e5/i);
     await page.setViewportSize({ width: 1100, height: 280 });
     const short = await page.evaluate(() => {
       document.getElementById("identityBanner").hidden = false;

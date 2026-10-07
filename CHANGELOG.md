@@ -1,5 +1,33 @@
 # Changelog
 
+## 3.1.4 - 2026-10-06
+
+升级可核对：核心与 Agent 都能报告自己的构建身份，升级前预检在切换服务之前核对身份配套性、可回滚能力与包身份。审批、通行证、确定性放行规则与模型只读边界不变。
+
+### 新增
+
+- Agent 新增只读构建身份：`/healthz` 的 `build` 字段报告 `version` / `commit` / `source_sha256` / `built_at` / `provenance_verified`，由 `AGENT_BUILD_*` 环境变量注入。未注入时**如实报告 unknown**，不用版本号或 `dev` 冒充；`provenance_verified` 只在四项都通过格式校验时为真，且**只表示构建身份，不代表已评测或验收**。响应不含密钥或业务数据。
+- 新增升级前只读预检 `deploy/upgrade/changeguard-upgrade-preflight.sh`：严格核对核心与 Agent 身份（对象、`status=ok`、合法版本、完整 commit/摘要）、两者**版本+提交+摘要**配套性、可回滚能力（普通二进制）、包内唯一 manifest 的 schema/版本/标签/提交/摘要/根目录（有界只读解析，不解压到磁盘）、目标版本一致性。不写版本目录、不动软链、不重启服务。
+- 预检区分 `failed` 与 `not_run`：未执行的检查记 `not_run` 并返回 incomplete（退出码 3），**CLI 与 watcher 对 3 一律拒绝安装与切换**；显式 `--core-only`（watcher `CHANGEGUARD_CORE_ONLY=1`）声明后 Agent 项记 `not_applicable`，不产生 incomplete。声明 Agent 地址却缺共享凭据按失败关闭。
+- 升级 CLI 与 watcher 在**安装与切换之前**运行预检：失败或未完成即中止，当前版本照常运行，也不留下失败的新版本目录。两者共用同一把升级锁。
+- Agent 共享密钥经环境变量传入预检内的 urllib（禁代理与重定向、限时限长），不再出现在 `curl -H` 命令行参数中。
+
+### 修复与验证
+
+- 升级 CLI 的 `--help` 与参数校验同步新参数（含 `--core-health-url` / `--core-only`），输出完整参数说明。
+- Agent 新增 12 项回归：缺失/空白/`dev` 身份如实报告、半条身份不"部分可信"、哈希大小写归一、畸形哈希不通过、无时区/仅日期时间戳不通过、带时区时间戳通过、`healthz` 暴露身份且不回显密钥。
+- 部署回归新增 `PreflightTests` 12 项（真实本地 HTTP 桩、合成包、隔离目录），覆盖 Agent 不可达、缺声明 incomplete、core-only 通过、包身份不符等；原 24 项同步到"先预检后安装、incomplete 拒绝"的新时序。
+
+### 升级
+
+无新增数据库迁移。核心与 Python Agent 使用同一发布提交。**从经核对的同一源码提交更新三个运维脚本**（安装器、预检、watcher）：watcher 默认从安装器同目录加载预检脚本，缺失即拒绝启动，必须显式 `CHANGEGUARD_SKIP_PREFLIGHT=1` 才跳过。Agent 侧需注入 `AGENT_BUILD_*` 才能被核对；Compose 已接 `CHANGEGUARD_VERSION` 等变量，未配置时预检按"核对不了"失败关闭。升级前备份 Go 数据、迁移见证、配置/密钥，以及 Agent 任务 JSON、检查点 SQLite、知识与评测 JSON。回滚路径与 3.1.3 相同：预检失败不切换，安装/重启失败按既有脚本回滚并显式报告人工处理。
+
+### 已知限制
+
+- 本次预检是**只读前置检查**，不等于生产验收：未在真实目标主机执行，未做生产备份恢复或跨版本数据恢复演练。
+- `provenance_verified` 不是代码签名：它只校验注入字段的格式，可信预期摘要仍须运维独立核对。
+- 单实例 `systemctl restart` 仍有短暂中断，不是零停机发布。真实模型质量评测保持 `NOT_RUN`。
+
 ## 3.1.3 - 2026-10-02
 
 3.1.2 发布后的修复与上线准备：补齐工作台与重启回归，加固安装身份、升级失败回滚和发布门禁。审批、通行证、确定性放行规则与模型只读边界不变。

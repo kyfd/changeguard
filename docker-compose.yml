@@ -137,6 +137,12 @@ services:
       AGENT_LLM_API_KEY: ${CHANGEGUARD_LLM_API_KEY:-}
       AGENT_LLM_MODEL: ${CHANGEGUARD_LLM_MODEL:-deepseek-chat}
       AGENT_LLM_TIMEOUT: ${CHANGEGUARD_AGENT_LLM_TIMEOUT:-20}
+      # 构建身份：升级前预检用它核对核心与 Agent 是否配套。
+      # 未注入时如实报告 unknown，预检把"核对不了"当作失败，而不是默认通过。
+      AGENT_BUILD_VERSION: ${CHANGEGUARD_VERSION:-}
+      AGENT_BUILD_COMMIT: ${CHANGEGUARD_COMMIT:-}
+      AGENT_BUILD_SOURCE_SHA256: ${CHANGEGUARD_SOURCE_SHA256:-}
+      AGENT_BUILD_BUILT_AT: ${CHANGEGUARD_BUILT_AT:-}
     volumes:
       - agent-task-data:/app/data
     restart: unless-stopped

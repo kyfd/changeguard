@@ -29,6 +29,7 @@ from typing import Any
 
 import httpx
 
+from app.buildinfo import current as current_buildinfo
 from app.budget import PHASE_GENERATE, LedgerPersistError, UsageLedger, usage_scope
 from app.config import Settings
 from app.evalcenter import (
@@ -244,6 +245,8 @@ class AgentService:
             "knowledge_chunks": self.knowledge_base_size(),
             "running_tasks": running,
             "unpersisted_tasks": unpersisted,
+            # 构建身份：只报告本进程自己的标识，不含任何业务数据。
+            "build": current_buildinfo().as_dict(),
         }
         if unpersisted:
             result["degraded_reason"] = "存在未能落盘的执行结果，存储可能不可用"

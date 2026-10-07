@@ -115,6 +115,7 @@ jobs:
       - name: Verify isolated upgrade and rollback paths
         run: |
           bash -n deploy/production/changeguard-core-install.sh
+          bash -n deploy/upgrade/changeguard-upgrade-preflight.sh
           bash -n deploy/upgrade/changeguard-upgrade.sh
           bash -n deploy/upgrade/changeguard-upgrade-watcher.sh
           sudo python3 -B -m unittest discover -s tests/deploy -v

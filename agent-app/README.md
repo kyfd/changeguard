@@ -214,7 +214,7 @@ START → screen_input ──命中注入──▶ INPUT_REJECTED（停止）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/agent/healthz` | 健康检查 + provider / 语料规模 / 运行中任务数 |
+| GET | `/api/agent/healthz` | 健康检查 + provider / 语料规模 / 运行中任务数 + 只读构建身份（`build`） |
 | GET | `/api/agent/tools` | 工具清单（含 schema 与只读标记） |
 | POST | `/api/agent/tasks` | 创建任务（后台执行，返回 `202`） |
 | GET | `/api/agent/tasks` | 任务列表 |
