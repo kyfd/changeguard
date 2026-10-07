@@ -221,7 +221,7 @@ ul, ol { margin: 0; padding-left: 18px; }
   display: grid;
   grid-template-columns: minmax(320px, 360px) minmax(0, 1fr) minmax(330px, 400px);
   gap: 20px;
-  padding: 20px 24px 32px;
+  padding: 20px 24px;
   align-items: start;
 }
 
@@ -231,7 +231,7 @@ ul, ol { margin: 0; padding-left: 18px; }
   border: 1px solid var(--line, var(--border));
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-panel);
-  max-height: calc(100vh - 110px);
+  max-height: calc(100vh - 132px);
   min-width: 0;
   position: relative;
   overflow: hidden;
@@ -330,13 +330,23 @@ input:not([type]), input[type="text"], input[type="search"], input[type="datetim
   color: var(--text);
   font-family: inherit; font-size: 13px;
   resize: vertical;
-  transition: all 0.16s var(--ease);
+  transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
 }
 textarea { line-height: 1.5; }
 input:hover, select:hover, textarea:hover { border-color: var(--text-muted); }
 input:focus, select:focus, textarea:focus {
   outline: none; border-color: var(--accent); box-shadow: var(--shadow-focus);
 }
+ button:focus-visible, a:focus-visible, summary:focus-visible,
+ input:focus-visible, select:focus-visible, textarea:focus-visible {
+   outline: 2px solid var(--accent);
+   outline-offset: 2px;
+ }
+ 
+ /* ---------- 无障碍：减弱动态效果 ---------- */
+ @media (prefers-reduced-motion: reduce) {
+   *, *::before, *::after { transition: none !important; animation: none !important; }
+ }
 
 textarea.mono {
   font-family: var(--mono); font-size: 12px; line-height: 1.6;
@@ -353,7 +363,7 @@ textarea.mono.stale { border-left-color: var(--warn); }
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, max(240px, calc((100% - 8px) / 2))), 1fr));
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -502,4 +512,7 @@ pre.mono {
   .workbench { grid-template-columns: 1fr; padding: 14px; gap: 14px; }
   .col { max-height: none; border-radius: var(--radius); }
   .topbar { padding: 10px 14px; }
+  /* 移动端触控目标：交互按钮至少 44px 高（WCAG 2.5.5）。 */
+  .button { min-height: 44px; padding: 10px 16px; }
+  .chip-button { min-height: 44px; }
 }
