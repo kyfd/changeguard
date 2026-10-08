@@ -142,6 +142,64 @@ test("agent: responsive forms, long content, keyboard focus and reduced motion",
     assert.ok(short.height > 140, `short viewport collapsed the column: ${short.height}`);
     await page.emulateMedia({ reducedMotion: "reduce" });
     assert.equal(await page.locator("#createButton").evaluate(el => getComputedStyle(el).transitionDuration), "0s");
+    // 验证 Agent 工作台语义标签文本与背景对比度 >= 4.5:1 (WCAG AA)
+    // 验证 Agent 工作台语义标签文本与背景对比度 >= 4.5:1 (WCAG AA)
+    const contrast = await page.evaluate(() => {
+      function luminance(r, g, b) {
+        const a = [r, g, b].map(v => {
+          v /= 255;
+          return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        });
+        return a[0] * 0.2126 + a[1] * 0.7152 + a[2] * 0.0722;
+      }
+      function parseRgb(str) {
+        const match = str.match(/\d+/g);
+        return match ? match.slice(0, 3).map(Number) : [0, 0, 0];
+      }
+      function ratio(c1, c2) {
+        const [r1, g1, b1] = parseRgb(c1);
+        const [r2, g2, b2] = parseRgb(c2);
+        const l1 = luminance(r1, g1, b1);
+        const l2 = luminance(r2, g2, b2);
+        return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+      }
+      const probeOk = document.createElement('span');
+      probeOk.className = 'badge badge-ok';
+      document.body.appendChild(probeOk);
+      const okStyle = getComputedStyle(probeOk);
+      const okRatio = ratio(okStyle.color, okStyle.backgroundColor);
+
+      const probeWarn = document.createElement('span');
+      probeWarn.className = 'badge badge-warn';
+      document.body.appendChild(probeWarn);
+      const warnStyle = getComputedStyle(probeWarn);
+      const warnRatio = ratio(warnStyle.color, warnStyle.backgroundColor);
+
+      probeOk.remove();
+      probeWarn.remove();
+      return { okRatio, warnRatio };
+    });
+    assert.ok(contrast.okRatio >= 4.5, `--ok contrast ratio ${contrast.okRatio} < 4.5`);
+    assert.ok(contrast.warnRatio >= 4.5, `--warn contrast ratio ${contrast.warnRatio} < 4.5`);
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.ok(await page.locator('#agentPanelTabs').isVisible(), 'narrow viewport must show panel tabs');
+    assert.equal(await page.locator('#tabChat').getAttribute('aria-selected'), 'true');
+    assert.ok(await page.locator('#panelChat').isVisible(), 'chat panel visible by default');
+    assert.ok(!await page.locator('#panelDraft').isVisible(), 'draft panel hidden on narrow screen');
+
+    // 点击切换至「02 变更草案」
+    await page.locator('#tabDraft').click();
+    assert.equal(await page.locator('#tabDraft').getAttribute('aria-selected'), 'true');
+    assert.equal(await page.locator('#tabChat').getAttribute('aria-selected'), 'false');
+    assert.ok(await page.locator('#panelDraft').isVisible(), 'draft panel visible after switching');
+    assert.ok(!await page.locator('#panelChat').isVisible(), 'chat panel hidden after switching');
+
+    // 键盘切换 (ArrowRight 切换至「03 证据与检查」)
+    await page.locator('#tabDraft').focus();
+    await page.keyboard.press('ArrowRight');
+    assert.equal(await page.locator('#tabEvidence').getAttribute('aria-selected'), 'true');
+    assert.ok(await page.locator('#panelEvidence').isVisible(), 'evidence panel visible after ArrowRight');
+    assert.ok(!await page.locator('#panelDraft').isVisible(), 'draft panel hidden after ArrowRight');
   } finally {
     await browser.close();
   }
