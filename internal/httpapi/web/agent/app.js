@@ -2555,6 +2555,48 @@ async function runEval() {
   }
 }
 
+function initAgentPanelTabs() {
+  const tabs = document.querySelectorAll("#agentPanelTabs [role='tab']");
+  if (!tabs.length) return;
+  const panels = {
+    panelChat: document.getElementById("panelChat"),
+    panelDraft: document.getElementById("panelDraft"),
+    panelEvidence: document.getElementById("panelEvidence")
+  };
+  function selectTab(targetId) {
+    tabs.forEach(tab => {
+      const active = tab.dataset.tabPanel === targetId;
+      tab.classList.toggle("is-active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    Object.entries(panels).forEach(([id, panel]) => {
+      if (!panel) return;
+      panel.classList.toggle("is-active", id === targetId);
+    });
+  }
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => selectTab(tab.dataset.tabPanel));
+    tab.addEventListener("keydown", (e) => {
+      let targetIndex = index;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        targetIndex = (index + 1) % tabs.length;
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        targetIndex = (index - 1 + tabs.length) % tabs.length;
+      } else if (e.key === "Home") {
+        targetIndex = 0;
+      } else if (e.key === "End") {
+        targetIndex = tabs.length - 1;
+      } else {
+        return;
+      }
+      e.preventDefault();
+      tabs[targetIndex].focus();
+      selectTab(tabs[targetIndex].dataset.tabPanel);
+    });
+  });
+  window.selectAgentPanel = selectTab;
+}
+
 async function init() {
   $("createForm").addEventListener("submit", createTask);
   $("knowledgeForm").addEventListener("submit", importKnowledge);
@@ -2573,6 +2615,7 @@ async function init() {
     window.alert($("healthChip").title || "无健康信息。");
   });
 
+  initAgentPanelTabs();
   render();
 
   let authenticated = true;

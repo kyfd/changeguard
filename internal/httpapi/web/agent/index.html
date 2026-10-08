@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f7f9fc">
   <title>变更准备 · ChangeGuard</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20261008-redesign">
 </head>
 <body>
   <a class="skip-link" href="#workbench">跳到主要内容</a>
@@ -39,8 +39,14 @@
   <div class="banner banner-warn" id="identityBanner" hidden></div>
   <div class="banner banner-danger" id="errorBanner" hidden></div>
 
+  <nav class="agent-panel-tabs" role="tablist" aria-label="工作台面板切换" id="agentPanelTabs">
+    <button type="button" role="tab" class="agent-tab-btn is-active" id="tabChat" aria-selected="true" aria-controls="panelChat" data-tab-panel="panelChat">01 需求与对话</button>
+    <button type="button" role="tab" class="agent-tab-btn" id="tabDraft" aria-selected="false" aria-controls="panelDraft" data-tab-panel="panelDraft">02 变更草案</button>
+    <button type="button" role="tab" class="agent-tab-btn" id="tabEvidence" aria-selected="false" aria-controls="panelEvidence" data-tab-panel="panelEvidence">03 证据与检查</button>
+  </nav>
+
   <main class="workbench" id="workbench">
-    <section class="col col-chat" aria-labelledby="chatTitle">
+    <section class="col col-chat is-active" id="panelChat" aria-labelledby="chatTitle">
       <header class="col-head">
         <div class="col-heading"><span class="col-step">01 / INTAKE</span><h2 id="chatTitle">需求与对话</h2></div>
         <span class="col-hint">提需求 · 补信息 · 进度</span>
@@ -152,7 +158,7 @@
       </div>
     </section>
 
-    <section class="col col-draft" aria-labelledby="draftTitle">
+    <section class="col col-draft" id="panelDraft" aria-labelledby="draftTitle">
       <header class="col-head">
         <div class="col-heading"><span class="col-step">02 / DRAFT</span><h2 id="draftTitle">变更草案</h2></div>
         <span class="col-hint" id="draftMeta">尚未生成</span>
@@ -160,7 +166,7 @@
       <div class="col-body" id="draftBody"></div>
     </section>
 
-    <section class="col col-evidence" aria-labelledby="evidenceTitle">
+    <section class="col col-evidence" id="panelEvidence" aria-labelledby="evidenceTitle">
       <header class="col-head">
         <div class="col-heading"><span class="col-step">03 / EVIDENCE</span><h2 id="evidenceTitle">证据与检查</h2></div>
         <span class="col-hint">确定性结论 · 引用来源</span>
