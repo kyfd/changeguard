@@ -2,57 +2,43 @@
    主体是浅色界面，全景页和登录页单独用深色背景，见文件末尾。
    class 名和 app.js 里的选择器一一对应，改名要同步改 app.js。 */
 :root {
-  --bg: #f0f2f5;
+  --bg: #eef1f8;
   --surface: #ffffff;
-  --surface-subtle: #fafafa;
-  --surface-blue: #f0f5ff;
-  --text: #1f2937;
-  --text-strong: #111827;
-  --muted: #4b5563;
-  --muted-light: #6b7280;
-  --line: #e5e7eb;
-  --line-strong: #d1d5db;
-
-  /* 品牌主色：经典科技企业蓝 (#1677ff) */
-  --primary: #1677ff;
-  --primary-hover: #4096ff;
-  --primary-dark: #0958d9;
-  --primary-soft: #e6f4ff;
-  --primary-border: #91caff;
-
-  /* 标准企业语义色 */
-  --green: #389e0d;
-  --green-soft: #f6ffed;
-  --green-border: #b7eb8f;
-
-  --orange: #d48806;
-  --orange-soft: #fffbe6;
-  --orange-border: #ffe58f;
-
-  --red: #cf1322;
-  --red-soft: #fff2f0;
-  --red-border: #ffccc7;
-
-  --purple: #531dab;
-  --purple-soft: #f9f0ff;
-  --purple-border: #d3adf7;
-
-  /* 克制轻量的企业级投影 */
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
-  --shadow-md: 0 4px 12px 0 rgba(0, 0, 0, 0.05);
-  --shadow-lg: 0 8px 24px -4px rgba(0, 0, 0, 0.08);
-  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.04), 0 1px 2px -1px rgba(0, 0, 0, 0.02);
-  --shadow-dropdown: 0 6px 16px 0 rgba(0, 0, 0, 0.08);
-
-  /* 标准圆角 */
-  --radius: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-  --ease: cubic-bezier(0.2, 0, 0, 1);
-  --sidebar: 240px;
-  --topbar: 56px;
-
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --surface-subtle: #f6f8fc;
+  --surface-blue: #f1f6ff;
+  --text: #1b2436;
+  --text-strong: #0d1526;
+  --muted: #4f5b70;
+  --muted-light: #8d98ab;
+  --line: #dce4f0;
+  --line-strong: #c6d0df;
+  --primary: #1d4fe8;
+  --primary-dark: #1438c6;
+  --primary-soft: #e8f0ff;
+  --green: #0d9d6c;
+  --green-soft: #e6f7f0;
+  --orange: #b5651a;
+  --orange-soft: #fff5e8;
+  --red: #c8344a;
+  --red-soft: #fff1f3;
+  --purple: #6d4fd1;
+  --purple-soft: #f0ebff;
+  --shadow-sm: 0 1px 2px rgba(13,24,48,.05), 0 1px 3px rgba(13,24,48,.04);
+  --shadow-md: 0 14px 40px rgba(13,24,58,.10), 0 4px 12px rgba(13,24,58,.05);
+  --shadow-lg: 0 24px 60px rgba(10,20,50,.15), 0 8px 24px rgba(10,20,50,.06);
+  --shadow-card: 0 2px 6px rgba(20,40,80,.05), 0 12px 32px rgba(20,40,80,.06);
+  --shadow-glow: 0 6px 24px rgba(29,79,232,.22);
+  --grad-primary: linear-gradient(135deg, #1d4fe8 0%, #3a76f5 50%, #1ea9ff 100%);
+  --grad-surface: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  --grad-sidebar: linear-gradient(180deg, #ffffff 0%, #f7faff 100%);
+  --grad-topbar: linear-gradient(180deg, rgba(255,255,255,.98) 0%, rgba(248,252,255,.95) 100%);
+  --radius: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --ease: cubic-bezier(.22,.61,.36,1);
+  --sidebar: 248px;
+  --topbar: 72px;
+  font-family: Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -62,9 +48,12 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; max-width: 100%; overflow-x: hidden; background: var(--bg); }
 body {
-  font-size: 14px; line-height: 1.5714;
-  background-color: var(--bg);
-  color: var(--text);
+  font-size: 14px; line-height: 1.55;
+  background:
+    radial-gradient(circle at 12% 6%, rgba(29,79,232,.05), transparent 42%),
+    radial-gradient(circle at 88% 94%, rgba(13,157,108,.04), transparent 38%),
+    var(--bg);
+  background-attachment: fixed;
 }
 body.modal-open { overflow: hidden; }
 button, input, select, textarea { font: inherit; }
@@ -266,9 +255,9 @@ a.nav-item { text-decoration: none; }
 .button svg { width: 16px; height: 16px; }
 .button-primary {
   color: #fff; background: var(--grad-primary); border: 0;
-  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.043);
+  box-shadow: var(--shadow-glow), inset 0 1px 0 rgba(255,255,255,.25);
 }
-.button-primary:hover { background: var(--primary-hover); box-shadow: 0 8px 28px rgba(29,79,232,.30), inset 0 1px 0 rgba(255,255,255,.3); }
+.button-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 28px rgba(29,79,232,.30), inset 0 1px 0 rgba(255,255,255,.3); }
 .button-secondary { color: #364152; background: var(--grad-surface); border-color: var(--line-strong); transition: all .16s var(--ease); }
 .button-secondary:hover { border-color: var(--primary); color: var(--primary); box-shadow: 0 2px 10px rgba(29,79,232,.08); }
 .button-danger { color: #b42336; background: #fff; border-color: #f0bcc2; }
@@ -292,15 +281,14 @@ a.nav-item { text-decoration: none; }
 .stat-card {
   position: relative; min-height: 140px; padding: 22px; overflow: hidden;
   background: var(--grad-surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
-  border: 1px solid var(--line); transition: box-shadow .3s var(--ease), transform .3s var(--ease);
+  box-shadow: var(--shadow-card); transition: box-shadow .3s var(--ease), transform .3s var(--ease);
 }
 .stat-card::before {
   content: ""; position: absolute; inset: 0; z-index: 0; opacity: 0;
   background: radial-gradient(circle at 100% 0%, rgba(29,79,232,.10), transparent 50%);
   transition: opacity .3s var(--ease);
 }
-.stat-card:hover { border-color: var(--primary-border); box-shadow: var(--shadow-md); }
+.stat-card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
 .stat-card:hover::before { opacity: 1; }
 .stat-card::after {
   content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; border-radius: 4px;
@@ -327,10 +315,9 @@ a.nav-item { text-decoration: none; }
 .content-grid { display: grid; grid-template-columns: minmax(0, 1.72fr) minmax(290px, .72fr); gap: 16px; margin-bottom: 16px; }
 .panel {
   background: var(--grad-surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card);
-  border: 1px solid var(--line); min-width: 0; transition: box-shadow .3s var(--ease);
+  box-shadow: var(--shadow-card); min-width: 0; transition: box-shadow .3s var(--ease);
 }
-.panel { box-shadow: var(--shadow-md); }
+.panel:hover { box-shadow: var(--shadow-md); }
 .panel-header {
   min-height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 15px;
   padding: 16px 20px; border-bottom: 1px solid var(--line);
@@ -373,27 +360,15 @@ a.nav-item { text-decoration: none; }
 
 /* BADGES */
 .status, .risk {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 1px 8px; border-radius: 4px;
-  font-size: 12px; font-weight: 500; line-height: 20px;
-  border: 1px solid transparent;
+  display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 3px 10px;
+  flex-shrink: 0; border: 1px solid transparent; border-radius: 13px; font-size: 12px; font-weight: 700; letter-spacing: .02em; white-space: nowrap;
 }
-.status i, .risk i { width: 6px; height: 6px; background: currentColor; border-radius: 50%; display: inline-block; }
-.status-draft { color: #6b7280; background: #f3f4f6; border-color: #d1d5db; }
-.status-running, .status-queued { color: #1677ff; background: #e6f4ff; border-color: #91caff; }
-.status-waiting { color: #d48806; background: #fffbe6; border-color: #ffe58f; }
-.status-approved, .status-completed, .status-ready { color: #389e0d; background: #f6ffed; border-color: #b7eb8f; }
-.status-failed, .status-rejected { color: #cf1322; background: #fff2f0; border-color: #ffccc7; }
-.risk-low { color: #389e0d; background: #f6ffed; border-color: #b7eb8f; }
-.risk-medium { color: #d48806; background: #fffbe6; border-color: #ffe58f; }
-.risk-high { color: #cf1322; background: #fff2f0; border-color: #ffccc7; }
-.risk-unknown { color: #6b7280; background: #f3f4f6; border-color: #e5e7eb; }
-@keyframes ed-status-pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.3); opacity: 0.75; } }
-.status-failed, .status-rejected { color: #991b1b; background: linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%); border-color: #fecaca; }
-.risk-low { color: #065f46; background: linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%); border-color: #a7f3d0; }
-.risk-medium { color: #92400e; background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%); border-color: #fde68a; }
-.risk-high { color: #991b1b; background: linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%); border-color: #fecaca; }
-.risk-unknown { color: #475569; background: #f1f5f9; border-color: #e2e8f0; }
+.status i, .risk i { width: 6px; height: 6px; background: currentColor; border-radius: 50%; }
+.status-draft { color: #667085; background: #f3f4f6; border-color: #e7e9ed; }
+.status-running, .status-queued { color: #2458e6; background: #eef3ff; border-color: #dbe5ff; }
+.status-waiting { color: #a76113; background: #fff5e7; border-color: #f8dfba; }
+.status-approved, .status-completed, .status-ready { color: #147a55; background: rgba(13,157,108,.10); border-color: rgba(13,157,108,.22); }
+.status-approved i, .status-completed i { animation: ed-status-pulse 2s infinite; }
 @keyframes ed-status-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.3); } }
 .status-failed, .status-rejected { color: #bd3443; background: #fff1f2; border-color: #f6d5d9; }
 .risk-low { color: #147a55; background: #edf9f4; }
