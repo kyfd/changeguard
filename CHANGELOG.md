@@ -1,5 +1,25 @@
 # Changelog
 
+## 3.1.7 - 2026-10-08
+
+Agent 变更准备演播室智能体蓝图空态（Cyber Blueprint Empty Deck）与快捷提示词交互升级。审批、通行证、确定性放行规则与模型只读边界保持不变。
+
+### 新增与优化
+
+- **Agent 演播室空状态重塑** (`internal/httpapi/web/agent/app.js`, `internal/httpapi/web/agent/styles.css`)：
+  - 彻底重塑 02 DRAFT 与 03 EVIDENCE 初始就绪空态，打造带有矢量光影图标、结构化特征清单徽章的建筑蓝图与治理检验雷达空态，彻底消除苍白虚线框。
+  - **快捷需求建议胶囊（Prompt Suggestions）** (`internal/httpapi/web/agent/index.html`, `internal/httpapi/web/agent/app.js`)：在输入框下方集成高频变更示例芯片（并发索引、字段扩展与回滚、连接池调优），支持点击与键盘回车一键填充并自动聚焦。
+  - 卡片全面升级深邃悬浮质感（Elevated Studio Deck），增加多层环境光投影与高斯模糊立体层次。
+
+### 升级
+
+无新增数据库迁移。核心与 Python Agent 使用同一发布提交。运维脚本与升级预检保持向后兼容。前端静态资源经 Go 后端同源嵌入并带有缓存校验头，重新部署后客户端刷新即可生效。升级前备份 Go 运行数据与环境配置；回滚仅需切换回上一版本软链，无需数据库反向迁移。
+
+### 已知限制
+
+- 本次升级包生成验证在 CI runner 隔离环境中执行，不等于目标生产环境部署完成；生产部署由独立运维流程执行。
+- 真实模型质量评测保持 `NOT_RUN`：本次改动不涉及模型指标虚构。
+
 ## 3.1.6 - 2026-10-08
 
 超感精密光影控制台（Luminous Crystalline Precision System）美学重构与态势大屏全面升华。审批、通行证、确定性放行规则与模型只读边界保持不变。

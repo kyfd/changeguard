@@ -71,10 +71,17 @@
         </section>
         <form class="card" id="createForm">
           <label class="field">
-            <span class="requirement-label">这次需要准备什么变更？</span>
+            <div class="requirement-head">
+              <span class="requirement-label">这次需要准备什么变更？</span>
+              <span class="prompt-hint">支持自然语言描述</span>
+            </div>
             <textarea id="requirement" rows="4" placeholder="例如：给订单表按用户和创建时间准备一个索引变更，目标 PostgreSQL，安排在周五晚上。"></textarea>
+            <div class="prompt-suggestions" aria-label="快捷需求示例">
+              <span class="suggestion-chip" role="button" tabindex="0" data-prompt="给订单表按用户和创建时间准备并发索引变更，目标 PostgreSQL，安排在周五晚上。">⚡ 订单表并发索引</span>
+              <span class="suggestion-chip" role="button" tabindex="0" data-prompt="用户积分表增加 status 与 expire_at 字段，并生成对称的回滚 DROP COLUMN 脚本。">🛡️ 积分表加字段与回滚</span>
+              <span class="suggestion-chip" role="button" tabindex="0" data-prompt="生产环境调整数据库连接池最大空闲连接与超时参数，配置发布观察窗口。">🔧 连接池参数热调优</span>
+            </div>
             <span class="note-inline" id="requirementCount"></span>
-          </label>
 
           <details class="details" id="knownInfo">
             <summary>补充已知信息 <span class="optional-label">可选</span></summary>
