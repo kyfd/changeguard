@@ -1091,7 +1091,20 @@ function renderDraft() {
   const task = state.task;
 
   if (!task) {
-    host.innerHTML = `<p class="empty">提交需求后，这里会显示待确认的草案。</p>`;
+    host.innerHTML = `
+      <div class="empty empty-blueprint">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24" width="32" height="32" stroke="currentColor" fill="none" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        </div>
+        <h4>变更草案演播室就绪</h4>
+        <p>在左侧输入业务需求并启动准备，智能体将自动化检索规范、生成带可验证回滚的 SQL / 配置草案并提供 AI 决策建议。</p>
+        <div class="empty-chips">
+          <span><i class="dot ok"></i>事务性 DDL / DML 生成</span>
+          <span><i class="dot ok"></i>对称逆向回滚方案</span>
+          <span><i class="dot ok"></i>确定性变更风险评估</span>
+        </div>
+      </div>
+    `;
     return;
   }
 
@@ -2196,7 +2209,20 @@ function renderEvidence() {
   const task = state.task;
 
   if (!task) {
-    host.innerHTML = `<p class="empty">检查结果与引用来源会显示在这里。</p>`;
+    host.innerHTML = `
+      <div class="empty empty-blueprint">
+        <div class="empty-icon">
+          <svg viewBox="0 0 24 24" width="32" height="32" stroke="currentColor" fill="none" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        </div>
+        <h4>确定性检验雷达就绪</h4>
+        <p>草案生成后，确定性扫描引擎与沙盒演练将在此实时输出可核验的检查项、锁超时排查及规范引用证据链。</p>
+        <div class="empty-chips">
+          <span><i class="dot ok"></i>锁超时与并发索引扫描</span>
+          <span><i class="dot ok"></i>高风险语法与特权检测</span>
+          <span><i class="dot ok"></i>企业知识库规范关联</span>
+        </div>
+      </div>
+    `;
     return;
   }
 
@@ -2610,6 +2636,23 @@ async function init() {
     if (button) selectSnapshot(button.dataset.selectSnapshot, button.dataset.replaceManual === "1");
   });
   wireRequirementCounter();
+  document.querySelectorAll(".suggestion-chip").forEach(chip => {
+    const applyPrompt = () => {
+      const textarea = $("requirement");
+      if (textarea && chip.dataset.prompt) {
+        textarea.value = chip.dataset.prompt;
+        textarea.focus();
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    };
+    chip.addEventListener("click", applyPrompt);
+    chip.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        applyPrompt();
+      }
+    });
+  });
   $("timeZoneHelp").textContent = `计划时间是所填时区的墙钟时间；时区留空明确使用浏览器时区 ${browserTimezone() || "（无法识别，请手动填写）"}，并随请求发送。支持 2000—2099 年，夏令时缺失或重复时刻会被拒绝。`;
   $("healthChip").addEventListener("click", () => {
     window.alert($("healthChip").title || "无健康信息。");
