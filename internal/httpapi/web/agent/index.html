@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#f7f9fc">
   <title>变更准备 · ChangeGuard</title>
-  <link rel="stylesheet" href="styles.css?v=20261012-v319">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <a class="skip-link" href="#workbench">跳到主要内容</a>
@@ -39,14 +39,8 @@
   <div class="banner banner-warn" id="identityBanner" hidden></div>
   <div class="banner banner-danger" id="errorBanner" hidden></div>
 
-  <nav class="agent-panel-tabs" role="tablist" aria-label="工作台面板切换" id="agentPanelTabs">
-    <button type="button" role="tab" class="agent-tab-btn is-active" id="tabChat" aria-selected="true" aria-controls="panelChat" data-tab-panel="panelChat">01 需求与对话</button>
-    <button type="button" role="tab" class="agent-tab-btn" id="tabDraft" aria-selected="false" aria-controls="panelDraft" data-tab-panel="panelDraft">02 变更草案</button>
-    <button type="button" role="tab" class="agent-tab-btn" id="tabEvidence" aria-selected="false" aria-controls="panelEvidence" data-tab-panel="panelEvidence">03 证据与检查</button>
-  </nav>
-
   <main class="workbench" id="workbench">
-    <section class="col col-chat is-active" id="panelChat" aria-labelledby="chatTitle">
+    <section class="col col-chat" aria-labelledby="chatTitle">
       <header class="col-head">
         <div class="col-heading"><span class="col-step">01 / INTAKE</span><h2 id="chatTitle">需求与对话</h2></div>
         <span class="col-hint">提需求 · 补信息 · 进度</span>
@@ -71,17 +65,10 @@
         </section>
         <form class="card" id="createForm">
           <label class="field">
-            <div class="requirement-head">
-              <span class="requirement-label">这次需要准备什么变更？</span>
-              <span class="prompt-hint">支持自然语言描述</span>
-            </div>
+            <span class="requirement-label">这次需要准备什么变更？</span>
             <textarea id="requirement" rows="4" placeholder="例如：给订单表按用户和创建时间准备一个索引变更，目标 PostgreSQL，安排在周五晚上。"></textarea>
-            <div class="prompt-suggestions" aria-label="快捷需求示例">
-              <span class="suggestion-chip" role="button" tabindex="0" data-prompt="给订单表按用户和创建时间准备并发索引变更，目标 PostgreSQL，安排在周五晚上。">⚡ 订单表并发索引</span>
-              <span class="suggestion-chip" role="button" tabindex="0" data-prompt="用户积分表增加 status 与 expire_at 字段，并生成对称的回滚 DROP COLUMN 脚本。">🛡️ 积分表加字段与回滚</span>
-              <span class="suggestion-chip" role="button" tabindex="0" data-prompt="生产环境调整数据库连接池最大空闲连接与超时参数，配置发布观察窗口。">🔧 连接池参数热调优</span>
-            </div>
             <span class="note-inline" id="requirementCount"></span>
+          </label>
 
           <details class="details" id="knownInfo">
             <summary>补充已知信息 <span class="optional-label">可选</span></summary>
@@ -165,7 +152,7 @@
       </div>
     </section>
 
-    <section class="col col-draft" id="panelDraft" aria-labelledby="draftTitle">
+    <section class="col col-draft" aria-labelledby="draftTitle">
       <header class="col-head">
         <div class="col-heading"><span class="col-step">02 / DRAFT</span><h2 id="draftTitle">变更草案</h2></div>
         <span class="col-hint" id="draftMeta">尚未生成</span>
@@ -173,7 +160,7 @@
       <div class="col-body" id="draftBody"></div>
     </section>
 
-    <section class="col col-evidence" id="panelEvidence" aria-labelledby="evidenceTitle">
+    <section class="col col-evidence" aria-labelledby="evidenceTitle">
       <header class="col-head">
         <div class="col-heading"><span class="col-step">03 / EVIDENCE</span><h2 id="evidenceTitle">证据与检查</h2></div>
         <span class="col-hint">确定性结论 · 引用来源</span>
@@ -189,6 +176,6 @@
     <div class="sql-actions"><button type="button" class="button" id="deleteCancel">取消</button><button type="button" class="button button-danger" id="deleteConfirm" disabled>确认移入回收站</button></div>
   </dialog>
 
-  <script src="app.js?v=20261012-v319" defer></script>
+  <script src="app.js" defer></script>
 </body>
 </html>
