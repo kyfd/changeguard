@@ -7,7 +7,7 @@ import (
 )
 
 func TestMergeDemoCredentialsRefreshesPersistedPassword(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_ACCOUNTS", "true")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_ACCOUNTS", "true")
 	data := state{
 		Users:       []model.User{{ID: "usr_developer"}},
 		Credentials: []model.UserCredential{{UserID: "usr_developer", PasswordSalt: "old-salt", PasswordHash: "old-hash"}},
@@ -24,8 +24,8 @@ func TestMergeDemoCredentialsRefreshesPersistedPassword(t *testing.T) {
 }
 
 func TestDemoAccountsAlsoEnableRequiredDemoData(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "")
-	t.Setenv("DBGUARD_ENABLE_DEMO_ACCOUNTS", "true")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_ACCOUNTS", "true")
 
 	data := initialState()
 

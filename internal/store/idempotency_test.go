@@ -163,7 +163,7 @@ func TestIdempotencyClaimIsAtomicAndPersistent(t *testing.T) {
 }
 
 func TestFileStateLoadsLegacyDataAndPersistsIdempotencyRecords(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "")
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte(`{"organizations":[{"id":"org_legacy","name":"Legacy"}]}`), 0o600); err != nil {
 		t.Fatal(err)

@@ -14,9 +14,9 @@ import (
 )
 
 func TestFileMigrationWitnessRestoresLegacyStrippedIntegrity(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "false")
-	t.Setenv("DBGUARD_ENABLE_DEMO_ACCOUNTS", "false")
-	t.Setenv("DBGUARD_MIGRATION_WITNESS_FILE", "")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "false")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_ACCOUNTS", "false")
+	t.Setenv("CHANGEGUARD_MIGRATION_WITNESS_FILE", "")
 	path := filepath.Join(t.TempDir(), "dbguard.json")
 	rawArtifact := "api_key: actual-production-secret\nendpoint: https://api.example.com\n"
 	rawSQL := "ALTER ROLE app PASSWORD = actual-database-secret;"
@@ -109,8 +109,8 @@ func TestFileMigrationWitnessRestoresLegacyStrippedIntegrity(t *testing.T) {
 }
 
 func TestFileMigrationWitnessFailsClosedWhenRequiredFileIsMissing(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "false")
-	t.Setenv("DBGUARD_MIGRATION_WITNESS_FILE", "")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "false")
+	t.Setenv("CHANGEGUARD_MIGRATION_WITNESS_FILE", "")
 	path := filepath.Join(t.TempDir(), "dbguard.json")
 	writeStateFixture(t, path, migrationWitnessFixture())
 	store, err := New(path)
@@ -127,8 +127,8 @@ func TestFileMigrationWitnessFailsClosedWhenRequiredFileIsMissing(t *testing.T) 
 }
 
 func TestFileMigrationWitnessRejectsTampering(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "false")
-	t.Setenv("DBGUARD_MIGRATION_WITNESS_FILE", "")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "false")
+	t.Setenv("CHANGEGUARD_MIGRATION_WITNESS_FILE", "")
 	path := filepath.Join(t.TempDir(), "dbguard.json")
 	writeStateFixture(t, path, migrationWitnessFixture())
 	store, err := New(path)
@@ -155,8 +155,8 @@ func TestFileMigrationWitnessRejectsTampering(t *testing.T) {
 }
 
 func TestFileMigrationWitnessRecoversInterruptedStateWrite(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "false")
-	t.Setenv("DBGUARD_MIGRATION_WITNESS_FILE", "")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "false")
+	t.Setenv("CHANGEGUARD_MIGRATION_WITNESS_FILE", "")
 	path := filepath.Join(t.TempDir(), "dbguard.json")
 	writeStateFixture(t, path, migrationWitnessFixture())
 	store, err := New(path)
@@ -205,7 +205,7 @@ func TestFileMigrationWitnessRecoversInterruptedStateWrite(t *testing.T) {
 
 func TestMigrationWitnessPathCannotReplaceDataFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dbguard.json")
-	t.Setenv("DBGUARD_MIGRATION_WITNESS_FILE", path)
+	t.Setenv("CHANGEGUARD_MIGRATION_WITNESS_FILE", path)
 	if _, err := New(path); err == nil || !strings.Contains(err.Error(), "must differ") {
 		t.Fatalf("unsafe witness path was accepted: %v", err)
 	}

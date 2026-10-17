@@ -35,18 +35,39 @@ const postgresStateMigration = "CREATE TABLE IF NOT EXISTS dbguard_state (" +
 	")"
 
 func NewFromEnvironment(ctx context.Context, filePath string) (*Store, error) {
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_STORE_MODE")))
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("CHANGEGUARD_STORE_MODE")))
 	if mode == "" || mode == "file" {
-		return New(filePath)
+		return newFileStore(filePath)
 	}
 	if mode != "postgres" {
-		return nil, fmt.Errorf("unsupported DBGUARD_STORE_MODE %q", mode)
+		return nil, fmt.Errorf("unsupported CHANGEGUARD_STORE_MODE %q", mode)
 	}
-	dsn := strings.TrimSpace(os.Getenv("DBGUARD_PRIMARY_DSN"))
+	dsn := strings.TrimSpace(os.Getenv("CHANGEGUARD_PRIMARY_DSN"))
 	if dsn == "" {
-		return nil, errors.New("DBGUARD_PRIMARY_DSN is required in postgres mode")
+		return nil, errors.New("CHANGEGUARD_PRIMARY_DSN is required in postgres mode")
 	}
 	return NewPostgres(ctx, dsn)
+}
+
+// newFileStore opens the file state backend under an exclusive instance lock.
+// The lock is taken before the state file is touched, so a second process never
+// writes or normalises state that another process owns. PostgreSQL keeps the
+// optimistic-concurrency backend and stays multi-instance by design.
+func newFileStore(filePath string) (*Store, error) {
+	if strings.TrimSpace(filePath) == "" {
+		return New(filePath)
+	}
+	lock, err := acquireInstanceLock(filePath)
+	if err != nil {
+		return nil, err
+	}
+	state, err := New(filePath)
+	if err != nil {
+		_ = lock.Release()
+		return nil, err
+	}
+	state.instanceLock = lock
+	return state, nil
 }
 
 func NewPostgres(ctx context.Context, dsn string) (*Store, error) {
@@ -54,10 +75,10 @@ func NewPostgres(ctx context.Context, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres dsn: %w", err)
 	}
-	config.MaxConns = int32(environmentInt("DBGUARD_DB_MAX_CONNS", 20))
-	config.MinConns = int32(environmentInt("DBGUARD_DB_MIN_CONNS", 2))
-	config.MaxConnLifetime = environmentDuration("DBGUARD_DB_CONN_MAX_LIFETIME", 30*time.Minute)
-	config.MaxConnIdleTime = environmentDuration("DBGUARD_DB_CONN_MAX_IDLE", 5*time.Minute)
+	config.MaxConns = int32(environmentInt("CHANGEGUARD_DB_MAX_CONNS", 20))
+	config.MinConns = int32(environmentInt("CHANGEGUARD_DB_MIN_CONNS", 2))
+	config.MaxConnLifetime = environmentDuration("CHANGEGUARD_DB_CONN_MAX_LIFETIME", 30*time.Minute)
+	config.MaxConnIdleTime = environmentDuration("CHANGEGUARD_DB_CONN_MAX_IDLE", 5*time.Minute)
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
@@ -172,6 +193,9 @@ func (s *Store) Health(ctx context.Context) error {
 func (s *Store) Close() {
 	if s.backend != nil {
 		s.backend.Close()
+	}
+	if s.instanceLock != nil {
+		_ = s.instanceLock.Release()
 	}
 }
 func (s *Store) Mode() string {

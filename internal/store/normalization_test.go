@@ -14,7 +14,7 @@ import (
 func TestNormalizeStateIsRestartIdempotent(t *testing.T) {
 	for _, demoEnabled := range []string{"false", "true"} {
 		t.Run("demo_data_"+demoEnabled, func(t *testing.T) {
-			t.Setenv("DBGUARD_ENABLE_DEMO_DATA", demoEnabled)
+			t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", demoEnabled)
 			data := seedState()
 			normalizeState(&data)
 			first, err := json.Marshal(data)
@@ -118,7 +118,7 @@ func TestDemoEnrichmentRequiresExplicitEnablement(t *testing.T) {
 	}
 
 	t.Run("disabled", func(t *testing.T) {
-		t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "false")
+		t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "false")
 		data := buildState()
 		normalizeState(&data)
 		if len(data.Changes) != 1 || len(data.Changes[0].Artifacts) != 1 || data.Changes[0].Artifacts[0].ID != "artifact_original" {
@@ -127,7 +127,7 @@ func TestDemoEnrichmentRequiresExplicitEnablement(t *testing.T) {
 	})
 
 	t.Run("enabled", func(t *testing.T) {
-		t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "true")
+		t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "true")
 		data := buildState()
 		normalizeState(&data)
 		if len(data.Changes) == 0 || len(data.Changes[0].Artifacts) != 1 || data.Changes[0].Artifacts[0].ID != migratedArtifactID("chg_20260730_002", "inventory-kubernetes") {
@@ -137,7 +137,7 @@ func TestDemoEnrichmentRequiresExplicitEnablement(t *testing.T) {
 }
 
 func TestNormalizeStatePreservesPreRedactionArtifactDigest(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "false")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "false")
 	raw := "api_key: production-secret\n"
 	originalSHA256 := changegate.SHA256(raw)
 	data := state{

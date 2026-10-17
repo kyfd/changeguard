@@ -57,9 +57,9 @@ func TestExpiredActivePassportsMaterializeBeforeProjection(t *testing.T) {
 }
 
 func TestPostgresNormalizedMultiInstance(t *testing.T) {
-	dsn := strings.TrimSpace(os.Getenv("DBGUARD_TEST_POSTGRES_DSN"))
+	dsn := strings.TrimSpace(os.Getenv("CHANGEGUARD_TEST_POSTGRES_DSN"))
 	if dsn == "" {
-		t.Skip("DBGUARD_TEST_POSTGRES_DSN is not set; PostgreSQL multi-instance integration skipped")
+		t.Skip("CHANGEGUARD_TEST_POSTGRES_DSN is not set; PostgreSQL multi-instance integration skipped")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -73,7 +73,7 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), cleanup) })
-	t.Setenv("DBGUARD_ENABLE_DEMO_DATA", "true")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "true")
 
 	first, err := NewPostgres(ctx, dsn)
 	if err != nil {
