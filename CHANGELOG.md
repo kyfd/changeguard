@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.0.0 - 未发布
+
+破坏性清理与部署一致性。**尚未发布**：本条目记录已合入代码但未打标签、未部署的改动。审批、通行证、确定性放行规则与模型只读边界保持不变。
+
+### 破坏性变更
+
+- **环境变量只接受 `CHANGEGUARD_*`**：进程环境或环境文件里出现 `DBGUARD_*` 旧前缀键即失败关闭（只报告键名与行号，不打印值），不再"仍可读 + 告警"。迁移用 `deploy/production/changeguard-migrate-env.sh`（`--dry-run`、写入前备份、同名键值冲突即拒绝）。
+- **文件状态后端是显式单实例**：文件后端在触碰状态文件前取得 `<state>.instance.lock` 独占锁，第二个核心进程启动失败并指向 `postgres` 后端；PostgreSQL 后端保持多实例语义。
+- **Agent 存储同样是显式单实例**：Python Agent 在启动阶段取得 `<task-store>.instance.lock`，第二个进程（含 `--workers > 1`）直接启动失败，不再让两个进程互相覆盖任务 JSON 与检查点 SQLite。
+- **发布包必须声明组件**：预检按 `deploy/lib/release_manifest.py` 校验包清单，要求 `core` 组件、并默认要求 `agent` 组件；只有操作者显式声明 `--core-only` 才接受"仅核心"的包或旧的 v2 清单。模块缺失即失败关闭。
+
+### 新增与修复
+
+- 新增 `deploy/production/changeguard-agent.service`：Agent 的 systemd 单元，只监听 loopback、使用独立数据目录、强制实例锁。
+- Go：`loadtest` 的环境读取去掉旧名称回退；`runtimeconfig` 的"冲突合并"语义替换为"旧前缀一律拒绝"，并补齐进程环境与文件内两条失败关闭路径的回归。
+- Python：新增实例锁模块与 6 项回归（含 lifespan 真实接线）。
+
+### 生产端（同一版本内完成）
+
+- `build-core-git-release.sh` 从提交导出 `agent-app/`，manifest 升为 `changeguard-release/v3` 并声明 `components`（core 摘要 + Agent 树摘要），SHA256SUMS 覆盖整个组件树；`release.yml` 打包时一并放入 `agent-app/`。
+- 安装器接受 v3 清单、核对 core 与 Agent 组件摘要；摘要不符时删除刚落地的版本目录再失败关闭，不留下"看起来装好了"的目录。
+- 升级器与 watcher：包内带 Agent 组件且系统装有该 unit 时，核心与 Agent 在同一次切换里重启，任一失败回滚两者（`CHANGEGUARD_AGENT_SERVICE` / `CHANGEGUARD_AGENT_UNIT_DIR`；watcher 可用 `CHANGEGUARD_MANAGE_AGENT=off` 关闭）。
+- 隔离安装/回滚回归（Linux root）：`sudo python3 -B -m unittest discover -s tests/deploy -v` → 57 项全部通过，无 skip。**该回归已在 WSL2 ext4（root）实际执行，取代下方"已知限制"里"未运行"的说法；仍未验证的是真实生产主机部署与真实发布包生成。**
+
+### 升级
+
+无新增数据库迁移。升级前必须先用迁移脚本改写环境文件，否则核心与 Agent 都会拒绝启动。回滚只需恢复旧版本软链与 `<env>.pre-4.0`；锁文件不含业务状态，可直接删除。
+
+### 已知限制
+
+- 本次改动只在本机（Windows + WSL 非 root）验证；Linux root 下的隔离安装/回滚回归、真实发布包生成与生产部署均为未运行，不得视为通过。
+- 真实模型质量评测保持 `NOT_RUN`。
 ## 3.1.4 - 2026-10-06
 
 升级可核对：核心与 Agent 都能报告自己的构建身份，升级前预检在切换服务之前核对身份配套性、可回滚能力与包身份。审批、通行证、确定性放行规则与模型只读边界不变。
