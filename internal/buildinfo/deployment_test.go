@@ -32,7 +32,9 @@ func TestCoreReleaseScriptsCarryMachineVerifiableProvenance(t *testing.T) {
 		"bundle create",
 		"bundle verify",
 		"archive --format=tar.gz",
-		"changeguard-core-release/v2",
+		"changeguard-release/v3",
+		`"components": [`,
+		"from release_manifest import tree_digest",
 		"SHA256SUMS",
 	})
 }
