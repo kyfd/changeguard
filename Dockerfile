@@ -12,7 +12,7 @@ WORKDIR /app
 COPY --from=builder /out/dbguard /app/dbguard
 RUN mkdir -p /app/data && chown -R dbguard:dbguard /app
 USER dbguard
-ENV PORT=8080 DBGUARD_DATA_FILE=/app/data/dbguard.json TZ=Asia/Shanghai
+ENV PORT=8080 CHANGEGUARD_DATA_FILE=/app/data/dbguard.json TZ=Asia/Shanghai
 EXPOSE 8080
 VOLUME ["/app/data"]
 ENTRYPOINT ["/app/dbguard"]

@@ -26,11 +26,11 @@ import (
 //	  status.json       升级状态（go 读、watcher 写）
 //	  history.json      升级历史
 const (
-	envUpgradeDir          = "DBGUARD_UPGRADE_DIR"
-	envUpgradeApplyEnabled = "DBGUARD_ENABLE_UPGRADE_APPLY"
+	envUpgradeDir          = "CHANGEGUARD_UPGRADE_DIR"
+	envUpgradeApplyEnabled = "CHANGEGUARD_ENABLE_UPGRADE_APPLY"
 
 	upgradeApplyDisabledCode    = "UPGRADE_APPLY_DISABLED"
-	upgradeApplyDisabledMessage = "在线升级执行已关闭；仅在完成升级包来源、备份恢复、回滚和 watcher 权限边界验证后，显式设置 DBGUARD_ENABLE_UPGRADE_APPLY=true 才可启用"
+	upgradeApplyDisabledMessage = "在线升级执行已关闭；仅在完成升级包来源、备份恢复、回滚和 watcher 权限边界验证后，显式设置 CHANGEGUARD_ENABLE_UPGRADE_APPLY=true 才可启用"
 	upgradeStateIdle            = "idle"
 	upgradeStatePending         = "pending"
 	upgradeStateApplying        = "applying"

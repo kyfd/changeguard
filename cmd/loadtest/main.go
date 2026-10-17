@@ -107,11 +107,10 @@ func summarizeLatency(values []time.Duration) *latencySummary {
 	}
 }
 
+// 4.0 reads the canonical name only; the legacy fallback is gone so a leftover
+// variable can never silently supply load-test credentials.
 func loadtestEnv(name string) string {
-	if value := strings.TrimSpace(os.Getenv("CHANGEGUARD_LOADTEST_" + name)); value != "" {
-		return value
-	}
-	return strings.TrimSpace(os.Getenv("DBGUARD_LOADTEST_" + name))
+	return strings.TrimSpace(os.Getenv("CHANGEGUARD_LOADTEST_" + name))
 }
 
 func main() {

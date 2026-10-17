@@ -37,11 +37,11 @@ func TestClientAddressOnlyTrustsConfiguredProxyHeaders(t *testing.T) {
 	request.RemoteAddr = "192.0.2.10:4567"
 	request.Header.Set("X-Real-IP", "198.51.100.20")
 
-	t.Setenv("DBGUARD_TRUST_PROXY_HEADERS", "false")
+	t.Setenv("CHANGEGUARD_TRUST_PROXY_HEADERS", "false")
 	if actual := clientAddress(request); actual != "192.0.2.10" {
 		t.Fatalf("untrusted proxy header changed client address: %q", actual)
 	}
-	t.Setenv("DBGUARD_TRUST_PROXY_HEADERS", "true")
+	t.Setenv("CHANGEGUARD_TRUST_PROXY_HEADERS", "true")
 	if actual := clientAddress(request); actual != "198.51.100.20" {
 		t.Fatalf("trusted proxy header was not used: %q", actual)
 	}
@@ -66,11 +66,11 @@ func TestMemorySessionRepositoryLoginFlowIsOneTime(t *testing.T) {
 }
 
 func TestRedisSessionPrefixUsesConfiguredNamespace(t *testing.T) {
-	t.Setenv("DBGUARD_REDIS_PREFIX", "changeguard:test:session:")
+	t.Setenv("CHANGEGUARD_REDIS_PREFIX", "changeguard:test:session:")
 	if got := redisSessionPrefix(); got != "changeguard:test:session:" {
 		t.Fatalf("Redis prefix = %q", got)
 	}
-	t.Setenv("DBGUARD_REDIS_PREFIX", "")
+	t.Setenv("CHANGEGUARD_REDIS_PREFIX", "")
 	if got := redisSessionPrefix(); got != "dbguard:" {
 		t.Fatalf("default Redis prefix = %q", got)
 	}
@@ -95,7 +95,7 @@ func TestMiddlewareReturnsServiceUnavailableWhenSessionBackendFails(t *testing.T
 }
 
 func TestInvalidAuthModeFallsBackToSessionAuthentication(t *testing.T) {
-	t.Setenv("DBGUARD_AUTH_MODE", "oidcc")
+	t.Setenv("CHANGEGUARD_AUTH_MODE", "oidcc")
 	config := FromEnvironment()
 	if config.Mode != "local" {
 		t.Fatalf("invalid auth mode must fall back to local, got %q", config.Mode)

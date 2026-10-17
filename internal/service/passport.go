@@ -24,9 +24,9 @@ var (
 )
 
 func passportSignerFromEnvironment() (*changegate.Signer, time.Duration) {
-	signer, _ := changegate.NewSigner(os.Getenv("DBGUARD_PASSPORT_HMAC_SECRET"))
+	signer, _ := changegate.NewSigner(os.Getenv("CHANGEGUARD_PASSPORT_HMAC_SECRET"))
 	ttl := 10 * time.Minute
-	if configured, err := time.ParseDuration(strings.TrimSpace(os.Getenv("DBGUARD_PASSPORT_TTL"))); err == nil && configured >= time.Minute && configured <= 30*time.Minute {
+	if configured, err := time.ParseDuration(strings.TrimSpace(os.Getenv("CHANGEGUARD_PASSPORT_TTL"))); err == nil && configured >= time.Minute && configured <= 30*time.Minute {
 		ttl = configured
 	}
 	return signer, ttl

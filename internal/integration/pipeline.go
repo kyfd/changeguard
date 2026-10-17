@@ -40,19 +40,19 @@ type Config struct {
 
 func FromEnvironment() Config {
 	maxAge := 5 * time.Minute
-	if value := strings.TrimSpace(os.Getenv("DBGUARD_GITLAB_WEBHOOK_MAX_AGE")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("CHANGEGUARD_GITLAB_WEBHOOK_MAX_AGE")); value != "" {
 		if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
 			maxAge = parsed
 		}
 	}
 	return Config{
-		GitLabSigningToken:     strings.TrimSpace(os.Getenv("DBGUARD_GITLAB_SIGNING_TOKEN")),
-		GitLabSecretToken:      strings.TrimSpace(os.Getenv("DBGUARD_GITLAB_WEBHOOK_SECRET")),
-		GitLabOrganization:     envOr("DBGUARD_GITLAB_ORGANIZATION_ID", "org_demo"),
-		JenkinsToken:           strings.TrimSpace(os.Getenv("DBGUARD_JENKINS_WEBHOOK_TOKEN")),
-		JenkinsOrganization:    envOr("DBGUARD_JENKINS_ORGANIZATION_ID", "org_demo"),
-		OperationsToken:        strings.TrimSpace(os.Getenv("DBGUARD_OPERATIONS_WEBHOOK_TOKEN")),
-		OperationsOrganization: envOr("DBGUARD_OPERATIONS_ORGANIZATION_ID", "org_demo"),
+		GitLabSigningToken:     strings.TrimSpace(os.Getenv("CHANGEGUARD_GITLAB_SIGNING_TOKEN")),
+		GitLabSecretToken:      strings.TrimSpace(os.Getenv("CHANGEGUARD_GITLAB_WEBHOOK_SECRET")),
+		GitLabOrganization:     envOr("CHANGEGUARD_GITLAB_ORGANIZATION_ID", "org_demo"),
+		JenkinsToken:           strings.TrimSpace(os.Getenv("CHANGEGUARD_JENKINS_WEBHOOK_TOKEN")),
+		JenkinsOrganization:    envOr("CHANGEGUARD_JENKINS_ORGANIZATION_ID", "org_demo"),
+		OperationsToken:        strings.TrimSpace(os.Getenv("CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN")),
+		OperationsOrganization: envOr("CHANGEGUARD_OPERATIONS_ORGANIZATION_ID", "org_demo"),
 		MaxWebhookAge:          maxAge,
 	}
 }

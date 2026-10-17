@@ -69,15 +69,15 @@ func TestSummarizeEmptyRunHasNoInventedLatency(t *testing.T) {
 	}
 }
 
-func TestLoadtestEnvironmentPrefersCanonicalName(t *testing.T) {
+func TestLoadtestEnvironmentReadsCanonicalNameOnly(t *testing.T) {
 	t.Setenv("CHANGEGUARD_LOADTEST_EMAIL", "current@example.com")
 	t.Setenv("DBGUARD_LOADTEST_EMAIL", "legacy@example.com")
 	if got := loadtestEnv("EMAIL"); got != "current@example.com" {
 		t.Fatalf("canonical value = %q", got)
 	}
 	t.Setenv("CHANGEGUARD_LOADTEST_EMAIL", "")
-	if got := loadtestEnv("EMAIL"); got != "legacy@example.com" {
-		t.Fatalf("legacy fallback = %q", got)
+	if got := loadtestEnv("EMAIL"); got != "" {
+		t.Fatalf("4.0 must not fall back to the removed legacy name, got %q", got)
 	}
 }
 

@@ -74,7 +74,7 @@ func New(svc *service.Service, authManager *auth.Manager, logger *log.Logger, co
 	}
 	// 主密钥缺失时 secrets 保持 nil：所有模型接入接口都会明确报"未配置主密钥"，
 	// 而不是退化成明文存储。
-	if box, err := modelsecret.New(strings.TrimSpace(os.Getenv("DBGUARD_SECRETS_MASTER_KEY"))); err == nil {
+	if box, err := modelsecret.New(strings.TrimSpace(os.Getenv("CHANGEGUARD_SECRETS_MASTER_KEY"))); err == nil {
 		server.secrets = box
 	} else if !errors.Is(err, modelsecret.ErrNotConfigured) {
 		logger.Printf("model secret box unavailable: %v", err)
@@ -86,7 +86,7 @@ func New(svc *service.Service, authManager *auth.Manager, logger *log.Logger, co
 	if configured := server.wireModelConfigResolver(); configured > 0 {
 		logger.Printf("enterprise model config active for %d organization(s)", configured)
 	} else if !server.modelSecretConfigured() {
-		logger.Printf("enterprise model config unavailable: set DBGUARD_SECRETS_MASTER_KEY to enable per-organization model keys")
+		logger.Printf("enterprise model config unavailable: set CHANGEGUARD_SECRETS_MASTER_KEY to enable per-organization model keys")
 	}
 	server.handler = securityHeaders(server.routes())
 	return server
@@ -213,7 +213,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	expected := strings.TrimSpace(os.Getenv("DBGUARD_METRICS_TOKEN"))
+	expected := strings.TrimSpace(os.Getenv("CHANGEGUARD_METRICS_TOKEN"))
 	if expected == "" {
 		writeError(w, http.StatusNotFound, "接口不存在")
 		return
@@ -322,24 +322,24 @@ func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	configured := strings.TrimSpace(os.Getenv("DBGUARD_LLM_BASE_URL")) != "" &&
-		strings.TrimSpace(os.Getenv("DBGUARD_LLM_API_KEY")) != ""
+	configured := strings.TrimSpace(os.Getenv("CHANGEGUARD_LLM_BASE_URL")) != "" &&
+		strings.TrimSpace(os.Getenv("CHANGEGUARD_LLM_API_KEY")) != ""
 	writeJSON(w, http.StatusOK, map[string]any{
 		"llm_configured":                    configured,
 		"llm_secret_ready":                  s.modelSecretConfigured(),
 		"llm_provider":                      "OpenAI-compatible",
-		"llm_model":                         envValue("DBGUARD_LLM_MODEL", "deepseek-chat"),
-		"daily_analysis_limit":              envValue("DBGUARD_LLM_DAILY_ANALYSIS_LIMIT", "20"),
-		"daily_organization_analysis_limit": envValue("DBGUARD_LLM_DAILY_ORG_LIMIT", "100"),
-		"daily_global_analysis_limit":       envValue("DBGUARD_LLM_DAILY_GLOBAL_LIMIT", "200"),
-		"analysis_limit_mode":               envValue("DBGUARD_LLM_LIMIT_MODE", map[bool]string{true: "redis", false: "memory"}[strings.EqualFold(envValue("DBGUARD_SESSION_MODE", "memory"), "redis")]),
-		"max_output_tokens":                 envValue("DBGUARD_LLM_MAX_TOKENS", "700"),
-		"max_model_concurrency":             envValue("DBGUARD_LLM_MAX_CONCURRENCY", "4"),
-		"model_http_timeout":                envValue("DBGUARD_LLM_HTTP_TIMEOUT", "15s"),
-		"model_max_retries":                 envValue("DBGUARD_LLM_MAX_RETRIES", "1"),
-		"model_circuit_failures":            envValue("DBGUARD_LLM_CIRCUIT_FAILURES", "3"),
-		"model_circuit_cooldown":            envValue("DBGUARD_LLM_CIRCUIT_COOLDOWN", "1m"),
-		"experiment_mode":                   envValue("DBGUARD_EXPERIMENT_MODE", "demo_only"),
+		"llm_model":                         envValue("CHANGEGUARD_LLM_MODEL", "deepseek-chat"),
+		"daily_analysis_limit":              envValue("CHANGEGUARD_LLM_DAILY_ANALYSIS_LIMIT", "20"),
+		"daily_organization_analysis_limit": envValue("CHANGEGUARD_LLM_DAILY_ORG_LIMIT", "100"),
+		"daily_global_analysis_limit":       envValue("CHANGEGUARD_LLM_DAILY_GLOBAL_LIMIT", "200"),
+		"analysis_limit_mode":               envValue("CHANGEGUARD_LLM_LIMIT_MODE", map[bool]string{true: "redis", false: "memory"}[strings.EqualFold(envValue("CHANGEGUARD_SESSION_MODE", "memory"), "redis")]),
+		"max_output_tokens":                 envValue("CHANGEGUARD_LLM_MAX_TOKENS", "700"),
+		"max_model_concurrency":             envValue("CHANGEGUARD_LLM_MAX_CONCURRENCY", "4"),
+		"model_http_timeout":                envValue("CHANGEGUARD_LLM_HTTP_TIMEOUT", "15s"),
+		"model_max_retries":                 envValue("CHANGEGUARD_LLM_MAX_RETRIES", "1"),
+		"model_circuit_failures":            envValue("CHANGEGUARD_LLM_CIRCUIT_FAILURES", "3"),
+		"model_circuit_cooldown":            envValue("CHANGEGUARD_LLM_CIRCUIT_COOLDOWN", "1m"),
+		"experiment_mode":                   envValue("CHANGEGUARD_EXPERIMENT_MODE", "demo_only"),
 		"passport_signing_configured":       s.service.PassportConfigured(),
 		"gitlab_integration_configured":     s.integrations.GitLabConfigured(),
 		"jenkins_integration_configured":    s.integrations.JenkinsConfigured(),
@@ -554,7 +554,7 @@ func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request)
 			operationsLast = &received
 		}
 	}
-	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("DBGUARD_PUBLIC_URL")), "/")
+	baseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("CHANGEGUARD_PUBLIC_URL")), "/")
 	if baseURL == "" {
 		scheme := "http"
 		if r.TLS != nil {

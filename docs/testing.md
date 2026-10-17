@@ -51,7 +51,7 @@ Token 只保留在测试进程及 CLI 子进程环境中。该流程关闭自动
 
 ## PostgreSQL / Redis 集成
 
-参照 `.github/workflows/ci.yml` 设置 `DBGUARD_TEST_POSTGRES_DSN` 和 `DBGUARD_REDIS_TEST_URL`，然后运行：
+参照 `.github/workflows/ci.yml` 设置 `CHANGEGUARD_TEST_POSTGRES_DSN` 和 `CHANGEGUARD_REDIS_TEST_URL`，然后运行：
 
 ```powershell
 go test ./internal/store -run '^TestPostgresNormalizedMultiInstance$' -count=1 -v

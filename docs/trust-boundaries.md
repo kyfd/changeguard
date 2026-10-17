@@ -44,7 +44,7 @@ Evidence Navigator 和模型分析位于 Gate 判定之外：
 
 ## 高权限升级边界
 
-Web 升级 `apply` 可触发 root watcher，默认关闭。只有显式设置 `DBGUARD_ENABLE_UPGRADE_APPLY=true` 才开放触发接口；查询版本、状态和历史不受影响。该开关不能替代升级包来源验证、独立审批、备份恢复、回滚演练和 watcher 权限隔离。
+Web 升级 `apply` 可触发 root watcher，默认关闭。只有显式设置 `CHANGEGUARD_ENABLE_UPGRADE_APPLY=true` 才开放触发接口；查询版本、状态和历史不受影响。该开关不能替代升级包来源验证、独立审批、备份恢复、回滚演练和 watcher 权限隔离。
 
 ## 手工验证步骤
 

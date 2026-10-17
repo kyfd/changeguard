@@ -27,7 +27,6 @@ type Summary struct {
 	Explicit    bool
 	Profile     string
 	Assignments int
-	LegacyKeys  []string
 }
 
 type assignment struct {
@@ -40,6 +39,10 @@ type assignment struct {
 // malformed assignments, missing files and conflicting inherited overrides all
 // fail closed. The default local .env remains optional for developer workflows.
 func Load() (Summary, error) {
+
+	if err := rejectLegacyBrandEnvironment(); err != nil {
+		return Summary{}, err
+	}
 	path, explicit := envFilePath()
 
 	assignments, err := readEnvironmentFile(path)
@@ -62,19 +65,14 @@ func Load() (Summary, error) {
 		}
 	}
 
-	legacyKeys, err := applyBrandAliases()
-	if err != nil {
-		return Summary{}, err
-	}
-
 	profile := profileName()
 	if profile == ProfileProduction && !explicit {
-		return Summary{}, errors.New("production profile requires an explicit CHANGEGUARD_ENV_FILE (legacy DBGUARD_ENV_FILE is still accepted)")
+		return Summary{}, errors.New("production profile requires an explicit CHANGEGUARD_ENV_FILE")
 	}
 	if err := ValidateProfile(profile); err != nil {
 		return Summary{}, err
 	}
-	return Summary{Path: path, Explicit: explicit, Profile: profile, Assignments: len(assignments), LegacyKeys: legacyKeys}, nil
+	return Summary{Path: path, Explicit: explicit, Profile: profile, Assignments: len(assignments)}, nil
 }
 
 func readEnvironmentFile(path string) (map[string]assignment, error) {
@@ -106,6 +104,9 @@ func readEnvironmentFile(path string) (map[string]assignment, error) {
 		key = strings.TrimSpace(key)
 		if !environmentKeyPattern.MatchString(key) {
 			return nil, fmt.Errorf("line %d has an invalid environment key", lineNumber)
+		}
+		if strings.HasPrefix(key, legacyPrefix) {
+			return nil, fmt.Errorf("line %d declares %s, which 4.0 no longer accepts; %s", lineNumber, key, legacyMigrationHint)
 		}
 		if previous, exists := result[key]; exists {
 			return nil, fmt.Errorf("duplicate environment key %s on lines %d and %d", key, previous.line, lineNumber)
@@ -158,107 +159,107 @@ func ValidateProfile(profile string) error {
 }
 
 func validateProductionEnvironment() error {
-	if err := requireLoopbackListenAddress("DBGUARD_LISTEN_ADDRESS"); err != nil {
+	if err := requireLoopbackListenAddress("CHANGEGUARD_LISTEN_ADDRESS"); err != nil {
 		return err
 	}
 	if strings.TrimSpace(os.Getenv("PORT")) != "" {
-		return errors.New("PORT must be unset when DBGUARD_LISTEN_ADDRESS is used in production")
+		return errors.New("PORT must be unset when CHANGEGUARD_LISTEN_ADDRESS is used in production")
 	}
-	if err := requireFalseOrUnset("DBGUARD_ENABLE_DEMO_ACCOUNTS"); err != nil {
+	if err := requireFalseOrUnset("CHANGEGUARD_ENABLE_DEMO_ACCOUNTS"); err != nil {
 		return err
 	}
-	if err := requireFalseOrUnset("DBGUARD_ENABLE_DEMO_DATA"); err != nil {
+	if err := requireFalseOrUnset("CHANGEGUARD_ENABLE_DEMO_DATA"); err != nil {
 		return err
 	}
-	if err := requireExact("DBGUARD_AUTH_SECURE_COOKIE", "true"); err != nil {
+	if err := requireExact("CHANGEGUARD_AUTH_SECURE_COOKIE", "true"); err != nil {
 		return err
 	}
-	if err := requireExact("DBGUARD_TRUST_PROXY_HEADERS", "true"); err != nil {
+	if err := requireExact("CHANGEGUARD_TRUST_PROXY_HEADERS", "true"); err != nil {
 		return err
 	}
-	if err := requireURL("DBGUARD_PUBLIC_URL", "https"); err != nil {
+	if err := requireURL("CHANGEGUARD_PUBLIC_URL", "https"); err != nil {
 		return err
 	}
 
-	authMode := strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_AUTH_MODE")))
+	authMode := strings.ToLower(strings.TrimSpace(os.Getenv("CHANGEGUARD_AUTH_MODE")))
 	switch authMode {
 	case "local":
 	case "oidc", "hybrid":
-		if err := requireURL("DBGUARD_OIDC_ISSUER", "https"); err != nil {
+		if err := requireURL("CHANGEGUARD_OIDC_ISSUER", "https"); err != nil {
 			return err
 		}
-		if err := requireURL("DBGUARD_OIDC_REDIRECT_URL", "https"); err != nil {
+		if err := requireURL("CHANGEGUARD_OIDC_REDIRECT_URL", "https"); err != nil {
 			return err
 		}
-		if err := requireNonEmpty("DBGUARD_OIDC_CLIENT_ID"); err != nil {
+		if err := requireNonEmpty("CHANGEGUARD_OIDC_CLIENT_ID"); err != nil {
 			return err
 		}
-		if err := requireSecret("DBGUARD_OIDC_CLIENT_SECRET", 16); err != nil {
+		if err := requireSecret("CHANGEGUARD_OIDC_CLIENT_SECRET", 16); err != nil {
 			return err
 		}
 	default:
-		return errors.New("DBGUARD_AUTH_MODE must be local, oidc, or hybrid in production")
+		return errors.New("CHANGEGUARD_AUTH_MODE must be local, oidc, or hybrid in production")
 	}
 
-	if err := requireExact("DBGUARD_SESSION_MODE", "redis"); err != nil {
+	if err := requireExact("CHANGEGUARD_SESSION_MODE", "redis"); err != nil {
 		return err
 	}
-	if err := requireRedisURL("DBGUARD_REDIS_URL"); err != nil {
+	if err := requireRedisURL("CHANGEGUARD_REDIS_URL"); err != nil {
 		return err
 	}
-	if err := requireRedisPrefix("DBGUARD_REDIS_PREFIX"); err != nil {
+	if err := requireRedisPrefix("CHANGEGUARD_REDIS_PREFIX"); err != nil {
 		return err
 	}
-	if err := requireExact("DBGUARD_EXPERIMENT_MODE", "postgres"); err != nil {
+	if err := requireExact("CHANGEGUARD_EXPERIMENT_MODE", "postgres"); err != nil {
 		return err
 	}
-	if err := requireURL("DBGUARD_SHADOW_DSN", "postgres", "postgresql"); err != nil {
+	if err := requireURL("CHANGEGUARD_SHADOW_DSN", "postgres", "postgresql"); err != nil {
 		return err
 	}
 	if err := rejectShadowOnPrimary(); err != nil {
 		return err
 	}
-	if err := requireSecret("DBGUARD_PASSPORT_HMAC_SECRET", 32); err != nil {
+	if err := requireSecret("CHANGEGUARD_PASSPORT_HMAC_SECRET", 32); err != nil {
 		return err
 	}
-	if err := requireSecret("DBGUARD_METRICS_TOKEN", 32); err != nil {
+	if err := requireSecret("CHANGEGUARD_METRICS_TOKEN", 32); err != nil {
 		return err
 	}
-	if err := requireSecret("DBGUARD_OPERATIONS_WEBHOOK_TOKEN", 32); err != nil {
+	if err := requireSecret("CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN", 32); err != nil {
 		return err
 	}
-	if err := requireNonEmpty("DBGUARD_OPERATIONS_ORGANIZATION_ID"); err != nil {
+	if err := requireNonEmpty("CHANGEGUARD_OPERATIONS_ORGANIZATION_ID"); err != nil {
 		return err
 	}
 
-	storeMode := strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_STORE_MODE")))
+	storeMode := strings.ToLower(strings.TrimSpace(os.Getenv("CHANGEGUARD_STORE_MODE")))
 	if storeMode == "" {
 		storeMode = "file"
 	}
 	switch storeMode {
 	case "file":
-		dataPath := strings.TrimSpace(os.Getenv("DBGUARD_DATA_FILE"))
-		witnessPath := strings.TrimSpace(os.Getenv("DBGUARD_MIGRATION_WITNESS_FILE"))
+		dataPath := strings.TrimSpace(os.Getenv("CHANGEGUARD_DATA_FILE"))
+		witnessPath := strings.TrimSpace(os.Getenv("CHANGEGUARD_MIGRATION_WITNESS_FILE"))
 		if !isAbsoluteDeploymentPath(dataPath) {
-			return errors.New("DBGUARD_DATA_FILE must be an explicit absolute path in production file mode")
+			return errors.New("CHANGEGUARD_DATA_FILE must be an explicit absolute path in production file mode")
 		}
 		if !isAbsoluteDeploymentPath(witnessPath) {
-			return errors.New("DBGUARD_MIGRATION_WITNESS_FILE must be an explicit absolute path in production file mode")
+			return errors.New("CHANGEGUARD_MIGRATION_WITNESS_FILE must be an explicit absolute path in production file mode")
 		}
 		if filepath.Clean(dataPath) == filepath.Clean(witnessPath) {
-			return errors.New("DBGUARD_MIGRATION_WITNESS_FILE must differ from DBGUARD_DATA_FILE")
+			return errors.New("CHANGEGUARD_MIGRATION_WITNESS_FILE must differ from CHANGEGUARD_DATA_FILE")
 		}
 	case "postgres":
-		if err := requireURL("DBGUARD_PRIMARY_DSN", "postgres", "postgresql"); err != nil {
+		if err := requireURL("CHANGEGUARD_PRIMARY_DSN", "postgres", "postgresql"); err != nil {
 			return err
 		}
 	default:
-		return errors.New("DBGUARD_STORE_MODE must be file or postgres in production")
+		return errors.New("CHANGEGUARD_STORE_MODE must be file or postgres in production")
 	}
 
-	workers, err := strconv.Atoi(strings.TrimSpace(os.Getenv("DBGUARD_WORKERS")))
+	workers, err := strconv.Atoi(strings.TrimSpace(os.Getenv("CHANGEGUARD_WORKERS")))
 	if err != nil || workers < 1 || workers > 64 {
-		return errors.New("DBGUARD_WORKERS must be an integer from 1 to 64 in production")
+		return errors.New("CHANGEGUARD_WORKERS must be an integer from 1 to 64 in production")
 	}
 	return nil
 }

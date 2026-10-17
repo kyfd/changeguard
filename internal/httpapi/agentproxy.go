@@ -25,8 +25,8 @@ import (
 //  2. 身份只能由服务端解析。若由浏览器声明身份，任何登录用户都能冒充他人，
 //     这正是 `docs/adr/0002` 里反复强调必须避免的失败模式。
 const (
-	agentBaseURLEnv    = "DBGUARD_AGENT_BASE_URL"
-	agentUpstreamToken = "DBGUARD_AGENT_UPSTREAM_TOKEN"
+	agentBaseURLEnv    = "CHANGEGUARD_AGENT_BASE_URL"
+	agentUpstreamToken = "CHANGEGUARD_AGENT_UPSTREAM_TOKEN"
 	// 与 JSON 接口保持同一量级的请求体上限。
 	maxAgentRequestBodyBytes = 1 << 20
 	agentRequestTimeout      = 150 * time.Second

@@ -106,7 +106,7 @@ func (gateFlowAnalyzer) Analyze(_ context.Context, change model.ChangeRequest) m
 }
 
 func TestGoldenConfigFlowBindsApprovalToActualCIFiles(t *testing.T) {
-	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("g", 32))
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("g", 32))
 	directory := t.TempDir()
 	artifactPath := filepath.Join(directory, "application.yaml")
 	content := "debug: false\nauth_enabled: true\ntls_verify: true\n"

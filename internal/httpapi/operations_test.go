@@ -110,7 +110,7 @@ func TestOperationsWebhookRejectsUnlinkedChange(t *testing.T) {
 }
 
 func TestMetricsExportsLowCardinalityOutcomeAggregates(t *testing.T) {
-	t.Setenv("DBGUARD_METRICS_TOKEN", "metrics-secret")
+	t.Setenv("CHANGEGUARD_METRICS_TOKEN", "metrics-secret")
 	data := store.NewMemory()
 	app := service.New(data, nil, nil)
 	now := time.Now().UTC()

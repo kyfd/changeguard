@@ -32,25 +32,25 @@ cd "/opt/changeguard/releases/$REL_ID" && sha256sum -c SHA256SUMS
 
 echo "==> 5. 生成 core.env"
 cat > /etc/changeguard/core.env <<EOF
-DBGUARD_LISTEN_ADDRESS=127.0.0.1:8080
-DBGUARD_PUBLIC_URL=http://${PUBLIC_HOST}
-DBGUARD_TRUST_PROXY_HEADERS=true
+CHANGEGUARD_LISTEN_ADDRESS=127.0.0.1:8080
+CHANGEGUARD_PUBLIC_URL=http://${PUBLIC_HOST}
+CHANGEGUARD_TRUST_PROXY_HEADERS=true
 
-DBGUARD_AUTH_MODE=local
-DBGUARD_AUTH_REGISTRATION_ENABLED=true
-DBGUARD_AUTH_SECURE_COOKIE=false
-DBGUARD_AUTH_SESSION_TTL=12h
-DBGUARD_ENABLE_DEMO_ACCOUNTS=true
-DBGUARD_ENABLE_DEMO_DATA=true
+CHANGEGUARD_AUTH_MODE=local
+CHANGEGUARD_AUTH_REGISTRATION_ENABLED=true
+CHANGEGUARD_AUTH_SECURE_COOKIE=false
+CHANGEGUARD_AUTH_SESSION_TTL=12h
+CHANGEGUARD_ENABLE_DEMO_ACCOUNTS=true
+CHANGEGUARD_ENABLE_DEMO_DATA=true
 
-DBGUARD_SESSION_MODE=memory
-DBGUARD_STORE_MODE=file
-DBGUARD_DATA_FILE=/opt/changeguard/data/dbguard.json
-DBGUARD_MIGRATION_WITNESS_FILE=/opt/changeguard/data/dbguard.json.rollback-witness.json
+CHANGEGUARD_SESSION_MODE=memory
+CHANGEGUARD_STORE_MODE=file
+CHANGEGUARD_DATA_FILE=/opt/changeguard/data/dbguard.json
+CHANGEGUARD_MIGRATION_WITNESS_FILE=/opt/changeguard/data/dbguard.json.rollback-witness.json
 
-DBGUARD_EXPERIMENT_MODE=simulated
-DBGUARD_WORKERS=2
-DBGUARD_UPGRADE_DIR=/opt/changeguard/upgrades
+CHANGEGUARD_EXPERIMENT_MODE=simulated
+CHANGEGUARD_WORKERS=2
+CHANGEGUARD_UPGRADE_DIR=/opt/changeguard/upgrades
 EOF
 chown root:changeguard /etc/changeguard/core.env
 chmod 0640 /etc/changeguard/core.env
@@ -67,7 +67,7 @@ Type=simple
 User=changeguard
 Group=changeguard
 WorkingDirectory=/opt/changeguard/current
-Environment=DBGUARD_ENV_FILE=/etc/changeguard/core.env
+Environment=CHANGEGUARD_ENV_FILE=/etc/changeguard/core.env
 EnvironmentFile=/etc/changeguard/core.env
 ExecStartPre=/bin/sh -c 'cd /opt/changeguard/current && sha256sum -c SHA256SUMS >/dev/null'
 ExecStart=/opt/changeguard/current/dbguard

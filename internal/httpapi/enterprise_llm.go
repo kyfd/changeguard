@@ -6,7 +6,7 @@ package httpapi
 //
 //   - 只允许企业管理员（enterprise_admin 或技术负责人）修改；其他人只读状态。
 //   - API Key **永不回显**。响应里只有 Hint() 生成的尾缀提示。
-//   - 未配置 DBGUARD_SECRETS_MASTER_KEY 时整体失败关闭，不落明文。
+//   - 未配置 CHANGEGUARD_SECRETS_MASTER_KEY 时整体失败关闭，不落明文。
 //   - 服务地址经 modelprobe.ValidateBaseURL 过滤，避免把服务端变成内网探针。
 //   - 每次保存写一条审计，但不记录 Key 与服务地址以外的内容。
 
@@ -31,7 +31,7 @@ const (
 
 // modelConfigUnavailable 是主密钥缺失时返回给前端的说明。
 // 说清"要配什么、配在哪"，而不是只报一个内部错误码。
-const modelConfigUnavailable = "未配置模型密钥主密钥：请在服务环境设置 DBGUARD_SECRETS_MASTER_KEY 后重启，" +
+const modelConfigUnavailable = "未配置模型密钥主密钥：请在服务环境设置 CHANGEGUARD_SECRETS_MASTER_KEY 后重启，" +
 	"否则无法安全保存企业模型 Key。"
 
 // currentEnterprise 返回当前成员与其所属企业；未登录或成员无效时已写出错误响应。

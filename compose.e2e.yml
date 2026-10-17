@@ -40,23 +40,23 @@ services:
       - "127.0.0.1:18080:8080"
     environment:
       PORT: "8080"
-      DBGUARD_ENV_PROFILE: development
-      DBGUARD_STORE_MODE: postgres
-      DBGUARD_PRIMARY_DSN: postgres://dbguard:e2e-primary-password@primary-postgres:5432/dbguard?sslmode=disable
-      DBGUARD_DB_MAX_CONNS: "8"
-      DBGUARD_DB_MIN_CONNS: "1"
-      DBGUARD_SESSION_MODE: redis
-      DBGUARD_REDIS_URL: redis://redis:6379/0
-      DBGUARD_REDIS_PREFIX: "changeguard:e2e:"
-      DBGUARD_AUTH_MODE: local
-      DBGUARD_AUTH_SECURE_COOKIE: "false"
-      DBGUARD_ENABLE_DEMO_ACCOUNTS: "true"
-      DBGUARD_ENABLE_DEMO_DATA: "true"
-      DBGUARD_EXPERIMENT_MODE: postgres
-      DBGUARD_SHADOW_DSN: postgres://dbguard_runner:dbguard_runner@shadow-postgres:5432/shadow?sslmode=disable
-      DBGUARD_PASSPORT_HMAC_SECRET: e2e-only-passport-secret-at-least-32-bytes
-      DBGUARD_WORKERS: "1"
-      DBGUARD_PUBLIC_URL: http://localhost:18080
+      CHANGEGUARD_ENV_PROFILE: development
+      CHANGEGUARD_STORE_MODE: postgres
+      CHANGEGUARD_PRIMARY_DSN: postgres://dbguard:e2e-primary-password@primary-postgres:5432/dbguard?sslmode=disable
+      CHANGEGUARD_DB_MAX_CONNS: "8"
+      CHANGEGUARD_DB_MIN_CONNS: "1"
+      CHANGEGUARD_SESSION_MODE: redis
+      CHANGEGUARD_REDIS_URL: redis://redis:6379/0
+      CHANGEGUARD_REDIS_PREFIX: "changeguard:e2e:"
+      CHANGEGUARD_AUTH_MODE: local
+      CHANGEGUARD_AUTH_SECURE_COOKIE: "false"
+      CHANGEGUARD_ENABLE_DEMO_ACCOUNTS: "true"
+      CHANGEGUARD_ENABLE_DEMO_DATA: "true"
+      CHANGEGUARD_EXPERIMENT_MODE: postgres
+      CHANGEGUARD_SHADOW_DSN: postgres://dbguard_runner:dbguard_runner@shadow-postgres:5432/shadow?sslmode=disable
+      CHANGEGUARD_PASSPORT_HMAC_SECRET: e2e-only-passport-secret-at-least-32-bytes
+      CHANGEGUARD_WORKERS: "1"
+      CHANGEGUARD_PUBLIC_URL: http://localhost:18080
     depends_on:
       primary-postgres:
         condition: service_healthy

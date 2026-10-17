@@ -96,7 +96,7 @@ $env:CHANGEGUARD_AGENT_UPSTREAM_TOKEN = "local-dev-shared-secret"
 go run ./cmd/dbguard
 ```
 
-> 注意：不要同时设置 `CHANGEGUARD_X` 和 `DBGUARD_X`（同一个配置项）。
+> 注意：不要同时设置 `CHANGEGUARD_X` 和 `CHANGEGUARD_X`（同一个配置项）。
 > 两个品牌前缀值不一致时，治理服务会**失败关闭**并拒绝启动。
 
 **不需要模型也能跑**：未配置 `AGENT_LLM_BASE_URL` / `AGENT_LLM_API_KEY` 时使用确定性生成器，
@@ -256,8 +256,8 @@ START → screen_input ──命中注入──▶ INPUT_REJECTED（停止）
 
 **跨服务验收**（真实启动隔离的 Go 服务 + 合成演示数据，不使用 mock）：
 先跑 `go build -o dbguard.exe ./cmd/dbguard` 并以
-`PORT` / `DBGUARD_DATA_FILE` / `DBGUARD_ENABLE_DEMO_ACCOUNTS=true` /
-`DBGUARD_AGENT_UPSTREAM_TOKEN` 启动，再用带相同密钥的 `Settings` 驱动
+`PORT` / `CHANGEGUARD_DATA_FILE` / `CHANGEGUARD_ENABLE_DEMO_ACCOUNTS=true` /
+`CHANGEGUARD_AGENT_UPSTREAM_TOKEN` 启动，再用带相同密钥的 `Settings` 驱动
 `Toolbox` 调用三个只读工具，验证可用性与各条拒绝路径。
 
 评估集 `evals/datasets/starter.jsonl` 覆盖：正常任务、信息缺失、规范冲突、

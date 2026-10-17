@@ -18,7 +18,7 @@ func TestWorkerCountFromEnvironment(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Setenv("DBGUARD_WORKERS", test.value)
+			t.Setenv("CHANGEGUARD_WORKERS", test.value)
 			got, err := workerCountFromEnvironment()
 			if test.wantErr {
 				if err == nil {
@@ -84,7 +84,7 @@ func TestListenAddressFromEnvironment(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Setenv("DBGUARD_LISTEN_ADDRESS", test.address)
+			t.Setenv("CHANGEGUARD_LISTEN_ADDRESS", test.address)
 			t.Setenv("PORT", test.port)
 			got, err := listenAddressFromEnvironment()
 			if test.wantErr {

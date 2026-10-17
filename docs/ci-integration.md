@@ -29,7 +29,7 @@ CHANGEGUARD_PASSPORT_HMAC_SECRET=<至少 32 字节随机值>
 CHANGEGUARD_PASSPORT_TTL=10m
 ```
 
-生产部署资产仍可使用对应的 `DBGUARD_*` 兼容键。
+生产部署资产使用同一组 `CHANGEGUARD_*` 键名；4.0 起不再接受 `DBGUARD_*` 旧前缀，残留旧键会让核心拒绝启动（迁移见 `deploy/production/changeguard-migrate-env.sh`）。
 
 CI masked/protected secret 和标识：
 
@@ -150,10 +150,10 @@ ChangeGuard 可以接收 GitLab Pipeline events，用于记录部署终态；Web
 服务端配置：
 
 ```text
-DBGUARD_GITLAB_SIGNING_TOKEN=<GitLab 19.0+ Signing Token，形如 whsec_...>
-DBGUARD_GITLAB_WEBHOOK_SECRET=<迁移期 X-Gitlab-Token>
-DBGUARD_GITLAB_ORGANIZATION_ID=org_demo
-DBGUARD_GITLAB_WEBHOOK_MAX_AGE=5m
+CHANGEGUARD_GITLAB_SIGNING_TOKEN=<GitLab 19.0+ Signing Token，形如 whsec_...>
+CHANGEGUARD_GITLAB_WEBHOOK_SECRET=<迁移期 X-Gitlab-Token>
+CHANGEGUARD_GITLAB_ORGANIZATION_ID=org_demo
+CHANGEGUARD_GITLAB_WEBHOOK_MAX_AGE=5m
 ```
 
 Webhook URL：
@@ -194,8 +194,8 @@ Groovy 使用单引号字符串，让 shell 从环境变量读取凭据，避免
 Jenkins 没有统一出站载荷，ChangeGuard 提供固定接收协议：
 
 ```text
-DBGUARD_JENKINS_WEBHOOK_TOKEN=<至少 32 字节随机 Token>
-DBGUARD_JENKINS_ORGANIZATION_ID=org_demo
+CHANGEGUARD_JENKINS_WEBHOOK_TOKEN=<至少 32 字节随机 Token>
+CHANGEGUARD_JENKINS_ORGANIZATION_ID=org_demo
 ```
 
 ```text
@@ -260,8 +260,8 @@ post {
 流水线终态不能替代事故、实际回滚和业务 SLI。外部适配器可以使用独立凭据调用：
 
 ```text
-DBGUARD_OPERATIONS_WEBHOOK_TOKEN=<至少 32 字节随机 Token>
-DBGUARD_OPERATIONS_ORGANIZATION_ID=org_demo
+CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN=<至少 32 字节随机 Token>
+CHANGEGUARD_OPERATIONS_ORGANIZATION_ID=org_demo
 POST /api/integrations/operations/webhook
 ```
 

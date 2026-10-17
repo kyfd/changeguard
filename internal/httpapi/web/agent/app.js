@@ -440,7 +440,7 @@ function markAgentDisabled(message, quiet) {
   if (!quiet) {
     renderIdentityBanner(
       esc(message) +
-      ' 下游 Agent 服务需要配置 <code>DBGUARD_AGENT_BASE_URL</code> 后重启本服务。'
+      ' 下游 Agent 服务需要配置 <code>CHANGEGUARD_AGENT_BASE_URL</code> 后重启本服务。'
     );
   }
   disableCreateButton("变更准备未启用");

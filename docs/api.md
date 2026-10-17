@@ -144,7 +144,7 @@ go run ./cmd/changeguard-evidence verify -in evidence.json
 | POST | `/api/changes/{id}/passports` | 由实际审批人签发短时一次性通行证 |
 | POST | `/api/changes/{id}/passports/{passportId}/revoke` | 撤销尚未消费的通行证 |
 
-签发请求可省略有效期，默认由 `DBGUARD_PASSPORT_TTL` 控制；自定义值必须在 60～1800 秒之间：
+签发请求可省略有效期，默认由 `CHANGEGUARD_PASSPORT_TTL` 控制；自定义值必须在 60～1800 秒之间：
 
 ```json
 { "ttl_seconds": 600 }

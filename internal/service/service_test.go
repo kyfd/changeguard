@@ -47,7 +47,7 @@ func (fakeAnalyzer) Analyze(_ context.Context, change model.ChangeRequest) model
 }
 
 func TestZeroWorkersLeaveQueuedBusinessWorkUntouched(t *testing.T) {
-	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("z", 32))
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("z", 32))
 	data := store.NewMemory()
 	svc := New(data, fakeRunner{}, fakeAnalyzer{})
 	change, err := svc.Create(model.CreateChangeInput{
@@ -172,7 +172,7 @@ func TestStartupRecoveryTakesOverExpiredApplyGeneration(t *testing.T) {
 }
 
 func TestWorkflowRequiresDifferentApprover(t *testing.T) {
-	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("p", 32))
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("p", 32))
 	data := store.NewMemory()
 	svc := New(data, fakeRunner{}, fakeAnalyzer{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -276,7 +276,7 @@ func TestWorkflowRequiresDifferentApprover(t *testing.T) {
 }
 
 func TestApprovedChangeCanBeEditedAndInvalidatesPassport(t *testing.T) {
-	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("e", 32))
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("e", 32))
 	data := store.NewMemory()
 	svc := New(data, fakeRunner{}, fakeAnalyzer{})
 	input := model.CreateChangeInput{
@@ -365,7 +365,7 @@ func TestUnifiedArtifactChangeCanEnterPreReleaseValidation(t *testing.T) {
 }
 
 func TestHighRiskFindingRequiresAssignmentResolutionAndVerification(t *testing.T) {
-	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("h", 32))
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("h", 32))
 	data := store.NewMemory()
 	svc := New(data, fakeRunner{}, fakeAnalyzer{})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1056,7 +1056,7 @@ func TestNonSQLRemediationCanApproveIssueAndConsumePassport(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("r", 32))
+			t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("r", 32))
 			data := store.NewMemory()
 			svc := New(data, fakeRunner{}, fakeAnalyzer{})
 			change, err := svc.Create(model.CreateChangeInput{

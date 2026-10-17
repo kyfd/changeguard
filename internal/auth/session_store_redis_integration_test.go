@@ -14,14 +14,14 @@ import (
 )
 
 func TestRedisSessionRepositoryIntegration(t *testing.T) {
-	address := strings.TrimSpace(os.Getenv("DBGUARD_REDIS_TEST_URL"))
+	address := strings.TrimSpace(os.Getenv("CHANGEGUARD_REDIS_TEST_URL"))
 	if address == "" {
-		t.Skip("DBGUARD_REDIS_TEST_URL is not configured")
+		t.Skip("CHANGEGUARD_REDIS_TEST_URL is not configured")
 	}
 	prefix := fmt.Sprintf("changeguard:test:%d:", time.Now().UnixNano())
-	t.Setenv("DBGUARD_SESSION_MODE", "redis")
-	t.Setenv("DBGUARD_REDIS_URL", address)
-	t.Setenv("DBGUARD_REDIS_PREFIX", prefix)
+	t.Setenv("CHANGEGUARD_SESSION_MODE", "redis")
+	t.Setenv("CHANGEGUARD_REDIS_URL", address)
+	t.Setenv("CHANGEGUARD_REDIS_PREFIX", prefix)
 
 	repository := newSessionRepository(log.New(io.Discard, "", 0))
 	if repository.Mode() != "redis" {

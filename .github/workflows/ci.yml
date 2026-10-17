@@ -136,6 +136,7 @@ jobs:
           bash -n deploy/upgrade/changeguard-upgrade-preflight.sh
           bash -n deploy/upgrade/changeguard-upgrade.sh
           bash -n deploy/upgrade/changeguard-upgrade-watcher.sh
+          bash -n deploy/production/changeguard-migrate-env.sh
       - name: Exercise isolated install and rollback failures
         run: sudo python3 -B -m unittest discover -s tests/deploy -v
 
@@ -179,8 +180,8 @@ jobs:
           --health-timeout 3s
           --health-retries 20
     env:
-      DBGUARD_TEST_POSTGRES_DSN: postgres://dbguard:dbguard-ci-password@127.0.0.1:5432/dbguard_test?sslmode=disable
-      DBGUARD_REDIS_TEST_URL: redis://127.0.0.1:6379/0
+      CHANGEGUARD_TEST_POSTGRES_DSN: postgres://dbguard:dbguard-ci-password@127.0.0.1:5432/dbguard_test?sslmode=disable
+      CHANGEGUARD_REDIS_TEST_URL: redis://127.0.0.1:6379/0
 
     steps:
       - uses: actions/checkout@v4
@@ -194,9 +195,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${DBGUARD_TEST_POSTGRES_DSN:-}" || { echo "::error::DBGUARD_TEST_POSTGRES_DSN is required"; exit 1; }
-          test -n "${DBGUARD_REDIS_TEST_URL:-}" || { echo "::error::DBGUARD_REDIS_TEST_URL is required"; exit 1; }
-          pg_isready -d "$DBGUARD_TEST_POSTGRES_DSN"
+          test -n "${CHANGEGUARD_TEST_POSTGRES_DSN:-}" || { echo "::error::CHANGEGUARD_TEST_POSTGRES_DSN is required"; exit 1; }
+          test -n "${CHANGEGUARD_REDIS_TEST_URL:-}" || { echo "::error::CHANGEGUARD_REDIS_TEST_URL is required"; exit 1; }
+          pg_isready -d "$CHANGEGUARD_TEST_POSTGRES_DSN"
           timeout 5 bash -c '</dev/tcp/127.0.0.1/6379'
 
       - name: Run PostgreSQL integration contract

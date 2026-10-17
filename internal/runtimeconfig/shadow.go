@@ -9,8 +9,8 @@ import (
 )
 
 func rejectShadowOnPrimary() error {
-	shadow := strings.TrimSpace(os.Getenv("DBGUARD_SHADOW_DSN"))
-	primary := strings.TrimSpace(os.Getenv("DBGUARD_PRIMARY_DSN"))
+	shadow := strings.TrimSpace(os.Getenv("CHANGEGUARD_SHADOW_DSN"))
+	primary := strings.TrimSpace(os.Getenv("CHANGEGUARD_PRIMARY_DSN"))
 	if shadow == "" || primary == "" {
 		return nil
 	}

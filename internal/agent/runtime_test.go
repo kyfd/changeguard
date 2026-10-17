@@ -34,7 +34,7 @@ func TestSanitizeLLMErrorRedactsAuthenticationFailure(t *testing.T) {
 }
 
 func TestFallbackAnalysisUsesEvidence(t *testing.T) {
-	t.Setenv("DBGUARD_LLM_API_KEY", "")
+	t.Setenv("CHANGEGUARD_LLM_API_KEY", "")
 	change := model.ChangeRequest{
 		ID: "chg_test", Risk: model.RiskMedium,
 		Findings:   []model.Finding{{ID: "ev_rule", Severity: model.RiskMedium, Title: "索引创建未使用 CONCURRENTLY", Suggestion: "改用并发索引"}},

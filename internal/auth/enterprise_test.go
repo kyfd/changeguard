@@ -200,7 +200,7 @@ func testCSRFToken(manager *Manager, cookie *http.Cookie) string {
 }
 
 func TestDefaultAuthModeRequiresLogin(t *testing.T) {
-	t.Setenv("DBGUARD_AUTH_MODE", "")
+	t.Setenv("CHANGEGUARD_AUTH_MODE", "")
 	config := FromEnvironment()
 	if config.Mode != "local" {
 		t.Fatalf("default auth mode = %q, want local", config.Mode)
@@ -259,25 +259,25 @@ func TestLogoutDeletesSessionAndReturnsToLoginPage(t *testing.T) {
 }
 
 func TestSecureCookieDefaultsFromPublicHTTPSURL(t *testing.T) {
-	t.Setenv("DBGUARD_PUBLIC_URL", "https://dbguard.example.com")
-	t.Setenv("DBGUARD_OIDC_REDIRECT_URL", "")
-	t.Setenv("DBGUARD_AUTH_SECURE_COOKIE", "")
+	t.Setenv("CHANGEGUARD_PUBLIC_URL", "https://dbguard.example.com")
+	t.Setenv("CHANGEGUARD_OIDC_REDIRECT_URL", "")
+	t.Setenv("CHANGEGUARD_AUTH_SECURE_COOKIE", "")
 	if config := FromEnvironment(); !config.SecureCookie {
 		t.Fatal("HTTPS public URL must enable secure session cookies by default")
 	}
-	t.Setenv("DBGUARD_AUTH_SECURE_COOKIE", "not-a-boolean")
+	t.Setenv("CHANGEGUARD_AUTH_SECURE_COOKIE", "not-a-boolean")
 	if config := FromEnvironment(); !config.SecureCookie {
 		t.Fatal("invalid cookie override must not silently disable HTTPS security")
 	}
 }
 
 func TestDemoCredentialsRequireExplicitFlag(t *testing.T) {
-	t.Setenv("DBGUARD_ENABLE_DEMO_ACCOUNTS", "")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_ACCOUNTS", "")
 	if _, err := store.NewMemory().Credential("usr_owner"); err == nil {
 		t.Fatal("demo credential must not be created unless explicitly enabled")
 	}
 
-	t.Setenv("DBGUARD_ENABLE_DEMO_ACCOUNTS", "true")
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_ACCOUNTS", "true")
 	data := store.NewMemory()
 	for _, userID := range []string{"usr_developer", "usr_reviewer", "usr_owner"} {
 		credential, err := data.Credential(userID)

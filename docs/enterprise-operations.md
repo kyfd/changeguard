@@ -47,50 +47,50 @@ docker compose down
 
 ## 环境变量
 
-应用优先接受 `CHANGEGUARD_*`。Compose 和 Kubernetes 示例已经使用该前缀；`deploy/production` 下的 systemd 环境模板暂时保留 `DBGUARD_*` 兼容键。旧前缀计划在 v4.0 删除，在迁移完成前不要在同一环境为两个前缀设置冲突值。下表按当前 systemd 模板列出键名。
+环境变量只使用 `CHANGEGUARD_*`：Compose、Kubernetes 示例与 `deploy/production` 的 systemd 模板已经统一。4.0 删除了旧的 `DBGUARD_*` 兼容层——进程环境或环境文件里出现任何旧前缀键都会在组件初始化前失败关闭，必须先用 `deploy/production/changeguard-migrate-env.sh` 迁移。下表按当前 systemd 模板列出键名。
 
 | 变量 | 用途 | 生产要求 |
 | --- | --- | --- |
-| `DBGUARD_LISTEN_ADDRESS` | HTTP 监听地址 | 显式绑定 loopback，例如 `127.0.0.1:8080` |
-| `DBGUARD_ENV_FILE` | 核心自行复核的规范环境文件 | systemd 外部设置为 `/etc/changeguard/core.env`，运行用户不可写 |
-| `DBGUARD_ENV_PROFILE` | `development`、`staging`、`production` | 生产固定为 `production` |
-| `DBGUARD_STORE_MODE` | `file` 或 `postgres` | 使用 `postgres` |
-| `DBGUARD_DATA_FILE` | file 模式状态文件 | 使用持久卷绝对路径 |
-| `DBGUARD_MIGRATION_WITNESS_FILE` | file 模式迁移证据侧车 | 与主状态同卷保存，不单独删除 |
-| `DBGUARD_PRIMARY_DSN` | 业务 PostgreSQL DSN | 从 secret 注入 |
-| `DBGUARD_DB_MAX_CONNS` | 单实例最大数据库连接数 | 结合实例数和数据库容量设置 |
-| `DBGUARD_SESSION_MODE` | `memory` 或 `redis` | 多实例使用 `redis` |
-| `DBGUARD_REDIS_URL` | Redis 地址 | ACL 用户、至少 16 字节密码；非 loopback 使用 `rediss://` |
-| `DBGUARD_REDIS_PREFIX` | Redis key namespace | 每个环境独立并以冒号结尾 |
-| `DBGUARD_AUTH_MODE` | `local`、`oidc`、`hybrid` | 优先 `oidc` 或 `hybrid` |
-| `DBGUARD_ENABLE_DEMO_ACCOUNTS` | 创建演示账号 | `false` |
-| `DBGUARD_ENABLE_DEMO_DATA` | 加载演示数据 | `false` |
-| `DBGUARD_PUBLIC_URL` | 外部地址 | HTTPS，且与 OIDC 回调一致 |
-| `DBGUARD_AUTH_SECURE_COOKIE` | Secure Cookie | `true` |
-| `DBGUARD_TRUST_PROXY_HEADERS` | 信任代理头 | 只在受控代理链后启用 |
-| `DBGUARD_METRICS_TOKEN` | `/metrics` Bearer token | 独立 secret |
-| `DBGUARD_OPERATIONS_WEBHOOK_TOKEN` | 运维结果接收 Token | 独立长随机 secret |
-| `DBGUARD_OPERATIONS_ORGANIZATION_ID` | 运维事件所属组织 | 显式设置 |
-| `DBGUARD_PASSPORT_HMAC_SECRET` | 通行证 HMAC 密钥 | 至少 32 字节随机值 |
-| `DBGUARD_PASSPORT_TTL` | 通行证有效期 | 1～30 分钟，默认 10 分钟 |
-| `DBGUARD_EXPERIMENT_MODE` | SQL 验证模式 | 需要生产签发时使用 `postgres` |
-| `DBGUARD_SHADOW_DSN` | 影子 PostgreSQL DSN | 独立实例和最小权限，从 secret 注入 |
-| `DBGUARD_WORKERS` | SQL Outbox worker 数 | 按影子库容量设置；生产不能为 0 |
-| `DBGUARD_ENABLE_UPGRADE_APPLY` | 允许 Web API 触发升级 apply | 默认且通常保持 `false` |
+| `CHANGEGUARD_LISTEN_ADDRESS` | HTTP 监听地址 | 显式绑定 loopback，例如 `127.0.0.1:8080` |
+| `CHANGEGUARD_ENV_FILE` | 核心自行复核的规范环境文件 | systemd 外部设置为 `/etc/changeguard/core.env`，运行用户不可写 |
+| `CHANGEGUARD_ENV_PROFILE` | `development`、`staging`、`production` | 生产固定为 `production` |
+| `CHANGEGUARD_STORE_MODE` | `file` 或 `postgres` | 使用 `postgres` |
+| `CHANGEGUARD_DATA_FILE` | file 模式状态文件 | 使用持久卷绝对路径 |
+| `CHANGEGUARD_MIGRATION_WITNESS_FILE` | file 模式迁移证据侧车 | 与主状态同卷保存，不单独删除 |
+| `CHANGEGUARD_PRIMARY_DSN` | 业务 PostgreSQL DSN | 从 secret 注入 |
+| `CHANGEGUARD_DB_MAX_CONNS` | 单实例最大数据库连接数 | 结合实例数和数据库容量设置 |
+| `CHANGEGUARD_SESSION_MODE` | `memory` 或 `redis` | 多实例使用 `redis` |
+| `CHANGEGUARD_REDIS_URL` | Redis 地址 | ACL 用户、至少 16 字节密码；非 loopback 使用 `rediss://` |
+| `CHANGEGUARD_REDIS_PREFIX` | Redis key namespace | 每个环境独立并以冒号结尾 |
+| `CHANGEGUARD_AUTH_MODE` | `local`、`oidc`、`hybrid` | 优先 `oidc` 或 `hybrid` |
+| `CHANGEGUARD_ENABLE_DEMO_ACCOUNTS` | 创建演示账号 | `false` |
+| `CHANGEGUARD_ENABLE_DEMO_DATA` | 加载演示数据 | `false` |
+| `CHANGEGUARD_PUBLIC_URL` | 外部地址 | HTTPS，且与 OIDC 回调一致 |
+| `CHANGEGUARD_AUTH_SECURE_COOKIE` | Secure Cookie | `true` |
+| `CHANGEGUARD_TRUST_PROXY_HEADERS` | 信任代理头 | 只在受控代理链后启用 |
+| `CHANGEGUARD_METRICS_TOKEN` | `/metrics` Bearer token | 独立 secret |
+| `CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN` | 运维结果接收 Token | 独立长随机 secret |
+| `CHANGEGUARD_OPERATIONS_ORGANIZATION_ID` | 运维事件所属组织 | 显式设置 |
+| `CHANGEGUARD_PASSPORT_HMAC_SECRET` | 通行证 HMAC 密钥 | 至少 32 字节随机值 |
+| `CHANGEGUARD_PASSPORT_TTL` | 通行证有效期 | 1～30 分钟，默认 10 分钟 |
+| `CHANGEGUARD_EXPERIMENT_MODE` | SQL 验证模式 | 需要生产签发时使用 `postgres` |
+| `CHANGEGUARD_SHADOW_DSN` | 影子 PostgreSQL DSN | 独立实例和最小权限，从 secret 注入 |
+| `CHANGEGUARD_WORKERS` | SQL Outbox worker 数 | 按影子库容量设置；生产不能为 0 |
+| `CHANGEGUARD_ENABLE_UPGRADE_APPLY` | 允许 Web API 触发升级 apply | 默认且通常保持 `false` |
 
 DSN、OIDC client secret、Redis 凭据、metrics/operations token 和通行证不能进入镜像、Git、日志或工单正文。
 
 ## Production profile 与启动检查
 
-生产核心会重新读取 `DBGUARD_ENV_FILE`，不只依赖 systemd 展开的环境。重复键、非法行、缺失文件和 inherited override 冲突都会在组件初始化前失败。
+生产核心会重新读取 `CHANGEGUARD_ENV_FILE`，不只依赖 systemd 展开的环境。重复键、非法行、缺失文件和 inherited override 冲突都会在组件初始化前失败。
 
-`DBGUARD_ENV_PROFILE=production` 还会拒绝 wildcard 监听、含义冲突的 `PORT`、演示账号和数据、`demo_only` 实验、memory session、无 ACL Redis、远程明文 Redis、共享 namespace、非 HTTPS 公网地址、非 Secure Cookie、占位符 secret、缺少关键凭据和零 worker。
+`CHANGEGUARD_ENV_PROFILE=production` 还会拒绝 wildcard 监听、含义冲突的 `PORT`、演示账号和数据、`demo_only` 实验、memory session、无 ACL Redis、远程明文 Redis、共享 namespace、非 HTTPS 公网地址、非 Secure Cookie、占位符 secret、缺少关键凭据和零 worker。
 
 检查配置不会连接业务依赖，也不会输出 secret：
 
 ```bash
-DBGUARD_ENV_FILE=/etc/changeguard/core.env \
-DBGUARD_ENV_PROFILE=production \
+CHANGEGUARD_ENV_FILE=/etc/changeguard/core.env \
+CHANGEGUARD_ENV_PROFILE=production \
 /opt/changeguard/current/dbguard --check-config
 ```
 
@@ -137,7 +137,7 @@ deploy/production/changeguard-core-host-prepare.sh check
 curl --fail http://127.0.0.1:8080/health/live
 curl --fail http://127.0.0.1:8080/health/ready
 curl --fail \
-  -H "Authorization: Bearer $DBGUARD_METRICS_TOKEN" \
+  -H "Authorization: Bearer $CHANGEGUARD_METRICS_TOKEN" \
   http://127.0.0.1:8080/metrics
 ```
 
@@ -167,7 +167,7 @@ Prometheus 告警模板位于 `deploy/production/dbguard-prometheus-alerts.yaml`
 - 保留 `dbguard_state` legacy JSONB。组织、成员、应用、规则及部分集成数据仍依赖它，不能删除；
 - Outbox claim、幂等 claim、通行证消费和审计追加使用专用原子事务；
 - 连接池按“实例数 × 每实例最大连接数”核算；
-- 使用 `DBGUARD_TEST_POSTGRES_DSN` 运行多实例集成测试。未设置时测试会跳过，不能视为目标环境已验证；
+- 使用 `CHANGEGUARD_TEST_POSTGRES_DSN` 运行多实例集成测试。未设置时测试会跳过，不能视为目标环境已验证；
 - 定期备份并实际执行恢复演练。
 
 ## Redis
@@ -175,7 +175,7 @@ Prometheus 告警模板位于 `deploy/production/dbguard-prometheus-alerts.yaml`
 - 只保存会话、限流等有 TTL 或可重建的数据；
 - 使用专用 ACL 用户、长随机密码、私网边界和明确持久化策略；
 - 非 loopback 连接使用 TLS；
-- 每个环境使用独立 `DBGUARD_REDIS_PREFIX`，不要共享默认 namespace；
+- 每个环境使用独立 `CHANGEGUARD_REDIS_PREFIX`，不要共享默认 namespace；
 - Redis 故障时 readiness、会话、登录和注册控制返回 503，不能降级为 memory 或匿名访问；
 - 核心重启后现有会话应仍然有效。
 
@@ -227,7 +227,7 @@ CHANGEGUARD_RESTORE_ROOT=/opt/changeguard/restore-staging \
 
 安装器拒绝摘要不符、路径穿越、链接、设备文件和异常展开规模，统一权限后验证 `SHA256SUMS`。它只创建不可变 release，不修改 `/opt/changeguard/current`，也不重启服务。
 
-`POST /api/upgrade/apply` 可触发 root watcher，默认由 `DBGUARD_ENABLE_UPGRADE_APPLY=false` 关闭。只在升级包来源、备份恢复、回滚、watcher 权限和共享目录边界均已验证的维护窗口临时启用，窗口结束后关闭并重启核心。
+`POST /api/upgrade/apply` 可触发 root watcher，默认由 `CHANGEGUARD_ENABLE_UPGRADE_APPLY=false` 关闭。只在升级包来源、备份恢复、回滚、watcher 权限和共享目录边界均已验证的维护窗口临时启用，窗口结束后关闭并重启核心。
 
 升级前执行：
 

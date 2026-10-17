@@ -33,9 +33,6 @@ func main() {
 		logger.Fatalf("environment configuration rejected: %v", err)
 	}
 	logger.Printf("environment profile=%s canonical_file=%s assignments=%d", configuration.Profile, configuration.Path, configuration.Assignments)
-	if len(configuration.LegacyKeys) > 0 {
-		logger.Printf("deprecated %s; prefer CHANGEGUARD_* (DBGUARD_* will be removed in v4.0)", strings.Join(configuration.LegacyKeys, ", "))
-	}
 	checkOnly, err := startupMode(os.Args[1:])
 	if err != nil {
 		logger.Fatalf("invalid command line: %v", err)
@@ -46,7 +43,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	dataPath := envOr("DBGUARD_DATA_FILE", "./data/dbguard.json")
+	dataPath := envOr("CHANGEGUARD_DATA_FILE", "./data/dbguard.json")
 	data, err := store.NewFromEnvironment(ctx, dataPath)
 	if err != nil {
 		logger.Fatalf("初始化数据存储失败: %v", err)
@@ -73,7 +70,7 @@ func main() {
 		logger.Fatalf("invalid background worker configuration: %v", err)
 	}
 	if workers == 0 {
-		logger.Printf("background workers disabled by DBGUARD_WORKERS=0")
+		logger.Printf("background workers disabled by CHANGEGUARD_WORKERS=0")
 	}
 	app.Start(ctx, workers)
 
@@ -103,13 +100,13 @@ func main() {
 }
 
 func listenAddressFromEnvironment() (string, error) {
-	address := strings.TrimSpace(os.Getenv("DBGUARD_LISTEN_ADDRESS"))
+	address := strings.TrimSpace(os.Getenv("CHANGEGUARD_LISTEN_ADDRESS"))
 	if address == "" {
 		address = ":" + strings.TrimSpace(envOr("PORT", "8080"))
 	}
 	_, port, err := net.SplitHostPort(address)
 	if err != nil || port == "" {
-		return "", errors.New("DBGUARD_LISTEN_ADDRESS or PORT must resolve to a host:port")
+		return "", errors.New("CHANGEGUARD_LISTEN_ADDRESS or PORT must resolve to a host:port")
 	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 0 || portNumber > 65535 {
@@ -126,13 +123,13 @@ func envOr(key, fallback string) string {
 }
 
 func workerCountFromEnvironment() (int, error) {
-	raw := strings.TrimSpace(os.Getenv("DBGUARD_WORKERS"))
+	raw := strings.TrimSpace(os.Getenv("CHANGEGUARD_WORKERS"))
 	if raw == "" {
 		return 2, nil
 	}
 	workers, err := strconv.Atoi(raw)
 	if err != nil || workers < 0 || workers > 64 {
-		return 0, fmt.Errorf("DBGUARD_WORKERS must be an integer from 0 to 64")
+		return 0, fmt.Errorf("CHANGEGUARD_WORKERS must be an integer from 0 to 64")
 	}
 	return workers, nil
 }

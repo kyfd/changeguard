@@ -128,44 +128,44 @@ type dailyUsage struct {
 }
 
 func NewFromEnvironment() *Runtime {
-	dailyLimit := envInt("DBGUARD_LLM_DAILY_ANALYSIS_LIMIT", 20)
-	mode := strings.ToLower(envOr("DBGUARD_AGENT_MODE", "loop"))
+	dailyLimit := envInt("CHANGEGUARD_LLM_DAILY_ANALYSIS_LIMIT", 20)
+	mode := strings.ToLower(envOr("CHANGEGUARD_AGENT_MODE", "loop"))
 	if mode != "oneshot" {
 		mode = "loop"
 	}
 	timeout := 45 * time.Second
 	if mode == "loop" {
-		timeout = time.Duration(envInt("DBGUARD_AGENT_TOTAL_TIMEOUT_MS", 90000)) * time.Millisecond
+		timeout = time.Duration(envInt("CHANGEGUARD_AGENT_TOTAL_TIMEOUT_MS", 90000)) * time.Millisecond
 		if timeout < 30*time.Second {
 			timeout = 90 * time.Second
 		}
 	}
 	runtime := &Runtime{
-		baseURL:                 strings.TrimSpace(os.Getenv("DBGUARD_LLM_BASE_URL")),
-		apiKey:                  strings.TrimSpace(os.Getenv("DBGUARD_LLM_API_KEY")),
-		model:                   envOr("DBGUARD_LLM_MODEL", "deepseek-chat"),
-		maxTokens:               envInt("DBGUARD_LLM_MAX_TOKENS", 700),
-		maxRetries:              clampInt(envInt("DBGUARD_LLM_MAX_RETRIES", 1), 0, 3),
-		retryBackoff:            envDuration("DBGUARD_LLM_RETRY_BACKOFF", 200*time.Millisecond),
+		baseURL:                 strings.TrimSpace(os.Getenv("CHANGEGUARD_LLM_BASE_URL")),
+		apiKey:                  strings.TrimSpace(os.Getenv("CHANGEGUARD_LLM_API_KEY")),
+		model:                   envOr("CHANGEGUARD_LLM_MODEL", "deepseek-chat"),
+		maxTokens:               envInt("CHANGEGUARD_LLM_MAX_TOKENS", 700),
+		maxRetries:              clampInt(envInt("CHANGEGUARD_LLM_MAX_RETRIES", 1), 0, 3),
+		retryBackoff:            envDuration("CHANGEGUARD_LLM_RETRY_BACKOFF", 200*time.Millisecond),
 		dailyLimit:              dailyLimit,
-		orgLimit:                envInt("DBGUARD_LLM_DAILY_ORG_LIMIT", maxInt(dailyLimit*5, 50)),
-		globalLimit:             envInt("DBGUARD_LLM_DAILY_GLOBAL_LIMIT", maxInt(dailyLimit*10, 100)),
+		orgLimit:                envInt("CHANGEGUARD_LLM_DAILY_ORG_LIMIT", maxInt(dailyLimit*5, 50)),
+		globalLimit:             envInt("CHANGEGUARD_LLM_DAILY_GLOBAL_LIMIT", maxInt(dailyLimit*10, 100)),
 		client:                  modelprobe.NewHTTPClient(timeout, modelprobe.AllowPrivateUpstream()),
-		callSlots:               make(chan struct{}, maxInt(envInt("DBGUARD_LLM_MAX_CONCURRENCY", 4), 1)),
+		callSlots:               make(chan struct{}, maxInt(envInt("CHANGEGUARD_LLM_MAX_CONCURRENCY", 4), 1)),
 		usage:                   make(map[string]dailyUsage),
 		registry:                DefaultToolRegistry(),
-		maxRounds:               maxInt(envInt("DBGUARD_AGENT_MAX_ROUNDS", 5), 1),
+		maxRounds:               maxInt(envInt("CHANGEGUARD_AGENT_MAX_ROUNDS", 5), 1),
 		mode:                    mode,
-		circuitFailureThreshold: clampInt(envInt("DBGUARD_LLM_CIRCUIT_FAILURES", 3), 0, 20),
-		circuitCooldown:         envDuration("DBGUARD_LLM_CIRCUIT_COOLDOWN", time.Minute),
+		circuitFailureThreshold: clampInt(envInt("CHANGEGUARD_LLM_CIRCUIT_FAILURES", 3), 0, 20),
+		circuitCooldown:         envDuration("CHANGEGUARD_LLM_CIRCUIT_COOLDOWN", time.Minute),
 	}
-	limitMode := strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_LLM_LIMIT_MODE")))
-	if limitMode == "" && strings.EqualFold(strings.TrimSpace(os.Getenv("DBGUARD_SESSION_MODE")), "redis") {
+	limitMode := strings.ToLower(strings.TrimSpace(os.Getenv("CHANGEGUARD_LLM_LIMIT_MODE")))
+	if limitMode == "" && strings.EqualFold(strings.TrimSpace(os.Getenv("CHANGEGUARD_SESSION_MODE")), "redis") {
 		limitMode = "redis"
 	}
 	if limitMode == "redis" {
 		runtime.limitRequired = true
-		if options, err := redis.ParseURL(strings.TrimSpace(os.Getenv("DBGUARD_REDIS_URL"))); err == nil {
+		if options, err := redis.ParseURL(strings.TrimSpace(os.Getenv("CHANGEGUARD_REDIS_URL"))); err == nil {
 			runtime.limitClient = redis.NewClient(options)
 		}
 	}
