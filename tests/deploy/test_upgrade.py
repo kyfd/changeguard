@@ -35,6 +35,14 @@ def digest(body):
     return hashlib.sha256(body).hexdigest()
 
 
+def tree_digest(files):
+    """与 deploy/lib/release_manifest.tree_digest 相同算法：排序后逐文件哈希再汇总。"""
+    handle = hashlib.sha256()
+    for name in sorted(files):
+        handle.update(f"{digest(files[name])}  {name}\n".encode())
+    return handle.hexdigest()
+
+
 @unittest.skipUnless(sys.platform == "linux" and hasattr(os, "geteuid") and os.geteuid() == 0,
                      "requires Linux root (installer enforces real ownership and modes)")
 class UpgradeTests(unittest.TestCase):
@@ -70,7 +78,10 @@ class UpgradeTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
                         TMPDIR=str(self.root), PYTHONDONTWRITEBYTECODE="1",
                         TEST_CURRENT=str(self.current), TEST_ARCHIVE=str(self.archive),
-                        TEST_EVENTS=str(self.events), TEST_MODE="ok")
+                        TEST_EVENTS=str(self.events), TEST_MODE="ok",
+                        CHANGEGUARD_AGENT_UNIT_DIR=str(self.root / "units"),
+                        CHANGEGUARD_AGENT_SERVICE="changeguard-agent-test",
+                        AGENT_UPSTREAM_TOKEN="agent-upstream-token-for-synthetic-tests")
         # The rewritten preflight reads the core identity with Python urllib,
         # not curl: serve the readiness payload with a real local HTTP stub.
         self.httpd = http.server.HTTPServer(("127.0.0.1", 0), HealthHandler)
@@ -83,11 +94,21 @@ class UpgradeTests(unittest.TestCase):
         self.core_url = f"http://127.0.0.1:{self.health_port}/health/ready"
         self.stub("systemctl", '''#!/usr/bin/env bash
 set -eu
-[ "$1" = restart ] && [ "$2" = changeguard-test ] || exit 90
+[ "$1" = restart ] || exit 90
+case "$2" in
+  changeguard-test) event="restart" ;;
+  changeguard-agent-test) event="agent-restart" ;;
+  *) exit 90 ;;
+esac
 active="$(basename "$(readlink -f "$TEST_CURRENT")")"
-printf 'restart:%s\n' "$active" >> "$TEST_EVENTS"
-case "$TEST_MODE:$active" in
-  restart-fail:changeguard-3-1-3|both-restart-fail:*) exit 1 ;;
+printf '%s:%s\\n' "$event" "$active" >> "$TEST_EVENTS"
+case "$TEST_MODE:$2:$active" in
+  restart-fail:changeguard-test:changeguard-3-1-3|both-restart-fail:*) exit 1 ;;
+  agent-restart-fail:changeguard-agent-test:*)
+    # 只让第一次 Agent 重启失败：回滚时的重启必须还能恢复健康。
+    if [ "$(grep -c '^agent-restart:' "$TEST_EVENTS" 2>/dev/null || echo 0)" -gt 1 ]; then exit 0; fi
+    exit 1
+    ;;
 esac
 ''')
         self.stub("curl", '''#!/usr/bin/env bash
@@ -124,16 +145,33 @@ printf '{"status":"ok","build":{"version":"%s","commit":"%s","source_sha256":"%s
         path.chmod(0o755)
 
     def make_archive(self, version="3-1-3", tag="v3.1.3", evidence_status="passed",
-                     corrupt=False, unsafe=False, mismatched_evidence=False):
+                     corrupt=False, unsafe=False, mismatched_evidence=False,
+                     components=True, agent_files=None, agent_declared_digest=None):
         # Synthetic provenance tests the protocol, not real build evidence.
         identity = dict(version=version, tag=tag, commit="a" * 40, source_sha256="b" * 64)
         files = {name: b"synthetic fixture\n" for name in (
             "source.bundle", "source.tar.gz", "modules.txt", "module-verify.txt",
             "binary-buildinfo.txt", "bundle-verify.txt", "build.log")}
         files["dbguard"] = b"#!/bin/sh\nexit 0\n"
-        files["release-manifest.json"] = json.dumps(dict(
-            identity, schema="changeguard-core-release/v2",
-            files={"dbguard": digest(files["dbguard"])})).encode()
+        manifest = dict(identity, files={"dbguard": digest(files["dbguard"])})
+        if components:
+            # 4.0 包必须声明组件：core 摘要 + Agent 源码树摘要（与安装端同一算法）。
+            agent = dict(agent_files) if agent_files is not None else {
+                "agent-app/pyproject.toml": b"[project]\nname = \"changeguard-agent\"\n",
+                "agent-app/app/__init__.py": b"",
+            }
+            files.update(agent)
+            manifest.update(
+                schema="changeguard-release/v3",
+                components=[
+                    {"name": "core", "path": "dbguard", "sha256": digest(files["dbguard"])},
+                    {"name": "agent", "path": "agent-app",
+                     "sha256": agent_declared_digest or tree_digest(agent)},
+                ],
+            )
+        else:
+            manifest["schema"] = "changeguard-core-release/v2"
+        files["release-manifest.json"] = json.dumps(manifest).encode()
         verification = dict(identity, schema="changeguard-core-verification/v1", status=evidence_status)
         if mismatched_evidence:
             verification["commit"] = "c" * 40
@@ -153,22 +191,73 @@ printf '{"status":"ok","build":{"version":"%s","commit":"%s","source_sha256":"%s
                 handle.addfile(member, io.BytesIO(body))
         return archive
 
-    def run_upgrade(self, *extra):
-        result = subprocess.run([
+    def run_install(self, archive, release_id=NEW):
+        return subprocess.run(
+            ["bash", str(INSTALL), str(archive), digest(archive.read_bytes()),
+             str(self.releases), release_id],
+            env=self.env, text=True, capture_output=True, timeout=30)
+
+    def run_upgrade(self, *extra, core_only=True):
+        args = [
             "bash", str(UPGRADE), "--version", "3.1.3",
             "--archive-url", "https://example.invalid/release.tar.gz",
             "--expected-sha256", digest(self.archive.read_bytes()),
             "--release-root", str(self.releases), "--current-link", str(self.current),
             "--service", "changeguard-test", "--health-timeout", "1",
-            "--keep-archives", "2", "--core-only",
+            "--keep-archives", "2",
             "--core-health-url", self.core_url,
-            "--health-url", "http://127.0.0.1:1/health/ready", *extra],
-            env=self.env, text=True, capture_output=True, timeout=25)
+            "--health-url", "http://127.0.0.1:1/health/ready",
+        ]
+        if core_only:
+            args.append("--core-only")
+        args.extend(extra)
+        result = subprocess.run(args, env=self.env, text=True, capture_output=True, timeout=30)
         self.assertFalse(list(self.releases.glob(".download-*")), result.stderr)
         return result
 
     def read_events(self):
         return self.events.read_text().splitlines() if self.events.exists() else []
+
+    def write_agent_unit(self, name="changeguard-agent-test"):
+        units = Path(self.env["CHANGEGUARD_AGENT_UNIT_DIR"])
+        units.mkdir(parents=True, exist_ok=True)
+        unit = units / f"{name}.service"
+        unit.write_text("[Unit]\nDescription=synthetic agent unit\n", encoding="utf-8")
+        return unit
+
+    def test_packaged_agent_component_is_restarted_with_the_core(self):
+        """4.0：包内带 Agent 组件且系统装了该 unit 时，两个组件在同一次切换里重启。"""
+        self.write_agent_unit()
+        result = self.run_upgrade("--agent-health-url", self.core_url,
+                                  "--agent-token-env", "AGENT_UPSTREAM_TOKEN", core_only=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = self.read_events()
+        self.assertIn("restart:changeguard-3-1-3", events)
+        self.assertIn("agent-restart:changeguard-3-1-3", events)
+        self.assertIn("agent_managed=1", result.stdout)
+        installed_agent = self.releases / NEW / "agent-app"
+        self.assertTrue(installed_agent.is_dir(), "the agent component must be installed")
+
+    def test_agent_restart_failure_rolls_back_both_components(self):
+        """Agent 重启失败时，核心与 Agent 必须一起回滚到上一版本。"""
+        self.write_agent_unit()
+        self.env["TEST_MODE"] = "agent-restart-fail"
+        result = self.run_upgrade("--agent-health-url", self.core_url,
+                                  "--agent-token-env", "AGENT_UPSTREAM_TOKEN", core_only=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("upgrade_status=rolled_back", result.stderr)
+        events = self.read_events()
+        self.assertIn("agent-restart:changeguard-3-1-3", events)
+        self.assertIn("restart:changeguard-3-1-2", events)
+        self.assertIn("agent-restart:changeguard-3-1-2", events)
+
+    def test_agent_component_digest_mismatch_is_rejected(self):
+        """包内 Agent 组件与清单声明不符 → 安装失败关闭，不留"看起来成功"的版本目录。"""
+        archive = self.make_archive(agent_declared_digest="0" * 64)
+        result = self.run_install(archive)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("core_install=passed", result.stdout)
+        self.assertFalse((self.releases / NEW).exists())
 
     def test_success_normalizes_version_and_preserves_previous_release(self):
         stale = self.releases / "changeguard-3-0-10"
@@ -308,7 +397,7 @@ printf '{"status":"ok","build":{"version":"%s","commit":"%s","source_sha256":"%s
         self.assertEqual(self.read_events(), [])
 
     def run_watcher(self, mode="ok", archive_name=None):
-        self.env.update(TEST_MODE=mode, DBGUARD_UPGRADE_DIR=str(self.pending.parent),
+        self.env.update(TEST_MODE=mode, CHANGEGUARD_UPGRADE_DIR=str(self.pending.parent),
                         CHANGEGUARD_RELEASE_ROOT=str(self.releases),
                         CHANGEGUARD_CURRENT_LINK=str(self.current),
                         CHANGEGUARD_SERVICE="changeguard-test", CHANGEGUARD_HEALTH_TIMEOUT="1",
@@ -521,14 +610,29 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("preflight_check=identity_pairing status=not_applicable", result.stdout)
         self.assertIn("preflight_status=passed", result.stdout)
 
-    def test_missing_agent_declaration_is_incomplete(self):
-        """未声明 Agent 且未声明 core-only：incomplete，其余检查仍执行。"""
+    def test_package_without_component_manifest_is_rejected(self):
+        """4.0：没有组件清单的包不是"未核对"，而是不合格包——失败关闭。
+
+        3.1 把"未声明 Agent"记为 incomplete；4.0 更严格：包本身必须声明组件，
+        只有操作者显式 --core-only 才接受旧格式包。
+        """
         result = self.run_preflight("--core-health-url", self.core_url, *self.archive_args())
-        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("preflight_check=agent_identity status=not_run", result.stdout)
-        self.assertIn("preflight_check=identity_pairing status=not_run", result.stdout)
-        self.assertIn("preflight_status=incomplete", result.stdout)
+        self.assertIn("preflight_check=archive_identity status=failed", result.stdout)
         self.assertNotIn("preflight_status=passed", result.stdout)
+
+    def test_legacy_package_requires_explicit_core_only_declaration(self):
+        """旧格式包（无组件清单）只有显式 --core-only 才被接受，否则失败关闭。
+
+        3.1 把"未声明 Agent"记为 incomplete；4.0 要求包本身声明组件，
+        因此这里同时断言拒绝与显式声明后的接受——两者都不依赖 fixture 是哪种包。
+        """
+        rejected = self.run_preflight("--core-health-url", self.core_url, *self.archive_args())
+        self.assertEqual(rejected.returncode, 1, rejected.stdout + rejected.stderr)
+        accepted = self.run_preflight("--core-only", "--core-health-url", self.core_url,
+                                      *self.archive_args())
+        self.assertIn("preflight_check=archive_identity status=passed", accepted.stdout)
 
     def test_core_identity_without_agent_url_still_verifies_core(self):
         result = self.run_preflight("--core-health-url", self.core_url, *self.archive_args())

@@ -88,7 +88,7 @@ func TestPendingIdempotencyRecordsReconcileWithoutDuplicateEffects(t *testing.T)
 }
 
 func TestPendingPassportRecordReconcilesWithoutTokenReplay(t *testing.T) {
-	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("r", 32))
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("r", 32))
 	data := store.NewMemory()
 	svc := New(data, fakeRunner{}, fakeAnalyzer{})
 	change, err := svc.Create(model.CreateChangeInput{
@@ -190,7 +190,7 @@ func TestQueueExperimentIdempotencyConcurrentReplayAndConflict(t *testing.T) {
 }
 
 func TestIssuePassportIdempotencyNeverReplaysPlaintextToken(t *testing.T) {
-	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("i", 32))
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("i", 32))
 	data := store.NewMemory()
 	svc := New(data, fakeRunner{}, fakeAnalyzer{})
 	change, err := svc.Create(model.CreateChangeInput{

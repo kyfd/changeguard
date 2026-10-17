@@ -121,7 +121,7 @@ func TestUntrustedSourceCannotReachReleaseTransitions(t *testing.T) {
 	})
 
 	t.Run("issue passport", func(t *testing.T) {
-		t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("h", 32))
+		t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("h", 32))
 		_, svc, data := newIdempotencyHTTPServer(t)
 		approved := readyConfigChange(t, svc, "source guard passport")
 		approved, err := svc.Approve(approved.ID, "usr_reviewer", "approved")

@@ -78,8 +78,18 @@ for line in lines:
         raise SystemExit("invalid checksum line")
 manifest = json.loads((root / "release-manifest.json").read_text(encoding="utf-8"))
 verification = json.loads((root / "verification.json").read_text(encoding="utf-8"))
-if manifest.get("schema") != "changeguard-core-release/v2":
+schema = manifest.get("schema")
+if schema not in {"changeguard-core-release/v2", "changeguard-release/v3"}:
     raise SystemExit("unexpected manifest schema")
+if schema == "changeguard-release/v3":
+    # 4.0：包必须声明组件，且 core 声明要与二进制摘要一致。lite 安装器不做
+    # Agent 组件树核对（那是完整安装器的职责），但绝不会把缺 core 的包当合格。
+    components = {
+        item.get("name"): item for item in manifest.get("components", []) if isinstance(item, dict)
+    }
+    core_component = components.get("core") or {}
+    if core_component.get("sha256") != manifest.get("files", {}).get("dbguard"):
+        raise SystemExit("core component digest does not match the released binary digest")
 if verification.get("schema") != "changeguard-core-verification/v1" or verification.get("status") != "passed":
     raise SystemExit("verification not passed")
 for field in ("version", "tag", "commit"):
@@ -98,4 +108,8 @@ manifest_artifact="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[
 mv "$extracted" "$target"
 rmdir "$staging" 2>/dev/null || true
 trap - EXIT
-echo "core_install=passed release=$target"
+agent_component="absent"
+if [ -d "$target/agent-app" ]; then
+  agent_component="present"
+fi
+echo "core_install=passed release=$target agent_component=$agent_component"

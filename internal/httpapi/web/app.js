@@ -3195,22 +3195,22 @@ async function renderSettings(main) {
         <span>${escapeHTML(outboundStatus.message || "")}</span>
       </div>
       ${outboundForm}
-      ${outboundStatus.source === "platform" ? '<p class="field-hint">当前走平台 DBGUARD_OUTBOUND_WEBHOOK_URL；保存本企业配置后优先使用企业地址。</p>' : ""}
+      ${outboundStatus.source === "platform" ? '<p class="field-hint">当前走平台 CHANGEGUARD_OUTBOUND_WEBHOOK_URL；保存本企业配置后优先使用企业地址。</p>' : ""}
     </div>
   </article>
   <div class="settings-grid integration-settings" style="margin-top:16px">
     <article class="setting-card"><div class="setting-card-title"><div><h3>GitLab Webhook</h3><p>MR / Push 可自动建草稿。</p></div>${gitlabState}</div>
       <div class="config-row"><span>路径</span><code>${escapeHTML(config.gitlab_webhook_path || "/api/integrations/gitlab/webhook")}</code></div>
-      <div class="config-row"><span>URL</span><code class="wrap-code" id="gitlabWebhookURL">${escapeHTML(gitlabURL || "设置 DBGUARD_PUBLIC_URL")}</code></div>
+      <div class="config-row"><span>URL</span><code class="wrap-code" id="gitlabWebhookURL">${escapeHTML(gitlabURL || "设置 CHANGEGUARD_PUBLIC_URL")}</code></div>
       <div class="form-actions-inline" style="margin-top:12px">
         <button type="button" class="button button-secondary button-small" data-copy-text="${escapeHTML(gitlabURL || config.gitlab_webhook_path || "/api/integrations/gitlab/webhook")}" ${gitlabURL ? "" : "disabled"}>复制 Webhook URL</button>
       </div>
-      <p class="field-hint" style="margin-top:10px">Header <code>X-Gitlab-Token</code> 需与 <code>DBGUARD_GITLAB_WEBHOOK_SECRET</code> 一致。</p>
+      <p class="field-hint" style="margin-top:10px">Header <code>X-Gitlab-Token</code> 需与 <code>CHANGEGUARD_GITLAB_WEBHOOK_SECRET</code> 一致。</p>
     </article>
     <article class="setting-card"><div class="setting-card-title"><div><h3>Prometheus</h3><p>HTTP 与业务计数。</p></div><span class="status status-approved"><i></i>可用</span></div>
       <div class="config-row"><span>端点</span><code>/metrics</code></div>
       <div class="config-row"><span>含出站成功/失败</span><code>dbguard_outbound_*</code></div>
-      <p class="field-hint" style="margin-top:10px">生产需配置 <code>DBGUARD_METRICS_TOKEN</code> 鉴权访问。</p>
+      <p class="field-hint" style="margin-top:10px">生产需配置 <code>CHANGEGUARD_METRICS_TOKEN</code> 鉴权访问。</p>
     </article>
     <article class="setting-card"><div class="setting-card-title"><div><h3>预发布 Worker</h3><p>异步验证任务。</p></div><span class="status status-approved"><i></i>可用</span></div>
       <div class="config-row"><span>模式</span><code>${escapeHTML(config.experiment_mode || "simulated")}</code></div>
@@ -3222,7 +3222,7 @@ async function renderSettings(main) {
       <div class="config-row"><span>模式</span><code>${escapeHTML(config.data_encryption_mode || (encConfigured ? "aes-gcm" : "dev-fallback"))}</code></div>
       <div class="config-row"><span>Store</span><code>${escapeHTML(config.store_mode || "—")}</code></div>
       <div class="config-row"><span>Session</span><code>${escapeHTML(config.session_mode || "—")}</code></div>
-      ${!encConfigured ? '<p class="field-hint" style="margin-top:10px">生产请设置 <code>DBGUARD_DATA_ENCRYPTION_KEY</code>。</p>' : ""}
+      ${!encConfigured ? '<p class="field-hint" style="margin-top:10px">生产请设置 <code>CHANGEGUARD_DATA_ENCRYPTION_KEY</code>。</p>' : ""}
     </article>
     <article class="setting-card"><div class="setting-card-title"><div><h3>变更通行证 CP</h3><p>审批通过后签发 Ed25519 短时票。</p></div>
       ${config.passport_enabled ? '<span class="status status-approved"><i></i>已启用</span>' : '<span class="status status-draft"><i></i>不可用</span>'}

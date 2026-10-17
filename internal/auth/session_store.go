@@ -137,12 +137,12 @@ var redisTakeFlowScript = redis.NewScript("local value=redis.call('GET',KEYS[1])
 var redisAttemptScript = redis.NewScript("local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('PEXPIRE',KEYS[1],ARGV[1]); end; return {n,redis.call('PTTL',KEYS[1])}")
 
 func newSessionRepository(logger *log.Logger) sessionRepository {
-	if strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_SESSION_MODE"))) != "redis" {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("CHANGEGUARD_SESSION_MODE"))) != "redis" {
 		return newMemorySessionRepository()
 	}
-	address := strings.TrimSpace(os.Getenv("DBGUARD_REDIS_URL"))
+	address := strings.TrimSpace(os.Getenv("CHANGEGUARD_REDIS_URL"))
 	if address == "" {
-		return &failedSessionRepository{err: errors.New("DBGUARD_REDIS_URL is required in redis session mode")}
+		return &failedSessionRepository{err: errors.New("CHANGEGUARD_REDIS_URL is required in redis session mode")}
 	}
 	options, err := redis.ParseURL(address)
 	if err != nil {
@@ -231,7 +231,7 @@ func (r *redisSessionRepository) Close() error                     { return r.cl
 func (r *redisSessionRepository) Mode() string                     { return "redis" }
 
 func redisSessionPrefix() string {
-	if prefix := strings.TrimSpace(os.Getenv("DBGUARD_REDIS_PREFIX")); prefix != "" {
+	if prefix := strings.TrimSpace(os.Getenv("CHANGEGUARD_REDIS_PREFIX")); prefix != "" {
 		return prefix
 	}
 	return "dbguard:"
@@ -265,7 +265,7 @@ func (m *Manager) Close() error                                                {
 func (m *Manager) SessionMode() string                                         { return m.sessionStore.Mode() }
 
 func clientAddress(r *http.Request) string {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("DBGUARD_TRUST_PROXY_HEADERS")), "true") {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("CHANGEGUARD_TRUST_PROXY_HEADERS")), "true") {
 		if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(value) != nil {
 			return value
 		}

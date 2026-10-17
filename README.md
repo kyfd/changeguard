@@ -134,6 +134,6 @@ internal/store/           存储、事务、Outbox 与幂等
 internal/httpapi/         HTTP 接口和内嵌页面
 ```
 
-服务入口保留历史名称 `dbguard`；环境变量优先使用 `CHANGEGUARD_*`，旧的 `DBGUARD_*` 暂时兼容。
+服务入口保留历史名称 `dbguard`；环境变量只使用 `CHANGEGUARD_*`。4.0 起不再接受旧的 `DBGUARD_*`：进程环境或环境文件里残留旧键会让服务拒绝启动，迁移用 `deploy/production/changeguard-migrate-env.sh`。
 
 [文档索引](docs/README.md) · [贡献说明](CONTRIBUTING.md) · [变更记录](CHANGELOG.md) · [MIT License](LICENSE)

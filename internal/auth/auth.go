@@ -119,7 +119,7 @@ type Manager struct {
 }
 
 func FromEnvironment() Config {
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_AUTH_MODE")))
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("CHANGEGUARD_AUTH_MODE")))
 	switch mode {
 	case "local", "oidc", "hybrid":
 	case "":
@@ -129,33 +129,33 @@ func FromEnvironment() Config {
 		// fall back to local session authentication instead of trusting headers.
 		mode = "local"
 	}
-	redirectURL := envOr("DBGUARD_OIDC_REDIRECT_URL", "http://localhost:8080/auth/callback")
-	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("DBGUARD_PUBLIC_URL")), "/")
+	redirectURL := envOr("CHANGEGUARD_OIDC_REDIRECT_URL", "http://localhost:8080/auth/callback")
+	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("CHANGEGUARD_PUBLIC_URL")), "/")
 	secureCookie := strings.HasPrefix(strings.ToLower(redirectURL), "https://") ||
 		strings.HasPrefix(strings.ToLower(publicURL), "https://")
-	if value := strings.TrimSpace(os.Getenv("DBGUARD_AUTH_SECURE_COOKIE")); value != "" {
+	if value := strings.TrimSpace(os.Getenv("CHANGEGUARD_AUTH_SECURE_COOKIE")); value != "" {
 		if parsed, err := strconv.ParseBool(value); err == nil {
 			secureCookie = parsed
 		}
 	}
 	return Config{
 		Mode:                 mode,
-		Issuer:               strings.TrimRight(strings.TrimSpace(os.Getenv("DBGUARD_OIDC_ISSUER")), "/"),
-		ClientID:             strings.TrimSpace(os.Getenv("DBGUARD_OIDC_CLIENT_ID")),
-		ClientSecret:         strings.TrimSpace(os.Getenv("DBGUARD_OIDC_CLIENT_SECRET")),
+		Issuer:               strings.TrimRight(strings.TrimSpace(os.Getenv("CHANGEGUARD_OIDC_ISSUER")), "/"),
+		ClientID:             strings.TrimSpace(os.Getenv("CHANGEGUARD_OIDC_CLIENT_ID")),
+		ClientSecret:         strings.TrimSpace(os.Getenv("CHANGEGUARD_OIDC_CLIENT_SECRET")),
 		RedirectURL:          redirectURL,
 		PublicURL:            publicURL,
-		Scopes:               splitValues(envOr("DBGUARD_OIDC_SCOPES", "openid profile email groups")),
-		RoleClaim:            envOr("DBGUARD_OIDC_ROLE_CLAIM", "groups"),
-		OwnerValues:          splitValues(os.Getenv("DBGUARD_OIDC_OWNER_VALUES")),
-		ReviewerValues:       splitValues(os.Getenv("DBGUARD_OIDC_REVIEWER_VALUES")),
-		AllowedValues:        splitValues(os.Getenv("DBGUARD_OIDC_ALLOWED_VALUES")),
-		AllowedDomains:       splitValues(os.Getenv("DBGUARD_OIDC_ALLOWED_DOMAINS")),
-		TokenAuthMethod:      envOr("DBGUARD_OIDC_TOKEN_AUTH_METHOD", "client_secret_post"),
-		SessionTTL:           durationOr("DBGUARD_AUTH_SESSION_TTL", 12*time.Hour),
-		HTTPTimeout:          durationOr("DBGUARD_OIDC_HTTP_TIMEOUT", 8*time.Second),
+		Scopes:               splitValues(envOr("CHANGEGUARD_OIDC_SCOPES", "openid profile email groups")),
+		RoleClaim:            envOr("CHANGEGUARD_OIDC_ROLE_CLAIM", "groups"),
+		OwnerValues:          splitValues(os.Getenv("CHANGEGUARD_OIDC_OWNER_VALUES")),
+		ReviewerValues:       splitValues(os.Getenv("CHANGEGUARD_OIDC_REVIEWER_VALUES")),
+		AllowedValues:        splitValues(os.Getenv("CHANGEGUARD_OIDC_ALLOWED_VALUES")),
+		AllowedDomains:       splitValues(os.Getenv("CHANGEGUARD_OIDC_ALLOWED_DOMAINS")),
+		TokenAuthMethod:      envOr("CHANGEGUARD_OIDC_TOKEN_AUTH_METHOD", "client_secret_post"),
+		SessionTTL:           durationOr("CHANGEGUARD_AUTH_SESSION_TTL", 12*time.Hour),
+		HTTPTimeout:          durationOr("CHANGEGUARD_OIDC_HTTP_TIMEOUT", 8*time.Second),
 		SecureCookie:         secureCookie,
-		RequireVerifiedEmail: boolOr("DBGUARD_OIDC_REQUIRE_VERIFIED_EMAIL", true),
+		RequireVerifiedEmail: boolOr("CHANGEGUARD_OIDC_REQUIRE_VERIFIED_EMAIL", true),
 	}
 }
 

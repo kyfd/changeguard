@@ -65,7 +65,7 @@ func (c *Client) checkAddress(raw string) error {
 // 默认 false（拒绝）。仅当企业的模型网关确实部署在内网时才需要打开，
 // 否则这个功能在纯内网部署下不可用。开关必须显式设置，不做任何自动推断。
 func AllowPrivateUpstream() bool {
-	value := strings.TrimSpace(os.Getenv("DBGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM"))
+	value := strings.TrimSpace(os.Getenv("CHANGEGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM"))
 	return strings.EqualFold(value, "1") || strings.EqualFold(value, "true")
 }
 

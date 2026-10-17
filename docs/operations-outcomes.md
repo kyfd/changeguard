@@ -5,8 +5,8 @@ ChangeGuard 的审批和 Gate 证明“部署内容被授权”，GitLab/Jenkins
 ## 1. 配置与安全边界
 
 ```text
-DBGUARD_OPERATIONS_WEBHOOK_TOKEN=<至少 32 字节独立随机 Token>
-DBGUARD_OPERATIONS_ORGANIZATION_ID=org_replace_me
+CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN=<至少 32 字节独立随机 Token>
+CHANGEGUARD_OPERATIONS_ORGANIZATION_ID=org_replace_me
 ```
 
 接收地址：

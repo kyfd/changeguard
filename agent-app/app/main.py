@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Mapping, Sequence
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -14,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import AgentNotConfigured, agent_not_configured_handler, router
 from app.config import Settings
+from app.instance_lock import acquire_instance_lock
 from app.service import AgentService
 from app.usage import UsageLimits, UsageLimiter
 
@@ -87,7 +89,19 @@ def describe_request_error(errors: Sequence[Mapping[str, Any]]) -> str:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings.from_env()
+
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        # 4.0 单实例守卫：任务 JSON 与检查点 SQLite 只支持单实例语义；
+        # 拿不到锁就启动失败，而不是让两个进程互相覆盖状态。
+        lock = acquire_instance_lock(resolved.task_store_path)
+        try:
+            yield
+        finally:
+            lock.release()
+
     application = FastAPI(
+        lifespan=lifespan,
         title="ChangeGuard 数据库变更准备 Agent",
         version="0.1.0",
         description=(

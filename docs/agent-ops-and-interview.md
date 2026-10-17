@@ -54,11 +54,11 @@ $env:AGENT_DEMO_DIR              = "..\examples\agent-demo"
 
 # 2) Go 治理服务（浏览器只与它通信；它反向代理 /api/agent/*）
 $env:PORT                          = "18099"
-$env:DBGUARD_DATA_FILE             = "$PWD\data\demo-dbguard.json"
-$env:DBGUARD_ENABLE_DEMO_ACCOUNTS  = "true"
-$env:DBGUARD_AGENT_BASE_URL        = "http://127.0.0.1:18091"
-$env:DBGUARD_AGENT_UPSTREAM_TOKEN  = "demo-shared-secret"   # 必须与 Agent 侧一致
-$env:DBGUARD_WORKERS               = "0"
+$env:CHANGEGUARD_DATA_FILE             = "$PWD\data\demo-dbguard.json"
+$env:CHANGEGUARD_ENABLE_DEMO_ACCOUNTS  = "true"
+$env:CHANGEGUARD_AGENT_BASE_URL        = "http://127.0.0.1:18091"
+$env:CHANGEGUARD_AGENT_UPSTREAM_TOKEN  = "demo-shared-secret"   # 必须与 Agent 侧一致
+$env:CHANGEGUARD_WORKERS               = "0"
 .\bin\dbguard.exe
 
 # 3) 浏览器：http://127.0.0.1:18099/ 用 developer@example.com / Demo1234 登录，再进 /agent/
@@ -218,7 +218,7 @@ $env:DBGUARD_WORKERS               = "0"
 
 | 维度 | 事实 | 证据 |
 | --- | --- | --- |
-| 提供方式 | 显式注册 `/agent/`，`handleAgentWorkbench` 提供静态资源；`/api/agent/*` 由 `handleAgentProxy` 反向代理，**仅在配置 `DBGUARD_AGENT_BASE_URL` 时启用**，否则 503 且 `code=SERVICE_UNAVAILABLE` | `agentproxy.go:62,72,99-159`；`server.go:1672` |
+| 提供方式 | 显式注册 `/agent/`，`handleAgentWorkbench` 提供静态资源；`/api/agent/*` 由 `handleAgentProxy` 反向代理，**仅在配置 `CHANGEGUARD_AGENT_BASE_URL` 时启用**，否则 503 且 `code=SERVICE_UNAVAILABLE` | `agentproxy.go:62,72,99-159`；`server.go:1672` |
 | 布局 | 单页三栏：对话 / 草案 / 证据与检查；顶栏显示身份与健康 | `agent/index.html`；`agent/app.js` `render`(579) |
 | 已实现的操作 | 创建任务（387）；补充信息（434，含追问表单 `wireQuestionForm`(772) 与槽位预填 `suggestedValue`(688)）；停止（452）；`resumeTask`(473) 在有检查点时是「从检查点恢复」、没有检查点时按钮是「重新执行一次」（后者是**重跑**，不是续跑，`app.js:651-658`）；人工确认材料（489，携带 `material_hash` 做乐观并发校验）；查看/复制 SQL 与回滚；「补充说明」自由文本（`note`，写入任务记录并在下次执行时拼进需求） | `agent/app.js` 上述行号 |
 | 明确不做 | 治理审批与通行证签发、隔离库演练、执行 SQL；模型建议不参与放行判定 | `renderGovernanceBoundary`(1133)、`renderShadowNotice`(1297)、`renderAdvice`(1017)、`renderConfirmation`(1037) |

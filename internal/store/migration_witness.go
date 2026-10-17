@@ -65,7 +65,7 @@ func (s *Store) MigrationWitnessStatus() MigrationWitnessStatus {
 }
 
 func migrationWitnessPaths(dataPath string) (string, string, error) {
-	witnessPath := strings.TrimSpace(os.Getenv("DBGUARD_MIGRATION_WITNESS_FILE"))
+	witnessPath := strings.TrimSpace(os.Getenv("CHANGEGUARD_MIGRATION_WITNESS_FILE"))
 	if witnessPath == "" {
 		witnessPath = dataPath + ".rollback-witness.json"
 	}

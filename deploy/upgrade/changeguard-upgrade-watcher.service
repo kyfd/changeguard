@@ -9,7 +9,7 @@ User=root
 ExecStart=/usr/local/libexec/changeguard/changeguard-upgrade-watcher.sh
 Restart=always
 RestartSec=3
-Environment=DBGUARD_UPGRADE_DIR=/opt/changeguard/upgrades
+Environment=CHANGEGUARD_UPGRADE_DIR=/opt/changeguard/upgrades
 Environment=CHANGEGUARD_RELEASE_ROOT=/opt/changeguard/releases
 Environment=CHANGEGUARD_CURRENT_LINK=/opt/changeguard/current
 Environment=CHANGEGUARD_SERVICE=changeguard

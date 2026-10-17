@@ -57,7 +57,10 @@ type Store struct {
 	migrationWitnessPath       string
 	migrationWitnessMarkerPath string
 	migrationWitness           migrationWitnessSnapshot
-	migrationWitnessStatus     MigrationWitnessStatus
+	// instanceLock 只在文件状态后端生效：4.0 起同一状态文件只允许一个核心进程，
+	// 第二个进程在初始化前失败关闭，而不是与第一个进程互相覆盖状态。
+	instanceLock           *instanceLock
+	migrationWitnessStatus MigrationWitnessStatus
 	// now 是租约等时间敏感逻辑的时间源。为 nil 时用 time.Now；
 	// 测试可用 NewMemoryWithClock 注入可控时钟，使"租约过期"确定发生，
 	// 而不是依赖 1ms 墙钟窗口（那正是启动恢复用例在 -race 下偶发失败的原因）。
@@ -474,7 +477,7 @@ func migratedPolicyID(organizationID, code string) string {
 }
 
 func demoAccountsEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_ENABLE_DEMO_ACCOUNTS"))) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CHANGEGUARD_ENABLE_DEMO_ACCOUNTS"))) {
 	case "1", "true", "yes", "on":
 		return true
 	default:
@@ -1009,7 +1012,7 @@ func (s *Store) restoreLocked() {
 	}
 }
 func demoDataEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DBGUARD_ENABLE_DEMO_DATA"))) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CHANGEGUARD_ENABLE_DEMO_DATA"))) {
 	case "1", "true", "yes", "on":
 		return true
 	default:

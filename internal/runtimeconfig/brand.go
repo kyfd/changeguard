@@ -7,16 +7,20 @@ import (
 	"strings"
 )
 
+// 4.0 removes the historical brand aliases. Every key is read under the
+// canonical prefix only, and a host that still carries any legacy variable
+// refuses to start rather than running on a half-migrated configuration.
 const (
 	brandPrefix  = "CHANGEGUARD_"
 	legacyPrefix = "DBGUARD_"
 )
 
+// legacyMigrationHint is appended to every legacy rejection so operators get
+// the remediation instead of a silently ignored key.
+const legacyMigrationHint = "migrate the environment file with deploy/production/changeguard-migrate-env.sh, then restart"
+
 func envFilePath() (string, bool) {
 	if path := strings.TrimSpace(os.Getenv(brandPrefix + "ENV_FILE")); path != "" {
-		return path, true
-	}
-	if path := strings.TrimSpace(os.Getenv(legacyPrefix + "ENV_FILE")); path != "" {
 		return path, true
 	}
 	return ".env", false
@@ -26,51 +30,31 @@ func profileName() string {
 	if profile := strings.ToLower(strings.TrimSpace(os.Getenv(brandPrefix + "ENV_PROFILE"))); profile != "" {
 		return profile
 	}
-	if profile := strings.ToLower(strings.TrimSpace(os.Getenv(legacyPrefix + "ENV_PROFILE"))); profile != "" {
-		return profile
-	}
 	return ProfileDevelopment
 }
 
-// applyBrandAliases copies CHANGEGUARD_* onto unset DBGUARD_* keys so the rest
-// of the process can keep reading the historical names. Conflicting values fail
-// closed. Legacy-only keys are returned for a single deprecation warning.
-func applyBrandAliases() ([]string, error) {
-	brand := map[string]string{}
-	legacy := map[string]string{}
-	for _, item := range os.Environ() {
-		key, value, ok := strings.Cut(item, "=")
-		if !ok {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(key, brandPrefix):
-			brand[strings.TrimPrefix(key, brandPrefix)] = value
-		case strings.HasPrefix(key, legacyPrefix):
-			legacy[strings.TrimPrefix(key, legacyPrefix)] = value
-		}
+// rejectLegacyBrandEnvironment fails closed when any legacy variable is still
+// present in the process environment. Key names are reported; values never are.
+func rejectLegacyBrandEnvironment() error {
+	keys := legacyBrandKeys(os.Environ())
+	if len(keys) == 0 {
+		return nil
 	}
+	return fmt.Errorf("%s variables are no longer accepted in 4.0: %s; %s",
+		strings.TrimSuffix(legacyPrefix, "_"), strings.Join(keys, ", "), legacyMigrationHint)
+}
 
-	for suffix, value := range brand {
-		legacyKey := legacyPrefix + suffix
-		if existing, ok := legacy[suffix]; ok && existing != value {
-			return nil, fmt.Errorf("conflicting %s and %s values", brandPrefix+suffix, legacyKey)
-		}
-		if _, ok := legacy[suffix]; ok {
+// legacyBrandKeys returns sorted legacy key names from KEY=VALUE entries. The
+// environment file reader reuses it so a half-migrated file fails the same way.
+func legacyBrandKeys(entries []string) []string {
+	var keys []string
+	for _, entry := range entries {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(key, legacyPrefix) {
 			continue
 		}
-		if err := os.Setenv(legacyKey, value); err != nil {
-			return nil, fmt.Errorf("apply %s: %w", legacyKey, err)
-		}
+		keys = append(keys, key)
 	}
-
-	var unused []string
-	for suffix := range legacy {
-		if _, ok := brand[suffix]; ok {
-			continue
-		}
-		unused = append(unused, legacyPrefix+suffix)
-	}
-	sort.Strings(unused)
-	return unused, nil
+	sort.Strings(keys)
+	return keys
 }

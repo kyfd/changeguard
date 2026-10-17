@@ -32,7 +32,9 @@ func TestCoreReleaseScriptsCarryMachineVerifiableProvenance(t *testing.T) {
 		"bundle create",
 		"bundle verify",
 		"archive --format=tar.gz",
-		"changeguard-core-release/v2",
+		"changeguard-release/v3",
+		`"components": [`,
+		"from release_manifest import tree_digest",
 		"SHA256SUMS",
 	})
 }
@@ -42,8 +44,8 @@ func TestProductionCoreServiceFailsClosedBeforeRunning(t *testing.T) {
 	assertMarkers(t, filepath.Join(production, "changeguard.service"), []string{
 		"User=changeguard",
 		"Group=changeguard",
-		"Environment=DBGUARD_ENV_FILE=/etc/changeguard/core.env",
-		"Environment=DBGUARD_ENV_PROFILE=production",
+		"Environment=CHANGEGUARD_ENV_FILE=/etc/changeguard/core.env",
+		"Environment=CHANGEGUARD_ENV_PROFILE=production",
 		"EnvironmentFile=/etc/changeguard/core.env",
 		"changeguard-core-preflight.sh",
 		"dbguard --check-config",
@@ -63,13 +65,13 @@ func TestProductionCoreServiceFailsClosedBeforeRunning(t *testing.T) {
 		"core_preflight=passed",
 	})
 	assertMarkers(t, filepath.Join(production, "changeguard-core.env.example"), []string{
-		"DBGUARD_LISTEN_ADDRESS=127.0.0.1:",
-		"DBGUARD_SESSION_MODE=redis",
-		"DBGUARD_REDIS_PREFIX=changeguard:production:session:",
-		"DBGUARD_EXPERIMENT_MODE=postgres",
-		"DBGUARD_MIGRATION_WITNESS_FILE=/opt/changeguard/data/dbguard.json.rollback-witness.json",
-		"DBGUARD_METRICS_TOKEN=REPLACE_ME",
-		"DBGUARD_OPERATIONS_WEBHOOK_TOKEN=REPLACE_ME",
+		"CHANGEGUARD_LISTEN_ADDRESS=127.0.0.1:",
+		"CHANGEGUARD_SESSION_MODE=redis",
+		"CHANGEGUARD_REDIS_PREFIX=changeguard:production:session:",
+		"CHANGEGUARD_EXPERIMENT_MODE=postgres",
+		"CHANGEGUARD_MIGRATION_WITNESS_FILE=/opt/changeguard/data/dbguard.json.rollback-witness.json",
+		"CHANGEGUARD_METRICS_TOKEN=REPLACE_ME",
+		"CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN=REPLACE_ME",
 	})
 	assertMarkers(t, filepath.Join(production, "changeguard-backup.sh"), []string{
 		"CHANGEGUARD_CORE_ENV_FILE",

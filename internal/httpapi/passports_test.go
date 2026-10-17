@@ -73,7 +73,7 @@ func TestHTTPListPassportsIsOneShotAndOmitsSecrets(t *testing.T) {
 }
 
 func TestHTTPGateConsumeSameConsumerReplay(t *testing.T) {
-	t.Setenv("DBGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("g", 32))
+	t.Setenv("CHANGEGUARD_PASSPORT_HMAC_SECRET", strings.Repeat("g", 32))
 	server, svc, data := newIdempotencyHTTPServer(t)
 	change := readyConfigChange(t, svc, "gate consume replay")
 	change, err := svc.Approve(change.ID, "usr_reviewer", "approved")

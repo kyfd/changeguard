@@ -149,6 +149,19 @@ fi
 
 bash "$install_script" "$archive" "$expected_sha256" "$release_root" "$release_id"
 
+# 4.0 组件语义：包内携带 Agent 组件、并且系统里确实装了该服务单元时，
+# Agent 必须与核心在同一次切换里重启；否则核心升级成功而 Agent 留在旧代码上。
+agent_service="${CHANGEGUARD_AGENT_SERVICE:-changeguard-agent}"
+agent_unit_dir="${CHANGEGUARD_AGENT_UNIT_DIR:-/etc/systemd/system}"
+manage_agent=0
+if [ "$core_only" -eq 0 ] && [ -d "$release_root/$release_id/agent-app" ]; then
+  if [ -f "$agent_unit_dir/$agent_service.service" ]; then
+    manage_agent=1
+  else
+    printf '==> Package carries an Agent component but %s is not installed; the Agent is not restarted by this upgrade\n' "$agent_unit_dir/$agent_service.service" >&2
+  fi
+fi
+
 switch_release() {
   ln -s -- "$1" "$link_tmp" && mv -Tf -- "$link_tmp" "$current_link"
 }
@@ -163,15 +176,44 @@ wait_healthy() {
   return 1
 }
 
+
+# 一并重启被管理的组件；任一失败即整体失败，由调用方回滚两者。
+restart_components() {
+  systemctl restart "$service_name" || return 1
+  wait_healthy || return 1
+  [ "$manage_agent" -eq 1 ] || return 0
+  systemctl restart "$agent_service" || return 1
+  wait_agent_healthy
+}
+
+wait_agent_healthy() {
+  [ -n "$agent_health_url" ] || return 0
+  local token=""
+  local deadline
+  if [ -n "$agent_token_env" ]; then
+    token="${!agent_token_env:-}"
+  fi
+  deadline=$((SECONDS + health_timeout))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -n "$token" ]; then
+      curl -sf --max-time 2 -H "X-Agent-Upstream-Token: $token" "$agent_health_url" >/dev/null 2>&1 && return 0
+    else
+      curl -sf --max-time 2 "$agent_health_url" >/dev/null 2>&1 && return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
 printf '==> Switching to %s (previous: %s)\n' "$release_id" "$current_id"
 switch_release "$release_root/$release_id" || fail 'could not switch current-link'
 # restart 必须位于显式条件中；否则 set -e 会在回滚前终止脚本。
-if systemctl restart "$service_name" && wait_healthy; then
-  printf '==> Health check passed.\n'
+# restart 必须位于显式条件中；否则 set -e 会在回滚前终止脚本。
+if restart_components; then
+  printf '==> Health check passed (agent_managed=%s).\n' "$manage_agent"
 else
   printf 'error: restart or health check failed; rolling back to %s\n' "$current_id" >&2
-  if switch_release "$current_target" && systemctl restart "$service_name" && wait_healthy; then
-    printf 'upgrade_status=rolled_back version=%s previous=%s\n' "$version" "$current_id" >&2
+  if switch_release "$current_target" && restart_components; then
+    printf 'upgrade_status=rolled_back version=%s previous=%s agent_managed=%s\n' "$version" "$current_id" "$manage_agent" >&2
   else
     printf 'upgrade_status=rollback_failed version=%s previous=%s manual_intervention_required=true\n' "$version" "$current_id" >&2
   fi

@@ -90,7 +90,7 @@ for raw in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
     if not line or line.startswith("#") or "=" not in line:
         continue
     key, candidate = line.split("=", 1)
-    if key.strip() == "DBGUARD_MIGRATION_WITNESS_FILE":
+    if key.strip() == "CHANGEGUARD_MIGRATION_WITNESS_FILE":
         value = candidate.strip().strip("\"'")
 print(value)
 PY

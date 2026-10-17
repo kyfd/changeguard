@@ -261,7 +261,7 @@ class Toolbox:
             return ToolResult(
                 ok=False,
                 tool=tool,
-                error="治理后端未启用内部只读接口（缺少 DBGUARD_AGENT_UPSTREAM_TOKEN）。",
+                error="治理后端未启用内部只读接口（缺少 CHANGEGUARD_AGENT_UPSTREAM_TOKEN）。",
             )
         if response.status_code != 200:
             return ToolResult(ok=False, tool=tool, error=f"治理后端返回状态码 {response.status_code}")

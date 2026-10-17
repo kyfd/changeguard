@@ -70,19 +70,19 @@ func TestValidateBaseURLAllowsPrivateOnlyWhenOptedIn(t *testing.T) {
 }
 
 func TestAllowPrivateUpstreamReadsEnvironment(t *testing.T) {
-	t.Setenv("DBGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", "")
+	t.Setenv("CHANGEGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", "")
 	if AllowPrivateUpstream() {
 		t.Fatal("empty value must default to closed")
 	}
-	t.Setenv("DBGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", "1")
+	t.Setenv("CHANGEGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", "1")
 	if !AllowPrivateUpstream() {
 		t.Fatal("explicit 1 must open the gate")
 	}
-	t.Setenv("DBGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", "true")
+	t.Setenv("CHANGEGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", "true")
 	if !AllowPrivateUpstream() {
 		t.Fatal("explicit true must open the gate")
 	}
-	t.Setenv("DBGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", "yes")
+	t.Setenv("CHANGEGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", "yes")
 	if AllowPrivateUpstream() {
 		t.Fatal("an unrecognised value must stay closed rather than guess")
 	}

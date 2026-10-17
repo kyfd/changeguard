@@ -160,8 +160,16 @@ if expected != actual:
 
 manifest = json.loads((root / "release-manifest.json").read_text(encoding="utf-8"))
 verification = json.loads((root / "verification.json").read_text(encoding="utf-8"))
-if manifest.get("schema") != "changeguard-core-release/v2":
+schema = manifest.get("schema")
+if schema not in {"changeguard-core-release/v2", "changeguard-release/v3"}:
     raise SystemExit("unexpected release manifest schema")
+if schema == "changeguard-release/v3":
+    declared_components = {
+        item.get("name"): item for item in manifest.get("components", []) if isinstance(item, dict)
+    }
+    core_component = declared_components.get("core") or {}
+    if core_component.get("sha256") != manifest.get("files", {}).get("dbguard"):
+        raise SystemExit("core component digest does not match the released binary digest")
 if verification.get("schema") != "changeguard-core-verification/v1" or verification.get("status") != "passed":
     raise SystemExit("release verification evidence is not passed")
 for field in ("version", "tag", "commit", "source_sha256"):
@@ -175,6 +183,21 @@ artifact = manifest.get("files", {}).get("dbguard", "")
 if not re.fullmatch(r"[0-9a-f]{64}", artifact):
     raise SystemExit("release manifest artifact digest is invalid")
 PY
+
+# 组件清单校验与预检使用同一实现：按脚本位置定位，找不到即失败关闭
+# （安装端绝不可以在没有核对库的情况下继续）。
+if [ -n "${CHANGEGUARD_MANIFEST_LIB:-}" ]; then
+  manifest_library_dir="$CHANGEGUARD_MANIFEST_LIB"
+else
+  install_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -f "$install_script_dir/release_manifest.py" ]; then
+    manifest_library_dir="$install_script_dir"
+  elif [ -f "$install_script_dir/../lib/release_manifest.py" ]; then
+    manifest_library_dir="$(cd -- "$install_script_dir/../lib" && pwd)"
+  else
+    manifest_library_dir="$install_script_dir"
+  fi
+fi
 (
   cd "$extracted"
   sha256sum -c SHA256SUMS >/dev/null
@@ -195,17 +218,41 @@ if find "$target" -perm /022 -print -quit | grep -q .; then
   fail "final_release_is_group_or_world_writable"
 fi
 
-python3 - "$target/release-manifest.json" "$target" "$actual_archive_sha256" "$artifact_sha256" <<'PY'
+if ! python3 - "$target/release-manifest.json" "$target" "$actual_archive_sha256" "$artifact_sha256" "$manifest_library_dir" <<'PY'
 import json
+import pathlib
 import sys
 
+sys.path.insert(0, sys.argv[5])
+from release_manifest import tree_digest
+
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+root = sys.argv[2]
+components = {
+    item.get("name"): item for item in manifest.get("components", []) if isinstance(item, dict)
+}
+agent_directory = pathlib.Path(root) / "agent-app"
+agent_state = "absent"
+if agent_directory.is_dir():
+    declared = (components.get("agent") or {}).get("sha256")
+    computed = tree_digest(agent_directory, root=root)
+    if declared != computed:
+        raise SystemExit(
+            f"installed agent component digest mismatch declared={declared} computed={computed}"
+        )
+    agent_state = "installed"
 print(
     "core_install=passed"
-    f" release={sys.argv[2]}"
+    f" release={root}"
     f" version={manifest['version']}"
     f" commit={manifest['commit']}"
     f" archive_sha256={sys.argv[3]}"
     f" artifact_sha256={sys.argv[4]}"
+    f" agent_component={agent_state}"
 )
 PY
+then
+  # 组件核对失败时不能留下"看起来装好了"的版本目录：清理后再失败关闭。
+  rm -rf -- "$target"
+  fail "post-install component verification failed; removed $target"
+fi

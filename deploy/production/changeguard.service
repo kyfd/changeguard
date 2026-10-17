@@ -10,8 +10,8 @@ Type=simple
 User=changeguard
 Group=changeguard
 WorkingDirectory=/opt/changeguard/current
-Environment=DBGUARD_ENV_FILE=/etc/changeguard/core.env
-Environment=DBGUARD_ENV_PROFILE=production
+Environment=CHANGEGUARD_ENV_FILE=/etc/changeguard/core.env
+Environment=CHANGEGUARD_ENV_PROFILE=production
 EnvironmentFile=/etc/changeguard/core.env
 ExecStartPre=/usr/local/libexec/changeguard/changeguard-core-preflight.sh /etc/changeguard/core.env /opt/changeguard/current /opt/changeguard/data/dbguard.json /opt/changeguard/data/dbguard.json.rollback-witness.json changeguard /opt/changeguard/releases
 ExecStartPre=/opt/changeguard/current/dbguard --check-config

@@ -17,7 +17,7 @@ func TestRuntimeUsesGuardedOutboundClient(t *testing.T) {
 	defer upstream.Close()
 	for _, private := range []string{"false", "true"} {
 		t.Run(private, func(t *testing.T) {
-			t.Setenv("DBGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", private)
+			t.Setenv("CHANGEGUARD_MODEL_ALLOW_PRIVATE_UPSTREAM", private)
 			runtime := NewFromEnvironment()
 			defer runtime.client.CloseIdleConnections()
 			_, _, _, err := runtime.completeOnce(context.Background(), nil, nil, LLMConfig{BaseURL: upstream.URL, APIKey: "test", Model: "test"})

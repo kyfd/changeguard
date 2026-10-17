@@ -29,7 +29,7 @@ const (
 	agentToolsPrefix            = "/api/agent-tools/"
 	agentToolsChangePrefix      = "/api/agent-tools/changes/"
 	agentToolsApplicationPrefix = "/api/agent-tools/applications/"
-	agentToolsSecretEnv         = "DBGUARD_AGENT_UPSTREAM_TOKEN"
+	agentToolsSecretEnv         = "CHANGEGUARD_AGENT_UPSTREAM_TOKEN"
 
 	agentProjectionContext    = "context"
 	agentProjectionFindings   = "findings"

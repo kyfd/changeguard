@@ -10,7 +10,7 @@
 #       → 写回状态 → 失败自动回滚 → 记录历史。
 set -euo pipefail
 
-UPGRADE_ROOT="${DBGUARD_UPGRADE_DIR:-/opt/changeguard/upgrades}"
+UPGRADE_ROOT="${CHANGEGUARD_UPGRADE_DIR:-/opt/changeguard/upgrades}"
 PENDING_DIR="$UPGRADE_ROOT/pending"
 STATUS_FILE="$UPGRADE_ROOT/status.json"
 TRIGGER_FILE="$UPGRADE_ROOT/apply.requested"
@@ -214,6 +214,24 @@ while true; do
     fi
   fi
 
+  # 4.0：包内携带 Agent 组件且系统里装了该 unit 时，Agent 与核心在同一次切换里
+  # 重启；任一组件失败都回滚两者。可用 CHANGEGUARD_MANAGE_AGENT=off 显式关闭。
+  manage_agent=0
+  agent_service="${CHANGEGUARD_AGENT_SERVICE:-changeguard-agent}"
+  agent_unit_dir="${CHANGEGUARD_AGENT_UNIT_DIR:-/etc/systemd/system}"
+  if [ "${CHANGEGUARD_MANAGE_AGENT:-auto}" != "off" ] \
+    && [ -d "$RELEASE_ROOT/$release_id/agent-app" ] \
+    && [ -f "$agent_unit_dir/$agent_service.service" ]; then
+    manage_agent=1
+  fi
+  restart_components() {
+    systemctl restart "$SERVICE_NAME" || return 1
+    wait_healthy || return 1
+    [ "$manage_agent" -eq 1 ] || return 0
+    systemctl restart "$agent_service" || return 1
+    return 0
+  }
+
   json_set state applying
   json_set message "正在安装 $version ..."
   json_set previous_version "$previous_id"
@@ -234,7 +252,7 @@ while true; do
   fi
 
   # 显式处理 restart 的非零退出，不能让 set -e 跳过回滚。
-  if systemctl restart "$SERVICE_NAME" && wait_healthy; then
+  if restart_components; then
     log "health check passed, upgrade complete"
     json_set state success
     json_set message "升级成功：$version"
@@ -243,7 +261,7 @@ while true; do
   else
     log "restart or health check failed, rolling back to $previous_id"
     json_set message "新版本启动失败，正在回滚到 $previous_id"
-    if switch_release "$previous_target" && systemctl restart "$SERVICE_NAME" && wait_healthy; then
+    if switch_release "$previous_target" && restart_components; then
       json_set message "升级失败；已回滚到 $previous_id 并通过健康检查"
       json_set state rollback
       record_history "$version" rollback "上一版本健康检查通过" "$previous_id"

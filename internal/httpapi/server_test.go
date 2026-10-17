@@ -250,7 +250,7 @@ func TestDecodeJSONRejectsOversizedBodyEvenWithTrailingWhitespace(t *testing.T) 
 }
 
 func TestMetricsEndpointIsNotPublic(t *testing.T) {
-	t.Setenv("DBGUARD_METRICS_TOKEN", "")
+	t.Setenv("CHANGEGUARD_METRICS_TOKEN", "")
 	server := &Server{}
 	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response := httptest.NewRecorder()
@@ -258,7 +258,7 @@ func TestMetricsEndpointIsNotPublic(t *testing.T) {
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("metrics without configured token must be hidden, got %d", response.Code)
 	}
-	t.Setenv("DBGUARD_METRICS_TOKEN", "secret-token")
+	t.Setenv("CHANGEGUARD_METRICS_TOKEN", "secret-token")
 	request = httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	response = httptest.NewRecorder()
 	server.handleMetrics(response, request)
