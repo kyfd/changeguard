@@ -1,0 +1,37 @@
+[Unit]
+Description=ChangeGuard 数据库变更准备 Agent（内部后端，不对外发布端口）
+Documentation=https://github.com/kyfd/changeguard/blob/main/agent-app/README.md
+After=network-online.target
+Wants=network-online.target
+# 4.0 起升级包同时携带核心与 Agent，所以两者必须在同一发布切换中一起重启。
+PartOf=changeguard.target
+
+[Service]
+Type=simple
+User=changeguard
+Group=changeguard
+# 版本目录由升级脚本原子切换；agent-app 与核心二进制来自同一个发布包。
+WorkingDirectory=/opt/changeguard/current/agent-app
+# Agent 只监听 loopback：唯一对外入口仍是治理服务。
+Environment=AGENT_HOST=127.0.0.1
+Environment=AGENT_PORT=18091
+Environment=AGENT_TASK_STORE=/opt/changeguard/data/agent/agent-tasks.json
+Environment=AGENT_CHECKPOINT_PATH=/opt/changeguard/data/agent/agent-checkpoints.sqlite
+# 实例锁是强制的（无开关）：任务 JSON 与检查点 SQLite 是单实例语义，
+# 第二个进程会在 lifespan 阶段直接启动失败。
+ExecStart=/opt/changeguard/current/agent-app/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 18091 --workers 1
+Restart=on-failure
+RestartSec=3
+# 失败关闭：拿不到实例锁、依赖缺失或配置非法时启动失败，不静默降级。
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 只允许写自己的数据目录；模型出站由治理服务的共享配置控制。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/changeguard/data/agent
+
+[Install]
+WantedBy=multi-user.target

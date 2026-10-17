@@ -116,6 +116,19 @@ artifact="$release_directory/dbguard"
 git -C "$repository" bundle create "$release_directory/source.bundle" "$release_tag"
 git -C "$repository" bundle verify "$release_directory/source.bundle" > "$release_directory/bundle-verify.txt" 2>&1
 git -C "$repository" archive --format=tar.gz --output="$release_directory/source.tar.gz" "$commit"
+# 4.0：同一个发布包携带 Python Agent 源码，避免升级只换核心、Agent 停在旧版本。
+# 只从已核对的提交导出该子目录；树摘要由 release_manifest.tree_digest 统一计算，
+# 安装端用同一实现核对已安装内容（否则"组件核对"就是两个各自成立的假校验）。
+git -C "$repository" archive --format=tar "$commit" agent-app | tar -xf - -C "$release_directory"
+agent_tree_sha256="$(python3 - "$release_directory" "$script_directory/../lib" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[2])
+from release_manifest import tree_digest
+
+print(tree_digest(sys.argv[1] + "/agent-app", root=sys.argv[1]))
+PY
+)"
 printf '%s\n' "$modules" > "$release_directory/modules.txt"
 printf '%s\n' "$module_verify_output" > "$release_directory/module-verify.txt"
 go version -m "$artifact" > "$release_directory/binary-buildinfo.txt"
@@ -136,6 +149,7 @@ go_version="$("${offline_go[@]}" go version | awk '{print $3}')"
 
 RELEASE_VERSION="$version" RELEASE_TAG="$release_tag" RELEASE_COMMIT="$commit" \
 RELEASE_BUILT_AT="$built_at" RELEASE_SOURCE_SHA256="$source_sha256" \
+RELEASE_AGENT_TREE_SHA256="$agent_tree_sha256" \
 RELEASE_ARTIFACT_SHA256="$artifact_sha256" RELEASE_BUNDLE_SHA256="$bundle_sha256" \
 RELEASE_ARCHIVE_SHA256="$archive_sha256" RELEASE_VERIFICATION_SHA256="$verification_sha256" \
 RELEASE_MODULES_SHA256="$modules_sha256" RELEASE_BINARY_BUILDINFO_SHA256="$binary_buildinfo_sha256" \
@@ -148,7 +162,7 @@ import os
 import sys
 
 manifest = {
-    "schema": "changeguard-core-release/v2",
+    "schema": "changeguard-release/v3",
     "version": os.environ["RELEASE_VERSION"],
     "tag": os.environ["RELEASE_TAG"],
     "commit": os.environ["RELEASE_COMMIT"],
@@ -162,6 +176,10 @@ manifest = {
         "goproxy": "off",
         "network_access": False,
     },
+    "components": [
+        {"name": "core", "path": "dbguard", "sha256": os.environ["RELEASE_ARTIFACT_SHA256"]},
+        {"name": "agent", "path": "agent-app", "sha256": os.environ["RELEASE_AGENT_TREE_SHA256"]},
+    ],
     "files": {
         "dbguard": os.environ["RELEASE_ARTIFACT_SHA256"],
         "source.bundle": os.environ["RELEASE_BUNDLE_SHA256"],
@@ -183,11 +201,16 @@ PY
 
 (
   cd "$release_directory"
-  sha256sum dbguard source.bundle source.tar.gz modules.txt module-verify.txt binary-buildinfo.txt bundle-verify.txt verification.json build.log release-manifest.json > SHA256SUMS
+  {
+    sha256sum dbguard source.bundle source.tar.gz modules.txt module-verify.txt binary-buildinfo.txt bundle-verify.txt verification.json build.log release-manifest.json
+    find agent-app -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+  } > SHA256SUMS
   sha256sum --check SHA256SUMS
 )
 chmod 0755 "$artifact"
 chmod 0644 "$release_directory"/{source.bundle,source.tar.gz,modules.txt,module-verify.txt,binary-buildinfo.txt,bundle-verify.txt,verification.json,build.log,release-manifest.json,SHA256SUMS}
+# Agent 组件是源码树：去掉组/其他可写位，目录保持可进入，脚本保留可执行位。
+find "$release_directory/agent-app" -perm /022 -exec chmod go-w {} +
 rm -f -- "$incomplete_marker"
 
 printf 'git_release_status=ok\n'

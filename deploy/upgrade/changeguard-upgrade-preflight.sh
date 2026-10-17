@@ -30,6 +30,21 @@ target_version=""
 release_root="/opt/changeguard/releases"
 current_link="/opt/changeguard/current"
 core_only=0
+# 组件清单校验的权威实现在 release_manifest.py。默认按脚本自身位置定位：安装后
+# 与脚本同目录，仓库布局里在 ../lib。允许用环境变量覆盖；三处都找不到时仍然
+# 失败关闭（manifest_library_missing），绝不跳过组件校验。
+if [ -n "${CHANGEGUARD_MANIFEST_LIB:-}" ]; then
+  manifest_lib="$CHANGEGUARD_MANIFEST_LIB"
+else
+  preflight_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -f "$preflight_script_dir/release_manifest.py" ]; then
+    manifest_lib="$preflight_script_dir"
+  elif [ -f "$preflight_script_dir/../lib/release_manifest.py" ]; then
+    manifest_lib="$(cd -- "$preflight_script_dir/../lib" && pwd)"
+  else
+    manifest_lib="$preflight_script_dir"
+  fi
+fi
 timeout=5
 
 # --help must print real usage, never the script body.
@@ -310,8 +325,9 @@ else
     # Bounded read-only parsing: tarfile extractfile, never extracted to disk.
     # Rejects duplicate/non-regular manifests and unsafe members; verifies
     # schema, version, tag, commit, source digest and the single root directory.
-    archive_output="$(python3 - "$archive" <<'PY'
+    archive_output="$(CHANGEGUARD_CORE_ONLY="$core_only" CHANGEGUARD_MANIFEST_LIB="$manifest_lib" python3 - "$archive" <<'PY'
 import json
+import os
 import re
 import sys
 import tarfile
@@ -382,8 +398,19 @@ except Exception:
 if not isinstance(data, dict):
     print("archive_error=manifest_not_an_object", file=sys.stderr)
     raise SystemExit(0)
-if data.get("schema") != "changeguard-core-release/v2":
-    print(f"archive_error=schema_invalid value={data.get('schema')!r}", file=sys.stderr)
+# 4.0 起由 deploy/lib/release_manifest.py 统一判定 schema 与组件集合：
+# v3 包必须携带 core（以及 agent，除非操作者显式声明 --core-only）。
+sys.path.insert(0, os.environ.get("CHANGEGUARD_MANIFEST_LIB", ""))
+try:
+    import release_manifest
+except Exception:
+    print("archive_error=manifest_library_missing", file=sys.stderr)
+    raise SystemExit(0)
+components, component_error = release_manifest.validate_components(
+    data, core_only=os.environ.get("CHANGEGUARD_CORE_ONLY") == "1"
+)
+if component_error is not None:
+    print(f"archive_error={component_error}", file=sys.stderr)
     raise SystemExit(0)
 version = data.get("version")
 tag = data.get("tag")
@@ -422,6 +449,7 @@ print(f"tag={tag.strip()}")
 print(f"commit={commit.strip().lower()}")
 print(f"source_sha256={source.strip().lower()}")
 print(f"root={root_dir}")
+print(f"components={release_manifest.component_summary(components)}")
 PY
 )" 2>"$error_file" || true
     archive_error="$(cat "$error_file" 2>/dev/null || true)"

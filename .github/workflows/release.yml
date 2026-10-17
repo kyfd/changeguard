@@ -185,6 +185,8 @@ jobs:
           PKG_DIR="${{ runner.temp }}/package/${RELEASE_ID}"
           mkdir -p "$PKG_DIR"
           cp "$RELEASE_DIR"/{dbguard,SHA256SUMS,release-manifest.json,verification.json,source.bundle,source.tar.gz,modules.txt,module-verify.txt,binary-buildinfo.txt,bundle-verify.txt,build.log} "$PKG_DIR/"
+          # 4.0：发布包同时携带 Agent 组件（源码树 + 组件摘要已在 manifest 内）。
+          cp -r "$RELEASE_DIR/agent-app" "$PKG_DIR/"
           tar -czf "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz" -C "${{ runner.temp }}/package" "$RELEASE_ID"
           sha256sum "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz" > "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz.sha256"
           echo "archive_sha256=$(awk '{print $1}' "${{ runner.temp }}/changeguard-${{ steps.version.outputs.asset_version }}.tar.gz.sha256")" >> "$GITHUB_OUTPUT"
