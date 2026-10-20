@@ -579,6 +579,39 @@ class PreflightTests(unittest.TestCase):
                 handle.addfile(member, io.BytesIO(body))
         return archive
 
+    def make_component_archive(self, agent_members=200):
+        """4.0 包形态：v3 清单 + 大量 agent 源码成员（真实包有 99 个文件）。"""
+        agent = {f"agent-app/app/module_{i:03d}.py": b"# synthetic\n" for i in range(agent_members)}
+        files = {"dbguard": b"#!/bin/sh\nexit 0\n", **agent}
+        files["release-manifest.json"] = json.dumps(dict(
+            version="3-1-3", tag="v3.1.3", commit="a" * 40, source_sha256="b" * 64,
+            schema="changeguard-release/v3",
+            files={"dbguard": digest(files["dbguard"])},
+            components=[
+                {"name": "core", "path": "dbguard", "sha256": digest(files["dbguard"])},
+                {"name": "agent", "path": "agent-app", "sha256": tree_digest(agent)},
+            ])).encode()
+        files["verification.json"] = json.dumps(dict(
+            version="3-1-3", tag="v3.1.3", commit="a" * 40, source_sha256="b" * 64,
+            schema="changeguard-core-verification/v1", status="passed")).encode()
+        archive = self.root / "component-fixture.tar.gz"
+        with tarfile.open(archive, "w:gz") as handle:
+            for name, body in files.items():
+                member = tarfile.TarInfo(f"{NEW}/{name}")
+                member.size = len(body)
+                member.mode = 0o644
+                handle.addfile(member, io.BytesIO(body))
+        return archive
+
+    def test_package_with_a_large_component_tree_is_accepted(self):
+        """成员上限必须容纳 4.0 的 agent 源码树：过小会让真实发布包被拒。"""
+        archive = self.make_component_archive()
+        result = self.run_preflight(
+            "--core-only", "--core-health-url", self.core_url,
+            *self.archive_args(archive=archive, sha256=digest(archive.read_bytes())))
+        self.assertIn("preflight_check=archive_identity status=passed", result.stdout)
+        self.assertIn("components=core:", result.stdout)
+
     def run_preflight(self, *extra):
         result = subprocess.run([
             "bash", str(PREFLIGHT),

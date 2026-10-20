@@ -334,7 +334,7 @@ import tarfile
 
 archive_path = sys.argv[1]
 max_manifest = 1 << 20  # manifest is bounded; 1MB is ample
-max_members = 64        # a valid package only carries dbguard + checksums + evidence
+max_members = 4096      # 4.0 packages carry the agent source tree, not just dbguard+checksums
 
 error = None
 manifest = None
@@ -461,7 +461,8 @@ PY
       archive_commit="$(identity_field "$archive_output" commit)"
       archive_source="$(identity_field "$archive_output" source_sha256)"
       archive_root="$(identity_field "$archive_output" root)"
-      note_check archive_identity passed "sha256=$actual_sha256 version=$archive_manifest_version tag=$archive_tag commit=$archive_commit root=$archive_root"
+      archive_components="$(identity_field "$archive_output" components)"
+      note_check archive_identity passed "sha256=$actual_sha256 version=$archive_manifest_version tag=$archive_tag commit=$archive_commit root=$archive_root components=${archive_components:-none}"
     fi
   fi
 fi
