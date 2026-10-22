@@ -10,6 +10,8 @@ SQL、配置和 Kubernetes 变更的检查与审批服务，用 Go 编写。
 
 ## 工作流程
 
+**在线演示：<https://liufengxi.top/#/login?demo=1>** —— 免登录进入只读演示控制台（Vue 3 前端，源码见 [changeguard-web](https://github.com/kyfd/changeguard-web)），内置 SQL 拦截、Kubernetes 权限整改、配置明文凭据等预置工单，不写入任何数据。
+
 ```text
 提交文件 → 规则检查 → 独立审批 → 签发通行证 → CI 核对并消费
               │
