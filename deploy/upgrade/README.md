@@ -117,7 +117,7 @@ Agent 侧需注入 `AGENT_BUILD_VERSION` / `AGENT_BUILD_COMMIT` /
 下载放在 release-root 的私有临时目录内，退出时清理，不再复用可预测的 `/tmp` 缓存。
 安装器校验压缩包摘要、成员路径/类型、文件校验清单、manifest 与 verification 身份，以及目录名/版本/tag 一致性；通过后才原子替换软链。
 
-核心与 Python Agent 应使用同一发布提交部署，并验证共享凭据与回调地址一致。脚本**只控制核心服务**，不协调 Python Agent 回滚，也不执行数据迁移。
+核心与 Python Agent 应使用同一发布提交部署。CLI 与 watcher 在包内带 Agent 组件且系统装有该 unit 时，于同一次切换里重启两者：核心探活通过后还要等 Agent 探活通过，任一失败回滚两者。未声明 Agent 健康地址时 Agent 探活失败关闭，不能把「没探」当成健康。脚本不执行数据迁移。
 
 ### 失败语义
 

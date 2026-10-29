@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.0.2 - 2026-10-29
+
+修复升级 watcher 把不健康的 Agent 记成升级成功的问题。4.0 起包内带 Agent 组件且系统装有该 unit 时，watcher 会和核心一起重启 Agent，但重启返回后直接记成功，不再探活；Agent 进程起来却不响应时，状态仍是 `success`，也不会回滚。
+
+### 修复
+
+- `deploy/upgrade/changeguard-upgrade-watcher.sh`：重启 Agent 之后等待健康检查通过，超时或未声明 `CHANGEGUARD_AGENT_HEALTH_URL` 都算本次切换失败，与核心一起回滚。探活禁用代理与重定向、限时，共享密钥只从环境变量读取，不进入命令行。
+- 回归：watcher 在 Agent 探活失败时必须记 `rollback`，并重启回上一版本的核心与 Agent。
+
+### 升级
+
+无新增数据库迁移，无环境变量改名。已部署的 watcher 需从本版本源码更新 `changeguard-upgrade-watcher.sh` 后才会执行 Agent 探活；未更新前行为与 4.0.1 相同。回滚恢复上一版 watcher 脚本即可，不涉及数据。
+
+### 已知限制
+
+- 本次只在隔离回归里用本地 HTTP 桩验证探活失败与回滚；真实生产主机部署与真实 systemd 服务重启仍待执行。
+- 真实模型质量评测保持 `NOT_RUN`。
+
 ## 4.0.1 - 2026-10-20
 
 修复 4.0.0 的发布包无法通过升级预检的问题：包加入 Agent 源码树后成员数超过预检的 64 个上限，预检以 `too_many_members` 判失败（在真实包上复现，合成包测试规模太小未覆盖）。
