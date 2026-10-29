@@ -82,10 +82,12 @@ class UpgradeTests(unittest.TestCase):
                         CHANGEGUARD_AGENT_UNIT_DIR=str(self.root / "units"),
                         CHANGEGUARD_AGENT_SERVICE="changeguard-agent-test",
                         AGENT_UPSTREAM_TOKEN="agent-upstream-token-for-synthetic-tests")
-        # The rewritten preflight reads the core identity with Python urllib,
-        # not curl: serve the readiness payload with a real local HTTP stub.
+        # 预检与 watcher 的 Agent 探活都走 Python urllib，不走 curl。
+        # 用真实本地 HTTP 桩提供身份；Agent 探活是否失败由请求路径决定。
         self.httpd = http.server.HTTPServer(("127.0.0.1", 0), HealthHandler)
         self.httpd.test_mode = "ok"
+        self.httpd.agent_mode = "ok"
+        self.httpd.events = self.events
         self.health_port = self.httpd.server_address[1]
         self.health_thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.health_thread.start()
@@ -101,7 +103,7 @@ case "$2" in
   *) exit 90 ;;
 esac
 active="$(basename "$(readlink -f "$TEST_CURRENT")")"
-printf '%s:%s\\n' "$event" "$active" >> "$TEST_EVENTS"
+printf '%s:%s\n' "$event" "$active" >> "$TEST_EVENTS"
 case "$TEST_MODE:$2:$active" in
   restart-fail:changeguard-test:changeguard-3-1-3|both-restart-fail:*) exit 1 ;;
   agent-restart-fail:changeguard-agent-test:*)
@@ -133,7 +135,6 @@ case "$TEST_MODE:$active" in
     if grep -q '^restart:' "$TEST_EVENTS" 2>/dev/null; then exit 1; fi
     ;;
 esac
-# Covers both the CLI health probe and the preflight build-identity read:
 # a healthy instance reports a non-"unknown" version, like the real service does.
 printf '{"status":"ok","build":{"version":"%s","commit":"%s","source_sha256":"%s","built_at":"2026-10-06T00:00:00Z"}}\n' \
   "$printed_version" "$(printf 'a%.0s' $(seq 1 40))" "$(printf 'b%.0s' $(seq 1 64))"
@@ -396,15 +397,18 @@ printf '{"status":"ok","build":{"version":"%s","commit":"%s","source_sha256":"%s
         self.assertIn("another upgrade is running", result.stderr)
         self.assertEqual(self.read_events(), [])
 
-    def run_watcher(self, mode="ok", archive_name=None):
+    def run_watcher(self, mode="ok", archive_name=None, core_only=True):
+        self.httpd.agent_mode = mode
         self.env.update(TEST_MODE=mode, CHANGEGUARD_UPGRADE_DIR=str(self.pending.parent),
                         CHANGEGUARD_RELEASE_ROOT=str(self.releases),
                         CHANGEGUARD_CURRENT_LINK=str(self.current),
                         CHANGEGUARD_SERVICE="changeguard-test", CHANGEGUARD_HEALTH_TIMEOUT="1",
                         CHANGEGUARD_INSTALL_SCRIPT=str(INSTALL), CHANGEGUARD_POLL_INTERVAL="0.05",
                         CHANGEGUARD_PREFLIGHT_SCRIPT=str(PREFLIGHT),
-                        CHANGEGUARD_CORE_ONLY="1",
+                        CHANGEGUARD_CORE_ONLY="1" if core_only else "0",
                         CHANGEGUARD_HEALTH_URL=self.core_url)
+        if not core_only:
+            self.env["CHANGEGUARD_AGENT_HEALTH_URL"] = self.core_url.replace("/health/ready", "/agent/healthz")
         archive_name = archive_name or f"{NEW}.tar.gz"
         shutil.copyfile(self.archive, self.pending / f"{NEW}.tar.gz")
         status_file = self.pending.parent / "status.json"
@@ -444,6 +448,18 @@ printf '{"status":"ok","build":{"version":"%s","commit":"%s","source_sha256":"%s
         self.assertEqual(state["state"], "success")
         self.assertEqual(history[0]["state"], "success")
         self.assertEqual(self.current.resolve(), self.releases / NEW)
+
+    def test_watcher_agent_unhealthy_rolls_back_both_components(self):
+        """新版本 Agent 探活失败时，不能记成功，两个组件一起回滚。"""
+        self.write_agent_unit()
+        state, history = self.run_watcher("agent-health-fail", core_only=False)
+        self.assertEqual(state["state"], "rollback", state)
+        self.assertEqual(history[0]["state"], "rollback")
+        self.assertEqual(self.current.resolve(), self.old)
+        events = self.read_events()
+        self.assertIn("agent-restart:changeguard-3-1-3", events)
+        self.assertIn("restart:changeguard-3-1-2", events)
+        self.assertIn("agent-restart:changeguard-3-1-2", events)
 
     def test_watcher_restart_failure_rolls_back_and_stays_alive(self):
         state, history = self.run_watcher("restart-fail")
@@ -506,6 +522,13 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
         if mode != "ok":
             self.send_error(503)
             return
+        if self.path.startswith("/agent/") and getattr(self.server, "agent_mode", "ok") == "agent-health-fail":
+            events = self.server.events.read_text() if self.server.events.exists() else ""
+            restarted = [line for line in events.splitlines() if line.startswith("agent-restart:")]
+            # 只让切换后的 Agent 探活失败；预检与回滚后的探活保持健康。
+            if "restart:" in events and not any(line.endswith("changeguard-3-1-2") for line in restarted):
+                self.send_error(503)
+                return
         body = json.dumps({
             "status": "ok",
             "build": {

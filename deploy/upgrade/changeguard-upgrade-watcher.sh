@@ -29,7 +29,9 @@ AGENT_TOKEN_ENV="${CHANGEGUARD_AGENT_TOKEN_ENV:-AGENT_UPSTREAM_TOKEN}"
 CORE_ONLY="${CHANGEGUARD_CORE_ONLY:-0}"
 SKIP_PREFLIGHT="${CHANGEGUARD_SKIP_PREFLIGHT:-0}"
 POLL_INTERVAL="${CHANGEGUARD_POLL_INTERVAL:-2}"
-POLL_INTERVAL="${CHANGEGUARD_POLL_INTERVAL:-2}"
+
+# Agent 探活共享密钥经环境传入，不出现在 argv。
+[[ "$AGENT_TOKEN_ENV" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { log 'invalid agent token env name'; exit 1; }
 
 log() { printf '[changeguard-upgrade] %s\n' "$*" >&2; }
 
@@ -88,6 +90,48 @@ wait_healthy() {
   local deadline=$((SECONDS + HEALTH_TIMEOUT))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if curl -sf --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Agent 探活：禁代理、禁重定向、限时。未声明地址则无法核对，失败关闭，
+# 而不是把「没探」当成健康。密钥只从环境变量读取。
+probe_agent() {
+  URL="$AGENT_HEALTH_URL" AUTH_ENV="$AGENT_TOKEN_ENV" python3 - <<'PY'
+import os
+import urllib.request
+
+url = os.environ["URL"]
+auth_env = os.environ.get("AUTH_ENV", "")
+token = os.environ.get(auth_env, "") if auth_env else ""
+request = urllib.request.Request(url)
+if token:
+    request.add_header("X-Agent-Upstream-Token", token)
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
+opener.addheaders = []
+try:
+    with opener.open(request, timeout=2) as response:
+        if response.status != 200:
+            raise SystemExit(1)
+        response.read(1 << 20)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+wait_agent_healthy() {
+  [ -n "$AGENT_HEALTH_URL" ] || return 1
+  local deadline=$((SECONDS + HEALTH_TIMEOUT))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if probe_agent; then
       return 0
     fi
     sleep 1
@@ -216,20 +260,16 @@ while true; do
 
   # 4.0：包内携带 Agent 组件且系统里装了该 unit 时，Agent 与核心在同一次切换里
   # 重启；任一组件失败都回滚两者。可用 CHANGEGUARD_MANAGE_AGENT=off 显式关闭。
+  # 目录是否存在必须在安装之后判断：安装前版本目录还不存在。
   manage_agent=0
   agent_service="${CHANGEGUARD_AGENT_SERVICE:-changeguard-agent}"
   agent_unit_dir="${CHANGEGUARD_AGENT_UNIT_DIR:-/etc/systemd/system}"
-  if [ "${CHANGEGUARD_MANAGE_AGENT:-auto}" != "off" ] \
-    && [ -d "$RELEASE_ROOT/$release_id/agent-app" ] \
-    && [ -f "$agent_unit_dir/$agent_service.service" ]; then
-    manage_agent=1
-  fi
   restart_components() {
     systemctl restart "$SERVICE_NAME" || return 1
     wait_healthy || return 1
     [ "$manage_agent" -eq 1 ] || return 0
     systemctl restart "$agent_service" || return 1
-    return 0
+    wait_agent_healthy
   }
 
   json_set state applying
@@ -243,7 +283,11 @@ while true; do
     record_history "$version" failed "安装失败" "$previous_id"
     continue
   fi
-
+  if [ "${CHANGEGUARD_MANAGE_AGENT:-auto}" != "off" ] \
+    && [ -d "$RELEASE_ROOT/$release_id/agent-app" ] \
+    && [ -f "$agent_unit_dir/$agent_service.service" ]; then
+    manage_agent=1
+  fi
   if ! switch_release "$RELEASE_ROOT/$release_id"; then
     json_set state failed
     json_set message "切换版本失败，需人工检查"
