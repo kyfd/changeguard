@@ -36,9 +36,6 @@ func NewFromEnvironment() Runner {
 }
 
 func getenvBrand(suffix string) string {
-	if value := strings.TrimSpace(os.Getenv("CHANGEGUARD_" + suffix)); value != "" {
-		return value
-	}
 	return strings.TrimSpace(os.Getenv("CHANGEGUARD_" + suffix))
 }
 

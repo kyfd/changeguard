@@ -57,3 +57,25 @@ spec:
 	}
 	return items
 }
+
+func BenchmarkSQLRuleScan(b *testing.B) {
+	policies := model.DefaultRiskPolicies(time.Now())
+	context := Context{Environment: "生产环境", ChangeType: "DDL"}
+	sql := `SET LOCAL lock_timeout = '2s';
+SET LOCAL statement_timeout = '30s';
+/* batch archive */
+WITH candidates AS (
+  SELECT id FROM orders WHERE created_at < NOW() - INTERVAL '90 days' LIMIT 1000
+)
+UPDATE orders SET status = 'archived' WHERE id IN (SELECT id FROM candidates) LIMIT 1000;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_user_created ON orders (user_id, created_at DESC);`
+	rollback := `DROP INDEX CONCURRENTLY IF EXISTS idx_orders_user_created;`
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		res := CheckWithPolicies(sql, rollback, context, policies)
+		if len(res.Statements) == 0 {
+			b.Fatal("expected parsed SQL statements")
+		}
+	}
+}
