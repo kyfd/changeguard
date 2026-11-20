@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kyfd/changeguard/internal/audit"
@@ -65,6 +66,8 @@ type Store struct {
 	// 测试可用 NewMemoryWithClock 注入可控时钟，使"租约过期"确定发生，
 	// 而不是依赖 1ms 墙钟窗口（那正是启动恢复用例在 -race 下偶发失败的原因）。
 	now func() time.Time
+	// localMutationSeq fences StartRefresh against overwriting newer local hot-path writes.
+	localMutationSeq atomic.Uint64
 }
 
 func (s *Store) clock() time.Time {
@@ -671,6 +674,18 @@ func (s *Store) Change(id string) (model.ChangeRequest, error) {
 func (s *Store) CreateChange(change model.ChangeRequest, audit model.AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		created, linked, err := backend.createChange(ctx, change, audit)
+		if err != nil {
+			return err
+		}
+		s.upsertChangeLocked(created)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return nil
+	}
 	s.data.Changes = append(s.data.Changes, change)
 	s.appendAuditsLocked(audit)
 	return s.saveLocked()
@@ -679,6 +694,18 @@ func (s *Store) CreateChange(change model.ChangeRequest, audit model.AuditEvent)
 func (s *Store) UpdateChange(id string, update func(*model.ChangeRequest) error, audits ...model.AuditEvent) (model.ChangeRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, linked, err := backend.updateChange(ctx, id, update, audits...)
+		if err != nil {
+			return model.ChangeRequest{}, err
+		}
+		s.upsertChangeLocked(updated)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return updated, nil
+	}
 	for i := range s.data.Changes {
 		if s.data.Changes[i].ID != id {
 			continue
@@ -934,6 +961,7 @@ func (s *Store) saveLocked() error {
 		}
 		s.version = version
 		s.persisted = append(s.persisted[:0], content...)
+		s.localMutationSeq.Add(1)
 		return nil
 	}
 	if s.path == "" {
@@ -1101,6 +1129,89 @@ func seedState() state {
 	ensureDemoCoverage(&result, organization, now)
 	mergeDemoCredentials(&result)
 	return result
+}
+
+func (s *Store) upsertChangeLocked(change model.ChangeRequest) {
+	for i := range s.data.Changes {
+		if s.data.Changes[i].ID == change.ID {
+			s.data.Changes[i] = change
+			return
+		}
+	}
+	s.data.Changes = append(s.data.Changes, change)
+}
+
+func (s *Store) upsertOutboxLocked(event model.OutboxEvent) {
+	for i := range s.data.Outbox {
+		if s.data.Outbox[i].ID == event.ID {
+			s.data.Outbox[i] = event
+			return
+		}
+	}
+	s.data.Outbox = append(s.data.Outbox, event)
+}
+
+func (s *Store) upsertPassportLocked(passport model.StoredPassport) {
+	for i := range s.data.Passports {
+		if s.data.Passports[i].ID == passport.ID {
+			s.data.Passports[i] = passport
+			return
+		}
+	}
+	s.data.Passports = append(s.data.Passports, passport)
+}
+
+func (s *Store) upsertIdempotencyLocked(record model.IdempotencyRecord) {
+	for i := range s.data.IdempotencyRecords {
+		if sameIdempotencyScope(s.data.IdempotencyRecords[i], record) {
+			s.data.IdempotencyRecords[i] = record
+			return
+		}
+	}
+	s.data.IdempotencyRecords = append(s.data.IdempotencyRecords, record)
+}
+
+func (s *Store) removeIdempotencyLocked(claim model.IdempotencyRecord) {
+	for i := range s.data.IdempotencyRecords {
+		if sameIdempotencyScope(s.data.IdempotencyRecords[i], claim) && s.data.IdempotencyRecords[i].RequestDigest == claim.RequestDigest {
+			s.data.IdempotencyRecords = append(s.data.IdempotencyRecords[:i], s.data.IdempotencyRecords[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *Store) mergeAuditsLocked(events ...model.AuditEvent) {
+	for _, ev := range events {
+		found := false
+		for i := range s.data.Audits {
+			if s.data.Audits[i].OrganizationID == ev.OrganizationID && s.data.Audits[i].ID == ev.ID {
+				s.data.Audits[i] = ev
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.data.Audits = append(s.data.Audits, ev)
+		}
+	}
+}
+
+func (s *Store) applyPassportDeltaLocked(delta passportDelta) {
+	for _, expired := range delta.Expired {
+		s.upsertPassportLocked(expired)
+	}
+	if delta.Passport != nil {
+		s.upsertPassportLocked(*delta.Passport)
+	}
+	if delta.Change != nil {
+		s.upsertChangeLocked(*delta.Change)
+	}
+	if len(delta.ChangeAudits) > 0 {
+		s.mergeAuditsLocked(delta.ChangeAudits...)
+	}
+	if len(delta.NewAudits) > 0 {
+		s.mergeAuditsLocked(delta.NewAudits...)
+	}
 }
 
 func seedChange(id, title string, app model.Application, user model.User, status model.ChangeStatus, risk model.RiskLevel, created time.Time) model.ChangeRequest {

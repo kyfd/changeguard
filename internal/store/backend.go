@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -21,6 +23,10 @@ type stateBackend interface {
 	Health(context.Context) error
 	Close()
 	Mode() string
+}
+
+type signatureBackend interface {
+	Signature(context.Context) (string, error)
 }
 
 type postgresBackend struct {
@@ -88,10 +94,7 @@ func NewPostgres(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	if _, err := pool.Exec(ctx, postgresStateMigration); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("migrate postgres state: %w", err)
-	}
+	// All schema creation, backfill, and authority promotion run under the cross-process migration lock.
 	if err := backend.migrateNormalized(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("migrate normalized postgres tables: %w", err)
@@ -101,11 +104,16 @@ func NewPostgres(ctx context.Context, dsn string) (*Store, error) {
 	if errors.Is(err, ErrNotFound) {
 		s.data = initialState()
 		normalizeState(&s.data)
-		if err := s.saveLocked(); err != nil && !errors.Is(err, ErrConcurrentWrite) {
-			pool.Close()
-			return nil, err
+		saveErr := s.saveLocked()
+		if saveErr == nil {
+			return s, nil
 		}
-		return s, nil
+		if !errors.Is(saveErr, ErrConcurrentWrite) {
+			pool.Close()
+			return nil, saveErr
+		}
+		// Another instance won the initial seed race; reload its committed snapshot.
+		payload, version, err = backend.Load(ctx)
 	}
 	if err != nil {
 		pool.Close()
@@ -118,24 +126,64 @@ func NewPostgres(ctx context.Context, dsn string) (*Store, error) {
 	s.persisted = append([]byte(nil), payload...)
 	s.version = version
 	normalizeState(&s.data)
-	if err := s.saveLocked(); err != nil && !errors.Is(err, ErrConcurrentWrite) {
+	normalized, err := json.Marshal(s.data)
+	if err != nil {
 		pool.Close()
 		return nil, err
+	}
+	if !bytes.Equal(normalized, payload) {
+		if err := s.saveLocked(); err != nil {
+			if !errors.Is(err, ErrConcurrentWrite) {
+				pool.Close()
+				return nil, err
+			}
+			latestPayload, latestVersion, loadErr := backend.Load(ctx)
+			if loadErr != nil {
+				pool.Close()
+				return nil, loadErr
+			}
+			if err := json.Unmarshal(latestPayload, &s.data); err != nil {
+				pool.Close()
+				return nil, fmt.Errorf("decode postgres state: %w", err)
+			}
+			s.persisted = append([]byte(nil), latestPayload...)
+			s.version = latestVersion
+			normalizeState(&s.data)
+		}
 	}
 	return s, nil
 }
 
 func (b *postgresBackend) Load(ctx context.Context) ([]byte, int64, error) {
+	tx, err := b.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback(ctx)
 	var payload []byte
 	var version int64
-	err := b.pool.QueryRow(ctx, "SELECT payload, version FROM dbguard_state WHERE id = 1").Scan(&payload, &version)
+	err = tx.QueryRow(ctx, "SELECT payload, version FROM dbguard_state WHERE id = 1").Scan(&payload, &version)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "no rows") {
+		if errors.Is(err, pgx.ErrNoRows) || strings.Contains(strings.ToLower(err.Error()), "no rows") {
 			return nil, 0, ErrNotFound
 		}
 		return nil, 0, err
 	}
-	return payload, version, nil
+	var data state
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return nil, 0, err
+	}
+	if err := loadCoreTablesTx(ctx, tx, &data); err != nil {
+		return nil, 0, err
+	}
+	hydrated, err := json.Marshal(data)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, err
+	}
+	return hydrated, version, nil
 }
 
 func (b *postgresBackend) Save(ctx context.Context, payload []byte, expectedVersion int64) (int64, error) {
@@ -230,6 +278,13 @@ func (s *Store) StartRefresh(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
+	sigBackend, hasSig := s.backend.(signatureBackend)
+	lastSig := ""
+	if hasSig {
+		if initialSig, err := sigBackend.Signature(ctx); err == nil {
+			lastSig = initialSig
+		}
+	}
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -238,17 +293,30 @@ func (s *Store) StartRefresh(ctx context.Context, interval time.Duration) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				currentSig := ""
+				if hasSig {
+					sig, err := sigBackend.Signature(ctx)
+					if err != nil || (sig != "" && sig == lastSig) {
+						continue
+					}
+					currentSig = sig
+				}
+				seqBefore := s.localMutationSeq.Load()
 				payload, version, err := s.backend.Load(ctx)
 				if err != nil {
 					continue
 				}
 				s.mu.Lock()
-				if version > s.version {
+				if s.localMutationSeq.Load() == seqBefore && (hasSig || version > s.version) {
 					var latest state
 					if err := json.Unmarshal(payload, &latest); err == nil {
 						normalizeState(&latest)
 						s.data = latest
 						s.version = version
+						s.persisted = append(s.persisted[:0], payload...)
+						if hasSig {
+							lastSig = currentSig
+						}
 					}
 				}
 				s.mu.Unlock()

@@ -23,6 +23,21 @@ var (
 func (s *Store) CreatePassport(passport model.Passport, audit model.AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stored, expired, linked, err := backend.createPassport(ctx, passport, audit)
+		if err != nil {
+			return err
+		}
+		for _, item := range expired {
+			s.upsertPassportLocked(item)
+		}
+		s.upsertPassportLocked(stored)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return nil
+	}
 	now := time.Now().UTC()
 	for _, item := range s.data.Passports {
 		if item.ID == passport.ID {
@@ -113,11 +128,10 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		passport, payload, version, err := backend.usePassport(ctx, id, tokenSHA256, consumer, at, consume, audit)
-		if len(payload) > 0 {
-			if installErr := s.installPostgresSnapshot(payload, version); installErr != nil {
-				return model.Passport{}, installErr
-			}
+		passport, delta, err := backend.usePassport(ctx, id, tokenSHA256, consumer, at, consume, audit)
+		if delta.Passport != nil || delta.Change != nil || len(delta.NewAudits) > 0 || len(delta.ChangeAudits) > 0 {
+			s.applyPassportDeltaLocked(delta)
+			s.localMutationSeq.Add(1)
 		}
 		return passport, err
 	}
@@ -227,6 +241,18 @@ func sameConsumerReplay(item model.StoredPassport, tokenSHA256, consumer string)
 func (s *Store) RevokePassport(organizationID, id, actorID string, at time.Time, audit model.AuditEvent) (model.Passport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		pub, stored, linked, err := backend.revokePassport(ctx, organizationID, id, actorID, at, audit)
+		if err != nil {
+			return model.Passport{}, err
+		}
+		s.upsertPassportLocked(stored)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return pub, nil
+	}
 	for index := range s.data.Passports {
 		item := &s.data.Passports[index]
 		if item.ID != id || item.OrganizationID != organizationID {
@@ -254,6 +280,22 @@ func (s *Store) RevokePassport(organizationID, id, actorID string, at time.Time,
 func (s *Store) RevokePassportsByChange(organizationID, changeID, actorID string, at time.Time, audit model.AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		revoked, linked, err := backend.revokePassportsByChange(ctx, organizationID, changeID, actorID, at, audit)
+		if err != nil {
+			return err
+		}
+		for _, item := range revoked {
+			s.upsertPassportLocked(item)
+		}
+		s.mergeAuditsLocked(linked...)
+		if len(revoked) > 0 {
+			s.localMutationSeq.Add(1)
+		}
+		return nil
+	}
 	changed := false
 	oldPassports := append([]model.StoredPassport(nil), s.data.Passports...)
 	oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
@@ -285,11 +327,13 @@ func (s *Store) RecordAudit(audit model.AuditEvent) error {
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, payload, version, err := backend.appendAudit(ctx, audit)
+		linked, err := backend.appendAudit(ctx, audit)
 		if err != nil {
 			return err
 		}
-		return s.installPostgresSnapshot(payload, version)
+		s.mergeAuditsLocked(linked)
+		s.localMutationSeq.Add(1)
+		return nil
 	}
 	oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
 	s.appendAuditsLocked(audit)

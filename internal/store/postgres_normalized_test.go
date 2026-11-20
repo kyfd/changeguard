@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"strings"
 	"sync"
@@ -24,12 +28,59 @@ func TestPostgresNormalizedSQLContracts(t *testing.T) {
 		"jsonb_set(item, '{status}', '\"EXPIRED\"'::jsonb, true)",
 		"PRIMARY KEY (organization_id, actor_id, operation, resource, idempotency_key)",
 		"pg_advisory_xact_lock",
+		"pg_advisory_xact_lock(726384722)",
+		"AUTHORITATIVE",
 		"ON CONFLICT (name) DO NOTHING",
 	}
-	combined := postgresNormalizedMigration + postgresNormalizedExpirePassports + postgresNormalizedPassportIndexMigration + postgresNormalizedBackfill + postgresNormalizedClaimOutboxSQL + postgresNormalizedAuditLockSQL
+	combined := postgresMigrationLockSQL + postgresNormalizedMigration + postgresNormalizedExpirePassports + postgresNormalizedPassportIndexMigration + postgresNormalizedBackfill + postgresNormalizedAuthoritySQL + postgresNormalizedClaimOutboxSQL + postgresNormalizedAuditLockSQL
 	for _, check := range checks {
 		if !strings.Contains(combined, check) {
 			t.Fatalf("normalized PostgreSQL contract missing %q", check)
+		}
+	}
+}
+
+func TestPostgresHotPathsDecoupledFromLegacyState(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "postgres_normalized.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotPaths := map[string]bool{
+		"createChange": true, "updateChange": true, "updateChangeWithOutbox": true,
+		"ensureExperimentOutbox": true, "claimOutbox": true, "renewOutbox": true,
+		"completeOutbox": true, "failOutbox": true, "checkpointExperimentOutbox": true,
+		"finalizeExperimentOutbox": true, "retryOutbox": true,
+		"beginIdempotency": true, "completeIdempotency": true,
+		"abortIdempotency": true, "takeoverIdempotency": true, "cleanupExpiredIdempotency": true,
+		"appendAudit": true, "createPassport": true, "usePassport": true,
+		"revokePassport": true, "revokePassportsByChange": true,
+	}
+	seen := make(map[string]bool, len(hotPaths))
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !hotPaths[fn.Name.Name] {
+			continue
+		}
+		seen[fn.Name.Name] = true
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok {
+				if ident.Name == "loadStateForUpdate" || ident.Name == "persistLegacyWitness" {
+					t.Fatalf("hot path %s must not reference %s", fn.Name.Name, ident.Name)
+				}
+			}
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				upper := strings.ToUpper(lit.Value)
+				if strings.Contains(upper, "DBGUARD_STATE") && strings.Contains(upper, "FOR UPDATE") {
+					t.Fatalf("hot path %s must not lock dbguard_state: %s", fn.Name.Name, lit.Value)
+				}
+			}
+			return true
+		})
+	}
+	for name := range hotPaths {
+		if !seen[name] {
+			t.Fatalf("expected hot path %s in postgres_normalized.go", name)
 		}
 	}
 }
@@ -236,5 +287,124 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 	defer latest.Close()
 	if err = latest.VerifyAuditChain(change.OrganizationID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPostgresConcurrentEmptyMigration(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("CHANGEGUARD_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("CHANGEGUARD_TEST_POSTGRES_DSN is not set; concurrent empty-DB migration skipped")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	cleanup := `DROP TABLE IF EXISTS changeguard_core_authority,changeguard_idempotency_records,changeguard_audit_events,changeguard_passports,changeguard_outbox,changeguard_changes,changeguard_normalization_migrations,dbguard_state`
+	if _, err = pool.Exec(ctx, cleanup); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), cleanup) })
+	t.Setenv("CHANGEGUARD_ENABLE_DEMO_DATA", "true")
+
+	const instances = 4
+	start := make(chan struct{})
+	stores := make(chan *Store, instances)
+	errs := make(chan error, instances)
+	var wg sync.WaitGroup
+	for i := 0; i < instances; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			s, openErr := NewPostgres(ctx, dsn)
+			if openErr != nil {
+				errs <- openErr
+				return
+			}
+			stores <- s
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(stores)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent NewPostgres on empty DB failed: %v", err)
+	}
+	var opened []*Store
+	for s := range stores {
+		defer s.Close()
+		opened = append(opened, s)
+	}
+	if len(opened) != instances {
+		t.Fatalf("expected %d opened stores, got %d", instances, len(opened))
+	}
+	baseCount := len(opened[0].Changes())
+	if baseCount == 0 {
+		t.Fatal("expected seeded demo changes")
+	}
+	for i := 1; i < len(opened); i++ {
+		if got := len(opened[i].Changes()); got != baseCount {
+			t.Fatalf("instance %d observed %d changes, want %d", i, got, baseCount)
+		}
+	}
+	var phase string
+	if err := pool.QueryRow(ctx, `SELECT phase FROM changeguard_core_authority WHERE name='core-v4.1'`).Scan(&phase); err != nil || phase != "AUTHORITATIVE" {
+		t.Fatalf("expected core-v4.1 AUTHORITATIVE, got phase=%q err=%v", phase, err)
+	}
+}
+
+func BenchmarkConcurrentMultiOrgAuditAppend(b *testing.B) {
+	data := NewMemory()
+	now := time.Now().UTC()
+	const orgs = 8
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		worker := 0
+		for pb.Next() {
+			worker++
+			orgID := fmt.Sprintf("org_bench_%d", worker%orgs)
+			if err := data.RecordAudit(model.AuditEvent{
+				OrganizationID: orgID,
+				ActorID:        "usr_bench",
+				ActorName:      "Bench",
+				Action:         "BENCH_AUDIT",
+				CreatedAt:      now,
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkMultiPassportConcurrentConsume(b *testing.B) {
+	data := NewMemory()
+	now := time.Now().UTC()
+	rules := changegate.RuleSetVersion(data.PoliciesByOrganization("org_demo"))
+	const poolSize = 64
+	passports := make([]model.Passport, poolSize)
+	for i := 0; i < poolSize; i++ {
+		change, passport := passportFixture(now, rules)
+		change.ID = fmt.Sprintf("chg_bench_%d", i)
+		passport.ID = fmt.Sprintf("pass_bench_%d", i)
+		passport.ChangeID = change.ID
+		passport.TokenSHA256 = fmt.Sprintf("hash_%d", i)
+		if err := data.CreateChange(change, model.AuditEvent{OrganizationID: change.OrganizationID, ID: fmt.Sprintf("aud_c_%d", i), ChangeID: change.ID, CreatedAt: now}); err != nil {
+			b.Fatal(err)
+		}
+		if err := data.CreatePassport(passport, model.AuditEvent{OrganizationID: change.OrganizationID, ID: fmt.Sprintf("aud_p_%d", i), ChangeID: change.ID, CreatedAt: now}); err != nil {
+			b.Fatal(err)
+		}
+		passports[i] = passport
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		p := passports[i%poolSize]
+		if _, err := data.UsePassport(p.ID, p.TokenSHA256, "ci-bench", now.Add(time.Second), true, model.AuditEvent{OrganizationID: p.OrganizationID, ChangeID: p.ChangeID, CreatedAt: now.Add(time.Second)}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
