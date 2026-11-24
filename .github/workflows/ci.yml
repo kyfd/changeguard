@@ -201,7 +201,7 @@ jobs:
           timeout 5 bash -c '</dev/tcp/127.0.0.1/6379'
 
       - name: Run PostgreSQL integration contract
-        run: go test ./internal/store -run '^TestPostgresNormalizedMultiInstance$' -count=1 -v
+        run: go test ./internal/store -run '^TestPostgres(NormalizedMultiInstance|JointReleaseMultiInstance)$' -count=1 -v
 
       - name: Run Redis integration contract
         run: go test ./internal/auth -run '^TestRedisSessionRepositoryIntegration$' -count=1 -v

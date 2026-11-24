@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "environment": "production",
+  "change_type": "数据库变更",
+  "artifacts": [],
+  "sql_path": "migrations/20260804_add_orders_index.sql",
+  "rollback_sql_path": "migrations/20260804_add_orders_index.down.sql",
+  "rollback_plan": "按审批后的回滚流程执行 down.sql，并核对索引状态。"
+}

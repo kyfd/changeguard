@@ -8,9 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kyfd/changeguard/internal/integration"
 	"github.com/kyfd/changeguard/internal/model"
 	"github.com/kyfd/changeguard/internal/report"
 	"github.com/kyfd/changeguard/internal/service"
+	"github.com/kyfd/changeguard/internal/store"
 )
 
 func (s *Server) handleChangeReport(w http.ResponseWriter, id, format, requestActorID string) {
@@ -602,7 +604,27 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request, consume bool
 		return
 	}
 	input.Token = authorization[1]
-	result, err := s.service.VerifyGate(input, consume)
+	var job *model.GitLabJob
+	if tokens := r.Header.Values(integration.GitLabJobTokenHeader); len(tokens) != 0 {
+		if len(tokens) != 1 {
+			writeGateError(w, http.StatusForbidden, "RELEASE_JOB_REQUIRED", "GitLab 作业凭据无效")
+			return
+		}
+		var err error
+		job, err = s.gitLabRelease.ResolveJob(r.Context(), tokens[0], time.Now().UTC())
+		if err != nil {
+			if errors.Is(err, integration.ErrGitLabUnavailable) || errors.Is(err, integration.ErrNotConfigured) {
+				writeGateError(w, http.StatusServiceUnavailable, "RELEASE_JOB_UNAVAILABLE", "暂时无法核实 GitLab 执行作业")
+			} else {
+				writeGateError(w, http.StatusForbidden, "RELEASE_JOB_REQUIRED", "GitLab 作业凭据无效或作业不符合发布配置")
+			}
+			return
+		}
+		// The audit/replay label for a proven job comes from that job, never
+		// from a client-supplied label (which could even contain credentials).
+		input.Consumer = "gitlab-job:" + strconv.FormatInt(job.JobID, 10)
+	}
+	result, err := s.service.VerifyGateForJob(input, consume, job)
 	if err != nil {
 		writeGateServiceError(w, err)
 		return
@@ -616,6 +638,10 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request, consume bool
 
 func writeGateServiceError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, store.ErrReleaseBlocked):
+		writeGateError(w, http.StatusConflict, "RELEASE_BLOCKED", err.Error())
+	case errors.Is(err, store.ErrReleaseJob):
+		writeGateError(w, http.StatusForbidden, "RELEASE_JOB_REQUIRED", err.Error())
 	case errors.Is(err, service.ErrPassportExpired):
 		writeGateError(w, http.StatusGone, "PASSPORT_EXPIRED", err.Error())
 	case errors.Is(err, service.ErrPassportReplay):

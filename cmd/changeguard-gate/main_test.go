@@ -5,12 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kyfd/changeguard/internal/auth"
+	"github.com/kyfd/changeguard/internal/httpapi"
+	"github.com/kyfd/changeguard/internal/integration"
 	"github.com/kyfd/changeguard/internal/model"
 	"github.com/kyfd/changeguard/internal/service"
 	"github.com/kyfd/changeguard/internal/store"
@@ -93,6 +101,164 @@ func TestDigestFromManifestRehashesActualFile(t *testing.T) {
 	}
 }
 
+func TestGitLabJobProofOptInAndRedirectRefusal(t *testing.T) {
+	const passport, jobToken = "fixture-passport-secret", "fixture-job-secret"
+	t.Setenv("CI_JOB_TOKEN", jobToken)
+	t.Setenv("CI_JOB_ID", "1234")
+	t.Setenv("CHANGEGUARD_TOKEN", passport)
+	manifestFile := filepath.Join("..", "..", "examples", "ci-demo", ".changeguard.application.json")
+	digest, err := digestFromManifest(manifestFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var redirected, standardCalls, provedCalls atomic.Int32
+	gate := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sink":
+			redirected.Add(1)
+		case "/redirect/api/gate/consume":
+			http.Redirect(w, r, "/sink", http.StatusTemporaryRedirect)
+		case "/unusable/api/gate/consume":
+			_, _ = w.Write([]byte(`{"allowed":false,"code":"NOT_AUTHORIZED"}`))
+		case "/api/gate/consume":
+			if r.Header.Get("Authorization") != "Bearer "+passport {
+				t.Error("invalid or missing passport header")
+			}
+			consumer := "1234"
+			switch r.Header.Get(integration.GitLabJobTokenHeader) {
+			case "":
+				standardCalls.Add(1)
+			case jobToken:
+				provedCalls.Add(1)
+				consumer = "gitlab-job:1234"
+			default:
+				t.Error("unexpected GitLab token header")
+			}
+			result := gateSuccessFixture(digest, consumer)
+			result.Reason = passport + " / " + r.Header.Get(integration.GitLabJobTokenHeader)
+			_ = json.NewEncoder(w).Encode(result)
+		default:
+			t.Errorf("unexpected gate path %s", r.URL.Path)
+		}
+	}))
+	defer gate.Close()
+	previous := http.DefaultTransport
+	http.DefaultTransport = gate.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	var out bytes.Buffer
+	for _, opt := range [][]string{nil, {"-gitlab-job", "-consumer", "ignored-label"}} {
+		out.Reset()
+		if err := run(append([]string{"consume", "-manifest", manifestFile, "-url", gate.URL}, opt...), &out); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), passport) || strings.Contains(out.String(), jobToken) {
+			t.Fatal("Gate output leaked credentials")
+		}
+	}
+	if standardCalls.Load() != 1 || provedCalls.Load() != 1 {
+		t.Fatal("ordinary Gate must not forward GitLab tokens, and opt-in must prove the job")
+	}
+	if err := run([]string{"consume", "-manifest", manifestFile, "-gitlab-job", "-url", gate.URL + "/redirect"}, &out); err == nil || !strings.Contains(err.Error(), "redirect refused") || redirected.Load() != 0 {
+		t.Fatalf("unexpected redirect result: %v", err)
+	}
+	if err := run([]string{"consume", "-manifest", manifestFile, "-gitlab-job", "-url", "http://127.0.0.1"}, &out); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("GitLab job proof must require HTTPS: %v", err)
+	}
+	if err := run([]string{"consume", "-manifest", manifestFile, "-gitlab-job", "-url", gate.URL + "/unusable"}, &out); err == nil || !strings.Contains(err.Error(), "no explicit authorization") {
+		t.Fatalf("HTTP 200 alone is not Gate authorization: %v", err)
+	}
+	t.Setenv("CI_JOB_ID", "4321")
+	out.Reset()
+	if err := run([]string{"consume", "-manifest", manifestFile, "-gitlab-job", "-url", gate.URL}, &out); err == nil || out.Len() != 0 {
+		t.Fatalf("consume accepted a different GitLab job: %v", err)
+	}
+	t.Setenv("CI_JOB_ID", "")
+	if err := run([]string{"consume", "-manifest", manifestFile, "-gitlab-job", "-url", gate.URL}, &out); err == nil ||
+		!strings.Contains(err.Error(), "CI_JOB_ID") || provedCalls.Load() != 2 {
+		t.Fatalf("consume must not call Gate without an expected GitLab job ID: %v", err)
+	}
+}
+
+func gateSuccessFixture(digest digestResult, consumer string) model.GateResult {
+	issued := time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC)
+	passport := &model.Passport{ID: "psp_fixture", OrganizationID: "org_fixture", ChangeID: "chg_fixture",
+		ArtifactSHA256: digest.ArtifactSHA256, Environment: digest.Environment, RuleSetVersion: "fixture-v1",
+		ApproverID: "usr_reviewer", ApproverName: "Reviewer", IssuedAt: issued, ExpiresAt: issued.Add(time.Hour),
+		Status: model.PassportActive}
+	if consumer != "" {
+		at := issued.Add(time.Minute)
+		passport.Status, passport.ConsumedBy, passport.ConsumedAt = model.PassportConsumed, consumer, &at
+	}
+	// Older valid responses omit artifact_version and never serialize Replayed.
+	return model.GateResult{Allowed: true, Code: "GATE_ALLOWED", Reason: "fixture authorization", Passport: passport}
+}
+
+func TestGateRequiresUnambiguousOperationAndPassportBinding(t *testing.T) {
+	manifestFile := filepath.Join("..", "..", "examples", "ci-demo", ".changeguard.application.json")
+	digest, err := digestFromManifest(manifestFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := func(result model.GateResult, alter func(*model.GateResult)) string {
+		t.Helper()
+		if alter != nil {
+			alter(&result)
+		}
+		body, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	active := encode(gateSuccessFixture(digest, ""), nil)
+	consumed := func(alter func(*model.GateResult)) string {
+		return encode(gateSuccessFixture(digest, "ci-gate"), alter)
+	}
+	valid := consumed(nil)
+	for _, tc := range []struct {
+		name, command, body string
+		status              int
+		allowed             bool
+	}{
+		{"legacy verify", "verify", active, http.StatusOK, true},
+		{"legacy consume with default consumer", "consume", valid, http.StatusOK, true},
+		{"missing passport on consume", "consume", `{"allowed":true,"code":"GATE_ALLOWED"}`, http.StatusOK, false},
+		{"missing passport on verify", "verify", `{"allowed":true,"code":"GATE_ALLOWED"}`, http.StatusOK, false},
+		{"ambiguous authorization", "consume", `{"Allowed":false,` + valid[1:], http.StatusOK, false},
+		{"ambiguous passport status", "consume", strings.Replace(valid, `"status":`, `"status":"ACTIVE","status":`, 1), http.StatusOK, false},
+		{"trailing JSON", "consume", valid + `{}`, http.StatusOK, false},
+		{"HTML", "consume", "<html><body>OK</body></html>", http.StatusOK, false},
+		{"allowed false", "consume", consumed(func(r *model.GateResult) { r.Allowed = false }), http.StatusOK, false},
+		{"not completed", "consume", valid, http.StatusAccepted, false},
+		{"verify response to consume", "consume", active, http.StatusOK, false},
+		{"consume response to verify", "verify", valid, http.StatusOK, false},
+		{"wrong digest", "consume", consumed(func(r *model.GateResult) { r.Passport.ArtifactSHA256 = strings.Repeat("f", 64) }), http.StatusOK, false},
+		{"wrong environment", "consume", consumed(func(r *model.GateResult) { r.Passport.Environment = "unexpected-env" }), http.StatusOK, false},
+		{"wrong consumer", "consume", consumed(func(r *model.GateResult) { r.Passport.ConsumedBy = "another-job" }), http.StatusOK, false},
+		{"missing consumption time", "consume", consumed(func(r *model.GateResult) { r.Passport.ConsumedAt = nil }), http.StatusOK, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/gate/"+tc.command {
+					t.Errorf("unexpected Gate request: %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			var out bytes.Buffer
+			err := run([]string{tc.command, "-manifest", manifestFile, "-url", server.URL, "-token", "fixture-bearer", "-consumer", ""}, &out)
+			if tc.allowed {
+				if err != nil || out.String() != tc.body {
+					t.Fatalf("expected unchanged success response, error=%v output=%q", err, out.String())
+				}
+			} else if err == nil || out.Len() != 0 {
+				t.Fatalf("unusable response must fail without output, error=%v output=%q", err, out.String())
+			}
+		})
+	}
+}
+
 type gateFlowRunner struct{}
 
 func (gateFlowRunner) Run(_ context.Context, change model.ChangeRequest) model.ExperimentReport {
@@ -152,9 +318,18 @@ func TestGoldenConfigFlowBindsApprovalToActualCIFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: ciDigest.ArtifactSHA256, Environment: ciDigest.Environment, Consumer: "ci-verify"}, false); err != nil {
-		t.Fatalf("verify must accept the exact reviewed files: %v", err)
+	logger := log.New(io.Discard, "", 0)
+	gate := httptest.NewServer(httpapi.New(svc, auth.New(auth.Config{Mode: "disabled"}, data, logger), logger))
+	defer gate.Close()
+	call := func(command, consumer string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := run([]string{command, "-manifest", manifestPath, "-url", gate.URL, "-token", credential.Token, "-consumer", consumer}, &out); err != nil {
+			t.Fatalf("%s must accept the exact reviewed files: %v", command, err)
+		}
+		return out.String()
 	}
+	call("verify", "ci-verify")
 
 	if err := os.WriteFile(artifactPath, []byte(content+"request_timeout_ms: 5000\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -166,11 +341,12 @@ func TestGoldenConfigFlowBindsApprovalToActualCIFiles(t *testing.T) {
 	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: tampered.ArtifactSHA256, Environment: tampered.Environment, Consumer: "ci-tampered"}, true); !errors.Is(err, service.ErrArtifactMismatch) {
 		t.Fatalf("tampered file must not consume the passport, got %v", err)
 	}
-	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: ciDigest.ArtifactSHA256, Environment: ciDigest.Environment, Consumer: "ci-consume"}, true); err != nil {
-		t.Fatalf("exact reviewed files must consume once: %v", err)
+	if err := os.WriteFile(artifactPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: ciDigest.ArtifactSHA256, Environment: ciDigest.Environment, Consumer: "ci-consume"}, true); err != nil {
-		t.Fatalf("lost-response retry with the same consumer must succeed: %v", err)
+	first := call("consume", "ci-consume")
+	if replay := call("consume", "ci-consume"); replay != first {
+		t.Fatal("same-consumer retry must return the original consumption record")
 	}
 	if _, err = svc.VerifyGate(model.GateRequest{Token: credential.Token, ArtifactSHA256: ciDigest.ArtifactSHA256, Environment: ciDigest.Environment, Consumer: "ci-replay"}, true); !errors.Is(err, service.ErrPassportReplay) {
 		t.Fatalf("second consume from a different consumer must be rejected as replay, got %v", err)

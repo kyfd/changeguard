@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "environment": "production",
+  "change_type": "Kubernetes 发布",
+  "artifacts": [
+    {
+      "kind": "KUBERNETES",
+      "name": "orders deployment",
+      "source": "examples/ci-demo/deploy/orders.yaml",
+      "language": "YAML",
+      "path": "deploy/orders.yaml"
+    }
+  ],
+  "rollback_plan": "按审批后的回滚流程恢复上一已验证的镜像和清单，并确认就绪探针。"
+}

@@ -53,6 +53,10 @@ func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request)
 		baseURL = scheme + "://" + r.Host
 	}
 	gitLabAuth := "X-Gitlab-Token（兼容模式）"
+	gitLabEvents := []string{"Pipeline Hook"}
+	if s.gitLabRelease != nil {
+		gitLabEvents = append(gitLabEvents, "Deployment Hook")
+	}
 	if s.integrations.GitLabSigningToken != "" {
 		gitLabAuth = "HMAC-SHA256 Signing Token（推荐）"
 	}
@@ -61,7 +65,7 @@ func (s *Server) handleIntegrationStatus(w http.ResponseWriter, r *http.Request)
 			Provider: "GITLAB", Configured: s.integrations.GitLabConfigured(),
 			Authentication:  gitLabAuth,
 			Endpoint:        baseURL + "/api/integrations/gitlab/webhook",
-			SupportedEvents: []string{"Pipeline Hook"},
+			SupportedEvents: gitLabEvents,
 			LastReceivedAt:  gitLabLast,
 		},
 		Jenkins: model.IntegrationProviderStatus{
@@ -114,7 +118,12 @@ func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "GitLab Webhook 请求体无效")
 		return
 	}
-	if err := integration.VerifyGitLab(s.integrations, r.Header, body, time.Now()); err != nil {
+	received := time.Now().UTC()
+	if integration.IsGitLabDeployment(r.Header) {
+		s.handleGitLabDeployment(w, r, body, received)
+		return
+	}
+	if err := integration.VerifyGitLab(s.integrations, r.Header, body, received); err != nil {
 		writeIntegrationError(w, err)
 		return
 	}
@@ -234,7 +243,7 @@ func writeIntegrationError(w http.ResponseWriter, err error) {
 		w.Header().Set("WWW-Authenticate", "Bearer realm=\"changeguard-integration\"")
 		writeError(w, http.StatusUnauthorized, "流水线凭据或签名无效")
 	case errors.Is(err, integration.ErrUnsupported):
-		writeError(w, http.StatusBadRequest, "仅支持 GitLab Pipeline Hook")
+		writeError(w, http.StatusBadRequest, "仅支持 GitLab Pipeline Hook 或 Deployment Hook")
 	default:
 		writeError(w, http.StatusBadRequest, "流水线事件格式无效")
 	}

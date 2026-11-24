@@ -65,13 +65,14 @@ func TestPostgresHotPathsDecoupledFromLegacyState(t *testing.T) {
 		seen[fn.Name.Name] = true
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if ident, ok := n.(*ast.Ident); ok {
-				if ident.Name == "loadStateForUpdate" || ident.Name == "persistLegacyWitness" {
+				if ident.Name == "loadStateForUpdate" || ident.Name == "persistLegacyWitness" || ident.Name == "lockReleaseSettings" {
 					t.Fatalf("hot path %s must not reference %s", fn.Name.Name, ident.Name)
 				}
 			}
 			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
 				upper := strings.ToUpper(lit.Value)
-				if strings.Contains(upper, "DBGUARD_STATE") && strings.Contains(upper, "FOR UPDATE") {
+				if strings.Contains(upper, "DBGUARD_STATE") && (strings.Contains(upper, "FOR UPDATE") || strings.Contains(upper, "FOR SHARE") ||
+					strings.Contains(upper, "FOR NO KEY UPDATE") || strings.Contains(upper, "FOR KEY SHARE")) {
 					t.Fatalf("hot path %s must not lock dbguard_state: %s", fn.Name.Name, lit.Value)
 				}
 			}
@@ -119,7 +120,7 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	cleanup := `DROP TABLE IF EXISTS changeguard_idempotency_records,changeguard_audit_events,changeguard_passports,changeguard_outbox,changeguard_changes,changeguard_normalization_migrations,dbguard_state`
+	cleanup := `DROP TABLE IF EXISTS changeguard_deployment_jobs,changeguard_joint_release_members,changeguard_joint_releases,changeguard_idempotency_records,changeguard_audit_events,changeguard_passports,changeguard_outbox,changeguard_changes,changeguard_normalization_migrations,dbguard_state`
 	if _, err = pool.Exec(ctx, cleanup); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +204,17 @@ func TestPostgresNormalizedMultiInstance(t *testing.T) {
 	// consume through two independent Store instances.
 	first.mu.Lock()
 	first.restoreLocked()
-	changeIndex := 0
+	changeIndex := -1
+	for i, item := range first.data.Changes {
+		if item.ID == change.ID {
+			changeIndex = i
+			break
+		}
+	}
+	if changeIndex < 0 {
+		first.mu.Unlock()
+		t.Fatal("could not find the selected change after loading the normalized snapshot")
+	}
 	first.data.Changes[changeIndex].Status = model.StatusApproved
 	policies := first.data.Policies
 	ruleVersion := changegate.RuleSetVersion(policies)
@@ -302,7 +313,7 @@ func TestPostgresConcurrentEmptyMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	cleanup := `DROP TABLE IF EXISTS changeguard_core_authority,changeguard_idempotency_records,changeguard_audit_events,changeguard_passports,changeguard_outbox,changeguard_changes,changeguard_normalization_migrations,dbguard_state`
+	cleanup := `DROP TABLE IF EXISTS changeguard_deployment_jobs,changeguard_joint_release_members,changeguard_joint_releases,changeguard_core_authority,changeguard_idempotency_records,changeguard_audit_events,changeguard_passports,changeguard_outbox,changeguard_changes,changeguard_normalization_migrations,dbguard_state`
 	if _, err = pool.Exec(ctx, cleanup); err != nil {
 		t.Fatal(err)
 	}

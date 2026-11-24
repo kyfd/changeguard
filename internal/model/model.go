@@ -230,6 +230,7 @@ type ChangeRequest struct {
 	Branch          string           `json:"branch,omitempty"`
 	CommitSHA       string           `json:"commit_sha,omitempty"`
 	ArtifactSHA256  string           `json:"artifact_sha256"`
+	ArtifactVersion int              `json:"artifact_version,omitempty"`
 	SQLSHA256       string           `json:"sql_sha256,omitempty"`
 	RollbackSHA256  string           `json:"rollback_sha256,omitempty"`
 	RuleSetVersion  string           `json:"rule_set_version,omitempty"`

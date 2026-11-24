@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -225,6 +226,7 @@ type passportDelta struct {
 	Change       *model.ChangeRequest
 	NewAudits    []model.AuditEvent
 	ChangeAudits []model.AuditEvent
+	Replayed     bool
 }
 
 func (b *postgresBackend) migrateNormalized(ctx context.Context) error {
@@ -240,6 +242,9 @@ func (b *postgresBackend) migrateNormalized(ctx context.Context) error {
 		return err
 	}
 	if _, err = tx.Exec(ctx, postgresNormalizedMigration); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, postgresJointReleaseMigration); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, postgresNormalizedExpirePassports); err != nil {
@@ -398,7 +403,10 @@ func loadCoreTablesTx(ctx context.Context, tx pgx.Tx, data *state) error {
 
 func syncNormalizedState(ctx context.Context, tx pgx.Tx, data state) error {
 	materializeExpiredPassports(&data, time.Now().UTC())
-	for _, item := range data.Changes {
+	// Match Gate's bytewise change-row order, with passports locked only
+	// after change rows. Gate need not join the legacy snapshot row lock.
+	changes := slices.SortedFunc(slices.Values(data.Changes), func(a, b model.ChangeRequest) int { return strings.Compare(a.ID, b.ID) })
+	for _, item := range changes {
 		payload, err := json.Marshal(item)
 		if err != nil {
 			return err
@@ -1386,9 +1394,6 @@ func loadChangeAuditsTx(ctx context.Context, tx pgx.Tx, organizationID, changeID
 func (b *postgresBackend) loadOrgPoliciesTx(ctx context.Context, tx pgx.Tx, organizationID string) ([]model.RiskPolicy, error) {
 	var raw []byte
 	err := tx.QueryRow(ctx, `SELECT COALESCE(payload->'policies', '[]'::jsonb) FROM dbguard_state WHERE id=1`).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -1405,14 +1410,41 @@ func (b *postgresBackend) loadOrgPoliciesTx(ctx context.Context, tx pgx.Tx, orga
 	return filtered, nil
 }
 
-func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, consumer string, at time.Time, consume bool, auditEvent model.AuditEvent) (model.Passport, passportDelta, error) {
+func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, consumer string, at time.Time, consume bool, auditEvent model.AuditEvent, expected *model.Passport, job *model.GitLabJob) (model.Passport, passportDelta, error) {
 	tx, err := b.pool.Begin(ctx)
 	if err != nil {
 		return model.Passport{}, passportDelta{}, err
 	}
 	defer tx.Rollback(ctx)
+	var org, changeID string
+	if err = tx.QueryRow(ctx, "SELECT organization_id,change_id FROM changeguard_passports WHERE id=$1", id).Scan(&org, &changeID); errors.Is(err, pgx.ErrNoRows) {
+		return model.Passport{}, passportDelta{}, ErrNotFound
+	} else if err != nil {
+		return model.Passport{}, passportDelta{}, err
+	}
+	// Serialize discovery with plan creation and supersession, even if the
+	// change is not yet a member. Read Committed sees membership after the wait.
+	if err = lockReleaseOrganization(ctx, tx, org); err != nil {
+		return model.Passport{}, passportDelta{}, err
+	}
+	plan, position, err := postgresReleaseMembership(ctx, tx, org, changeID)
+	if err != nil {
+		return model.Passport{}, passportDelta{}, err
+	}
+	ids := []string{changeID}
+	if position >= 0 {
+		// Only the target and its predecessors participate in this decision.
+		for _, step := range plan.Steps[:position] {
+			ids = append(ids, step.ChangeID)
+		}
+	}
+	changes, err := releaseChangesTx(ctx, tx, org, ids, releaseChangeUpdate)
+	if err != nil {
+		return model.Passport{}, passportDelta{}, err
+	}
+	snapshot := releaseSnapshot{data: state{Changes: changes}}
 	var passRaw []byte
-	err = tx.QueryRow(ctx, "SELECT payload FROM changeguard_passports WHERE id=$1 FOR UPDATE", id).Scan(&passRaw)
+	err = tx.QueryRow(ctx, "SELECT payload FROM changeguard_passports WHERE id=$1 AND organization_id=$2 FOR UPDATE", id, org).Scan(&passRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Passport{}, passportDelta{}, ErrNotFound
 	}
@@ -1423,34 +1455,18 @@ func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, cons
 	if err := json.Unmarshal(passRaw, &item); err != nil {
 		return model.Passport{}, passportDelta{}, err
 	}
-	if subtle.ConstantTimeCompare([]byte(item.TokenSHA256Stored), []byte(tokenSHA256)) != 1 {
+	if item.OrganizationID != org || item.ChangeID != changeID || item.ID != id {
 		return model.Passport{}, passportDelta{}, ErrPassportTokenMismatch
 	}
-	if item.Status == model.PassportExpired {
-		return model.Passport{}, passportDelta{Passport: &item}, ErrPassportExpired
+	replayed, err := validatePassportUse(item, expected, tokenSHA256, consumer, consume)
+	if err != nil {
+		return model.Passport{}, passportDelta{}, err
 	}
-	if consume && item.Status == model.PassportConsumed {
-		if sameConsumerReplay(item, item.TokenSHA256Stored, consumer) {
-			// 同消费者重放只产生一次逻辑消费，但必须把当前已提交的通行证、变更与审计同步到本实例缓存。
-			delta := passportDelta{Passport: &item}
-			var chgRaw []byte
-			if chgErr := tx.QueryRow(ctx, `SELECT payload FROM changeguard_changes WHERE id=$1 AND organization_id=$2`, item.ChangeID, item.OrganizationID).Scan(&chgRaw); chgErr == nil {
-				var bound model.ChangeRequest
-				if json.Unmarshal(chgRaw, &bound) == nil {
-					delta.Change = &bound
-				}
-			}
-			if audits, aErr := loadChangeAuditsTx(ctx, tx, item.OrganizationID, item.ChangeID); aErr == nil {
-				delta.ChangeAudits = audits
-			}
-			return publicPassport(item, false), delta, nil
-		}
-		return model.Passport{}, passportDelta{}, ErrPassportReplay
+	clockNow := at.IsZero()
+	if clockNow {
+		at = time.Now().UTC()
 	}
-	if item.Status != model.PassportActive {
-		return model.Passport{}, passportDelta{}, ErrPassportInactive
-	}
-	if !at.Before(item.ExpiresAt) {
+	if !replayed && !at.Before(item.ExpiresAt) {
 		item.Status = model.PassportExpired
 		auditEvent.Action = "PASSPORT_EXPIRED"
 		encoded, err := json.Marshal(item)
@@ -1469,31 +1485,66 @@ func (b *postgresBackend) usePassport(ctx context.Context, id, tokenSHA256, cons
 		}
 		return model.Passport{}, passportDelta{Passport: &item, NewAudits: linked}, ErrPassportExpired
 	}
-	var chgRaw []byte
-	err = tx.QueryRow(ctx, `SELECT payload FROM changeguard_changes WHERE id=$1 AND organization_id=$2 FOR UPDATE`, item.ChangeID, item.OrganizationID).Scan(&chgRaw)
-	if errors.Is(err, pgx.ErrNoRows) {
+	bound := snapshot.change(org, changeID)
+	if bound.ID == "" {
 		return model.Passport{}, passportDelta{}, ErrPassportChangeInvalid
 	}
-	if err != nil {
-		return model.Passport{}, passportDelta{}, err
-	}
-	var bound model.ChangeRequest
-	if err := json.Unmarshal(chgRaw, &bound); err != nil {
-		return model.Passport{}, passportDelta{}, err
-	}
+	// Read the latest committed rules after waiting for the normalized locks.
+	// MVCC neither waits for nor holds the legacy snapshot write lock.
 	policies, err := b.loadOrgPoliciesTx(ctx, tx, item.OrganizationID)
 	if err != nil {
 		return model.Passport{}, passportDelta{}, err
 	}
-	if bound.Status != model.StatusApproved || bound.ArtifactSHA256 != item.ArtifactSHA256 || bound.Environment != item.Environment || bound.RuleSetVersion != item.RuleSetVersion || changegate.RuleSetVersion(policies) != item.RuleSetVersion {
-		return model.Passport{}, passportDelta{}, ErrPassportChangeInvalid
+	if err := validatePassportChange(item, bound, changegate.RuleSetVersion(policies), replayed); err != nil {
+		return model.Passport{}, passportDelta{}, err
 	}
-	if !consume {
-		delta := passportDelta{Passport: &item, Change: &bound}
+	updatedPlan := plan
+	if position >= 0 {
+		updatedPlan, err = snapshot.gate(plan, position, item, job, at, consume)
+		if err != nil {
+			return model.Passport{}, passportDelta{}, err
+		}
+	}
+	if consume || job != nil {
+		existing, err := loadJobBindingTx(ctx, tx, "passport_id=$1", item.ID)
+		if err != nil {
+			return model.Passport{}, passportDelta{}, err
+		}
+		if existing.PassportID == "" && job != nil {
+			existing, err = loadJobBindingTx(ctx, tx, "source=$1 AND job_id=$2", job.Source, job.JobID)
+			if err != nil {
+				return model.Passport{}, passportDelta{}, err
+			}
+		}
+		if err := validateJobBinding(existing, item, plan, job, replayed); err != nil {
+			return model.Passport{}, passportDelta{}, err
+		}
+	}
+	if !consume || replayed {
+		delta := passportDelta{Passport: &item, Change: &bound, Replayed: replayed}
 		if audits, aErr := loadChangeAuditsTx(ctx, tx, item.OrganizationID, item.ChangeID); aErr == nil {
 			delta.ChangeAudits = audits
 		}
+		if !consume && expected != nil {
+			delta.NewAudits, err = appendOrgAuditsTx(ctx, tx, nil, auditEvent)
+			if err != nil {
+				return model.Passport{}, passportDelta{}, err
+			}
+			if err = tx.Commit(ctx); err != nil {
+				return model.Passport{}, passportDelta{}, err
+			}
+		}
 		return publicPassport(item, false), delta, nil
+	}
+	if job != nil {
+		if err := insertJobBindingTx(ctx, tx, bindJob(job, item, plan)); err != nil {
+			return model.Passport{}, passportDelta{}, err
+		}
+	}
+	if position >= 0 {
+		if err := updateReleaseTx(ctx, tx, updatedPlan); err != nil {
+			return model.Passport{}, passportDelta{}, err
+		}
 	}
 	item.Status = model.PassportConsumed
 	item.ConsumedAt = &at

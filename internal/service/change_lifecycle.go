@@ -95,7 +95,7 @@ func (s *Service) create(input model.CreateChangeInput, actorID, requestKey, age
 		Description: changegate.Redact(strings.TrimSpace(input.Description)),
 		SubmitterID: actor.ID, SubmitterName: actor.Name,
 		Status: model.StatusDraft, Risk: model.RiskUnknown,
-		PlannedAt: input.PlannedAt, CreatedAt: now, UpdatedAt: now, Version: 1,
+		PlannedAt: input.PlannedAt, CreatedAt: now, UpdatedAt: now, Version: 1, ArtifactVersion: 1,
 		Timeline: []model.TimelineEntry{timeline(model.StatusDraft, "创建统一变更单", fmt.Sprintf("已登记 %d 类变更证据、回滚方案和计划窗口", len(artifacts)), actor.Name)},
 	}
 	if err := s.store.CreateChange(change, audit(actor, change.ID, "CREATE", "创建研发发布变更单")); err != nil {
@@ -202,6 +202,9 @@ func (s *Service) Update(id string, input model.CreateChangeInput, actorID strin
 		return model.ChangeRequest{}, fmt.Errorf("%w：计划执行时间必须晚于当前时间", ErrValidation)
 	}
 	updated, err := s.store.UpdateChange(id, func(item *model.ChangeRequest) error {
+		if item.Version != change.Version {
+			return ErrInvalidState
+		}
 		item.Title = strings.TrimSpace(input.Title)
 		item.ApplicationID = app.ID
 		item.ApplicationName = app.Name
@@ -211,6 +214,7 @@ func (s *Service) Update(id string, input model.CreateChangeInput, actorID strin
 		item.Branch = strings.TrimSpace(input.Branch)
 		item.CommitSHA = strings.TrimSpace(input.CommitSHA)
 		item.ArtifactSHA256 = artifactSHA256
+		item.ArtifactVersion = item.MaterialVersion() + 1
 		item.SQLSHA256 = sqlSHA256
 		item.RollbackSHA256 = rollbackSHA256
 		item.RuleSetVersion = ""
@@ -309,6 +313,9 @@ func (s *Service) Submit(id, actorID string) (model.ChangeRequest, error) {
 	analysis := s.analyzer.Analyze(context.Background(), analysisInput)
 	normalizeAdvisoryRisk(&analysis)
 	updated, err := s.store.UpdateChange(id, func(item *model.ChangeRequest) error {
+		if item.Version != change.Version {
+			return ErrInvalidState
+		}
 		item.Findings = result.Findings
 		item.CheckRun = checkRun
 		item.Risk = result.Risk
@@ -451,6 +458,9 @@ func (s *Service) Approve(id, actorID, comment string) (model.ChangeRequest, err
 		return model.ChangeRequest{}, fmt.Errorf("%w：审批意见不能超过 2000 个字符", ErrValidation)
 	}
 	updated, err := s.store.UpdateChange(id, func(item *model.ChangeRequest) error {
+		if item.Version != change.Version {
+			return ErrInvalidState
+		}
 		item.Status = model.StatusApproved
 		item.ReviewerID = actor.ID
 		item.ReviewerName = actor.Name

@@ -79,5 +79,5 @@ export { activateOnKeyboard, enableKeyboardActivation, setModalOpen };
 
 if (typeof window !== "undefined") {
   window.ChangeGuardUI = { setModalOpen, enableKeyboardActivation };
-  await import("./app.js?v=20260829-accessibility");
+  await import("./app.js?v=20261124-joint-release");
 }

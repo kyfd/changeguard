@@ -46,6 +46,8 @@ type state struct {
 	AgentMessages      []model.AgentMessage            `json:"agent_messages,omitempty"`
 	IdempotencyRecords []model.IdempotencyRecord       `json:"idempotency_records,omitempty"`
 	ModelConfigs       []model.OrganizationModelConfig `json:"model_configs,omitempty"`
+	JointReleases      []model.JointRelease            `json:"joint_releases,omitempty"`
+	DeploymentJobs     []deploymentJobBinding          `json:"deployment_jobs,omitempty"`
 }
 
 type Store struct {

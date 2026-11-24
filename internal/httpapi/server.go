@@ -30,13 +30,14 @@ import (
 var webAssets embed.FS
 
 type Server struct {
-	service      *service.Service
-	auth         *auth.Manager
-	logger       *log.Logger
-	metrics      *observability.Metrics
-	collectors   []MetricsCollector
-	integrations integration.Config
-	handler      http.Handler
+	service       *service.Service
+	auth          *auth.Manager
+	logger        *log.Logger
+	metrics       *observability.Metrics
+	collectors    []MetricsCollector
+	integrations  integration.Config
+	gitLabRelease *integration.GitLabReleaseClient
+	handler       http.Handler
 	// store 与 analyzer 由 New 从 collectors 里识别出来。它们同时也是
 	// MetricsCollector，但这里需要具体类型：模型接入配置写在 store 上，
 	// 而 Agent 运行时的按企业解析器需要读回同一份数据。
@@ -57,6 +58,11 @@ func New(svc *service.Service, authManager *auth.Manager, logger *log.Logger, co
 	server := &Server{
 		service: svc, auth: authManager, logger: logger,
 		metrics: observability.New(), collectors: collectors, integrations: integration.FromEnvironment(),
+	}
+	var releaseConfigErr error
+	server.gitLabRelease, releaseConfigErr = integration.NewGitLabReleaseClient(server.integrations, nil)
+	if releaseConfigErr != nil {
+		logger.Print("joint release GitLab configuration is invalid; deployment evidence is disabled")
 	}
 	for _, collector := range collectors {
 		switch typed := collector.(type) {
@@ -100,6 +106,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/auth/") ||
 			strings.HasPrefix(r.URL.Path, "/api/gate/") ||
 			strings.HasPrefix(r.URL.Path, "/api/integrations/") ||
+			r.URL.Path == "/api/joint-releases" || strings.HasPrefix(r.URL.Path, "/api/joint-releases/") ||
 			strings.HasPrefix(r.URL.Path, "/auth/") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
@@ -144,6 +151,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/enterprise/llm/usage", s.handleEnterpriseLLMUsage)
 	mux.HandleFunc("/api/changes", s.handleChanges)
 	mux.HandleFunc("/api/changes/", s.handleChange)
+	mux.HandleFunc("/api/joint-releases", s.handleJointReleases)
+	mux.HandleFunc("/api/joint-releases/{id}", s.handleJointRelease)
 	mux.HandleFunc("/api/passports", s.handlePassports)
 	mux.HandleFunc("/api/conflicts", s.handleConflicts)
 	mux.HandleFunc("/api/gate/verify", s.handleGateVerify)
@@ -185,7 +194,7 @@ func (s *Server) routes() http.Handler {
 		if strings.HasSuffix(r.URL.Path, ".css") {
 			w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		}
-		if strings.HasSuffix(r.URL.Path, ".js") {
+		if strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".mjs") {
 			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 		}
 		w.Header().Set("Cache-Control", "no-cache")
