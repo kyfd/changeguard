@@ -312,7 +312,7 @@ func TestPostgresConcurrentEmptyMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	cleanup := `DROP TABLE IF EXISTS changeguard_deployment_jobs,changeguard_joint_release_members,changeguard_joint_releases,changeguard_core_authority,changeguard_idempotency_records,changeguard_audit_events,changeguard_passports,changeguard_outbox,changeguard_changes,changeguard_normalization_migrations,dbguard_state`
 	if _, err = pool.Exec(ctx, cleanup); err != nil {
 		t.Fatal(err)
@@ -342,13 +342,13 @@ func TestPostgresConcurrentEmptyMigration(t *testing.T) {
 	wg.Wait()
 	close(stores)
 	close(errs)
-	for err := range errs {
-		t.Fatalf("concurrent NewPostgres on empty DB failed: %v", err)
-	}
 	var opened []*Store
 	for s := range stores {
-		defer s.Close()
+		t.Cleanup(s.Close)
 		opened = append(opened, s)
+	}
+	for err := range errs {
+		t.Fatalf("concurrent NewPostgres on empty DB failed: %v", err)
 	}
 	if len(opened) != instances {
 		t.Fatalf("expected %d opened stores, got %d", instances, len(opened))
