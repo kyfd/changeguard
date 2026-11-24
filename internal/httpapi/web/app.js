@@ -39,6 +39,7 @@ const navItems = [
     { route: "assets", label: "服务", icon: "apps" },
     { route: "risks", label: "风险项", icon: "alert", count: () => state.changes.flatMap(item => item.findings || []).filter(item => item.status !== "VERIFIED").length },
     { route: "changes", label: "变更单", icon: "code" },
+    { route: "joint-releases", label: "联合发布", icon: "approval" },
     { route: "calendar", label: "发布日历", icon: "file" },
     { route: "experiments", label: "预发布验证", icon: "flask" },
     { route: "approvals", label: "待审批", icon: "approval", count: () => state.dashboard?.pending_approvals?.length || 0 },
@@ -88,43 +89,43 @@ const workspaceProfiles = {
     key: "developer", label: "开发者工作台", shortLabel: "开发",
     description: "先判断自己的变更能否发布，再处理阻断证据与下一步动作。",
     home: "dashboard",
-    routes: ["dashboard", "changes"],
-    order: ["dashboard", "changes"]
+    routes: ["dashboard", "changes", "joint-releases"],
+    order: ["dashboard", "changes", "joint-releases"]
   },
   reviewer: {
     key: "reviewer", label: "审核工作台", shortLabel: "审核",
     description: "优先核对待审批变更、风险证据、影响范围与审计上下文。",
     home: "approvals",
-    routes: ["dashboard", "approvals", "changes"],
-    order: ["approvals", "dashboard", "changes"]
+    routes: ["dashboard", "approvals", "changes", "joint-releases"],
+    order: ["approvals", "dashboard", "changes", "joint-releases"]
   },
   operations: {
     key: "operations", label: "发布运行工作台", shortLabel: "运行",
     description: "聚焦发布窗口、观测信号、事故回溯和服务运行上下文。",
     home: "calendar",
-    routes: ["dashboard", "calendar", "observability", "incidents", "changes"],
-    order: ["dashboard", "calendar", "observability", "incidents", "changes"]
+    routes: ["dashboard", "calendar", "observability", "incidents", "changes", "joint-releases"],
+    order: ["dashboard", "calendar", "joint-releases", "observability", "incidents", "changes"]
   },
   lead: {
     key: "lead", label: "治理工作台", shortLabel: "治理",
     description: "跨服务查看审批、风险、规则、运行证据与治理配置。",
     home: "dashboard",
-    routes: ["dashboard", "approvals", "changes", "risks", "calendar", "experiments", "observability", "incidents", "panorama", "assets", "policies", "apps", "audits", "settings"],
-    order: ["dashboard", "approvals", "changes", "risks", "calendar", "experiments", "observability", "incidents", "panorama", "assets", "policies", "apps", "audits", "settings"]
+    routes: ["dashboard", "approvals", "changes", "joint-releases", "risks", "calendar", "experiments", "observability", "incidents", "panorama", "assets", "policies", "apps", "audits", "settings"],
+    order: ["dashboard", "approvals", "changes", "joint-releases", "risks", "calendar", "experiments", "observability", "incidents", "panorama", "assets", "policies", "apps", "audits", "settings"]
   },
   manager: {
     key: "manager", label: "管理者工作台", shortLabel: "管理",
     description: "只看真实治理结果、运行后果与可量化收益；缺少信号时明确提示证据不足。",
     home: "dashboard",
-    routes: ["dashboard"],
-    order: ["dashboard"]
+    routes: ["dashboard", "joint-releases"],
+    order: ["dashboard", "joint-releases"]
   },
   admin: {
     key: "admin", label: "企业管理工作台", shortLabel: "企业管理",
     description: "聚焦应用映射、CI 身份信任、治理策略与成员权限配置。",
     home: "dashboard",
-    routes: ["dashboard", "apps", "settings", "policies", "enterprise"],
-    order: ["dashboard", "apps", "settings", "policies", "enterprise"]
+    routes: ["dashboard", "apps", "settings", "policies", "enterprise", "joint-releases"],
+    order: ["dashboard", "joint-releases", "apps", "settings", "policies", "enterprise"]
   }
 };
 
@@ -399,7 +400,7 @@ function pageHeading(title, description, actions = "") {
 
 async function renderPage() {
   ensureAllowedRoute();
-  const [route, id] = currentRoute();
+  const [route, id, mode] = currentRoute();
   document.body.classList.toggle("panorama-mode", route === "panorama");
   renderNav();
   const main = document.querySelector("#mainContent");
@@ -412,6 +413,18 @@ async function renderPage() {
   else if (route === "risks") rendered = renderRiskCenter(main);
   else if (route === "changes" && id) rendered = renderChangeDetail(main, id);
   else if (route === "changes") rendered = renderChanges(main);
+  else if (route === "joint-releases") {
+    const requested = location.hash;
+    setHeader("联合发布");
+    main.innerHTML = '<p role="status">正在加载联合发布…</p>';
+    rendered = import("./joint-releases.mjs").then(({renderJointReleases}) => {
+      if (location.hash !== requested) return;
+      return renderJointReleases(main, id, mode, {api, actor: actor(), changes: state.changes, escapeHTML,
+        formatDate, statusInfo, setHeader, pageHeading, routeAllowed: routeAllowed("changes"), toast});
+    }).catch(() => {
+      if (location.hash === requested) main.innerHTML = emptyState("联合发布未加载", "请刷新页面后重试。");
+    });
+  }
   else if (route === "calendar") rendered = renderCalendar(main);
   else if (route === "experiments") rendered = renderExperiments(main);
   else if (route === "approvals") rendered = renderApprovals(main);
@@ -3851,6 +3864,9 @@ function connectEvents() {
     try {
       await refreshData(false);
       const route = currentRoute();
+      // Keep an in-progress joint release editor intact when another change
+      // emits a server event. Its pins are rechecked server-side on submit.
+      if (route[0] === "joint-releases") return;
       if (["dashboard","panorama","assets","risks","calendar","approvals","experiments","observability","incidents"].includes(route[0]) || route[1]) await renderPage();
     } catch (_) {}
   });

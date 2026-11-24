@@ -12,6 +12,19 @@ import (
 func (s *Store) UpdateChangeWithOutbox(id string, update func(*model.ChangeRequest) error, event model.OutboxEvent, audits ...model.AuditEvent) (model.ChangeRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, createdEvent, linked, err := backend.updateChangeWithOutbox(ctx, id, update, event, audits...)
+		if err != nil {
+			return model.ChangeRequest{}, err
+		}
+		s.upsertChangeLocked(updated)
+		s.upsertOutboxLocked(createdEvent)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return updated, nil
+	}
 	for index := range s.data.Changes {
 		if s.data.Changes[index].ID != id {
 			continue
@@ -53,6 +66,21 @@ func (s *Store) UpdateChangeWithOutbox(id string, update func(*model.ChangeReque
 func (s *Store) EnsureExperimentOutbox() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		created, err := backend.ensureExperimentOutbox(ctx)
+		if err != nil {
+			return err
+		}
+		for _, ev := range created {
+			s.upsertOutboxLocked(ev)
+		}
+		if len(created) > 0 {
+			s.localMutationSeq.Add(1)
+		}
+		return nil
+	}
 	changed := false
 	now := time.Now()
 	for _, change := range s.data.Changes {
@@ -88,13 +116,12 @@ func (s *Store) ClaimOutbox(workerID string, lease time.Duration) (model.OutboxE
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		event, payload, version, err := backend.claimOutbox(ctx, workerID, lease)
+		event, err := backend.claimOutbox(ctx, workerID, lease)
 		if err != nil {
 			return model.OutboxEvent{}, err
 		}
-		if err := s.installPostgresSnapshot(payload, version); err != nil {
-			return model.OutboxEvent{}, err
-		}
+		s.upsertOutboxLocked(event)
+		s.localMutationSeq.Add(1)
 		return event, nil
 	}
 	now := s.clock()
@@ -145,6 +172,17 @@ func (s *Store) ClaimOutbox(workerID string, lease time.Duration) (model.OutboxE
 func (s *Store) CompleteOutbox(id, workerID string, generation uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, err := backend.completeOutbox(ctx, id, workerID, generation)
+		if err != nil {
+			return err
+		}
+		s.upsertOutboxLocked(updated)
+		s.localMutationSeq.Add(1)
+		return nil
+	}
 	now := s.clock()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]
@@ -168,6 +206,17 @@ func (s *Store) CompleteOutbox(id, workerID string, generation uint64) error {
 func (s *Store) RenewOutbox(id, workerID string, generation uint64, lease time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, err := backend.renewOutbox(ctx, id, workerID, generation, lease)
+		if err != nil {
+			return err
+		}
+		s.upsertOutboxLocked(updated)
+		s.localMutationSeq.Add(1)
+		return nil
+	}
 	now := s.clock()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]
@@ -188,6 +237,17 @@ func (s *Store) RenewOutbox(id, workerID string, generation uint64, lease time.D
 func (s *Store) FailOutbox(id, workerID string, generation uint64, cause error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, err := backend.failOutbox(ctx, id, workerID, generation, cause)
+		if err != nil {
+			return err
+		}
+		s.upsertOutboxLocked(updated)
+		s.localMutationSeq.Add(1)
+		return nil
+	}
 	now := s.clock()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]
@@ -223,6 +283,17 @@ func (s *Store) FailOutbox(id, workerID string, generation uint64, cause error) 
 func (s *Store) CheckpointExperimentOutbox(id, workerID string, generation uint64, stage model.OutboxStage, inputSHA256 string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, err := backend.checkpointExperimentOutbox(ctx, id, workerID, generation, stage, inputSHA256)
+		if err != nil {
+			return err
+		}
+		s.upsertOutboxLocked(updated)
+		s.localMutationSeq.Add(1)
+		return nil
+	}
 	now := s.clock()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]
@@ -248,6 +319,19 @@ func (s *Store) CheckpointExperimentOutbox(id, workerID string, generation uint6
 func (s *Store) FinalizeExperimentOutbox(id, workerID string, generation uint64, attemptID, inputSHA256, resultDigest string, update func(*model.ChangeRequest) error, audits ...model.AuditEvent) (model.ChangeRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		change, event, linked, err := backend.finalizeExperimentOutbox(ctx, id, workerID, generation, attemptID, inputSHA256, resultDigest, update, audits...)
+		if err != nil {
+			return model.ChangeRequest{}, err
+		}
+		s.upsertChangeLocked(change)
+		s.upsertOutboxLocked(event)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return change, nil
+	}
 	now := s.clock()
 	for eventIndex := range s.data.Outbox {
 		event := &s.data.Outbox[eventIndex]
@@ -299,6 +383,18 @@ func timePointer(value time.Time) *time.Time { return &value }
 func (s *Store) RetryOutbox(organizationID, id string, audit ...model.AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		event, linked, err := backend.retryOutbox(ctx, organizationID, id, audit...)
+		if err != nil {
+			return err
+		}
+		s.upsertOutboxLocked(event)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return nil
+	}
 	now := time.Now()
 	for index := range s.data.Outbox {
 		event := &s.data.Outbox[index]

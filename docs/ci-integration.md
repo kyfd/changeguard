@@ -145,7 +145,7 @@ changeguard_gate:
 
 ### GitLab 流水线事件
 
-ChangeGuard 可以接收 GitLab Pipeline events，用于记录部署终态；Webhook 不会绕过审批或 Gate。
+ChangeGuard 可以接收 GitLab Pipeline events，用于记录流水线状态。流水线成功不是部署证据，不能解锁联合发布。
 
 服务端配置：
 
@@ -165,6 +165,33 @@ https://changeguard.example.com/api/integrations/gitlab/webhook
 启用 Pipeline events 并保持 SSL 校验。ChangeGuard 优先校验 `webhook-id`、`webhook-timestamp` 和 `webhook-signature`，并拒绝超出时间窗口的请求；没有签名头时才使用兼容的 `X-Gitlab-Token`。
 
 事件优先通过 `CHANGEGUARD_CHANGE_ID` 关联变更，其次尝试本组织内的 `commit_sha`。无法关联的事件会保留并标记为未关联，不会猜测或修改变更状态。
+
+### 5.0 联合发布：串联数据库与应用部署
+
+创建第一个联合发布计划之前，必须先升级所有处理 Gate 请求的 ChangeGuard 实例，确保每个实例都能识别计划成员关系并强制执行步骤依赖。滚动升级期间，只要旧实例仍可能收到 `/api/gate/verify` 或 `/api/gate/consume` 请求，就不要启用联合发布；旧版本会把计划中的变更当作普通变更处理。
+
+在启用会话认证的控制台中打开「联合发布」。技术负责人、审核人或企业管理员可创建计划，仍须对涉及的应用有审核权限。逐步固定环境、变更 ID、制品版本与 SHA-256、GitLab 项目 ID 和作业名。每条变更必须独立审批并签发各自的通行证。详情将审批、Gate 消费和 GitLab 终态分开显示；缺证据不算成功。
+
+控制台使用 `GET /api/joint-releases`、`GET /api/joint-releases/{id}` 和 `POST /api/joint-releases`。这三个端点要求有效会话，创建请求还需要 CSRF 令牌；创建替代计划时在同一 POST 中指定 `supersedes` 与相应步骤的 `replaces_change_id`。
+
+在 ChangeGuard 服务进程配置（从密钥管理器提供 token）：
+
+```text
+CHANGEGUARD_GITLAB_ORGANIZATION_ID=<ChangeGuard 组织 ID>
+CHANGEGUARD_GITLAB_RELEASE_ORIGIN=https://gitlab.example.com
+CHANGEGUARD_GITLAB_RELEASE_PROJECTS={"42":"https://gitlab.example.com/commerce/orders"}
+CHANGEGUARD_GITLAB_READ_API_TOKEN=<有权读取白名单项目部署的 read_api 令牌>
+```
+
+当前配置固定一个组织和一个 HTTPS GitLab 源（不含子路径）；项目 URL 使用 GitLab 返回的完整规范地址，不带 `.git` 或尾斜杠。应用的仓库 URL 必须与绑定项目一致。在白名单项目上把 **Deployment events** 发送到上面的同一路径，启用 SSL 校验。部署事件如果配置了 Signing Token 就必须带有效签名；只使用旧版 Secret 时，确保其独立且足够随机。GitLab read API 凭据只配置在服务端，CI 不需要它；跨多个项目时该凭据须能读取每个白名单项目。
+
+CI 在**实际执行部署、且声明相同 `environment.name` 的作业**中运行 `changeguard-gate consume -gitlab-job -manifest <文件>`，消费成功后才执行变更。作业凭据仅从环境变量 `CI_JOB_TOKEN` 读取，通过 HTTPS 请求头发送，勿把它传入命令行参数或日志；反向代理也不要记录 Gate 或 Webhook 的认证头。ChangeGuard 使用固定源的 `GET /api/v4/job` 核实仍运行的作业、项目、流水线和完整提交。CLI 用 GitLab 注入的 `CI_JOB_ID` 核对消费记录，`consumer` 不是身份凭据。普通非联合发布仍可使用原 Gate 调用；`verify` 只读，成功不代表授权执行。
+
+[GitLab Deployment Hook](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events) 通常只提供短 SHA。ChangeGuard 从同一固定源的 [Deployments API](https://docs.gitlab.com/api/deployments/#retrieve-a-single-deployment) 查询具体项目和部署，核对终态、执行作业、环境及完整 SHA，不访问 Webhook 中的 URL。只有匹配本次已消费作业、并且终态时间晚于消费时刻的成功证据才解锁下一步。请保持 GitLab 和 ChangeGuard 时钟同步。API 不可用时发布保持阻断；恢复后可重发终态 Webhook，不能用流水线状态或手写成功代替。
+
+部署失败或取消后，先查看详情中的执行结果，再用「创建替代计划」为失败步骤选择同一应用的新变更，保持其他未完成步骤的次序。已成功步骤和原证据会被新计划沿用，无需重跑；即使只剩一个步骤，也可以创建替代计划。新变更仍需审批、签发和从新启动的作业消费 Gate；旧作业迟到的成功事件不能解锁新计划。
+
+参考 [可执行 GitLab CI 示例](../examples/ci-demo/.gitlab-ci.joint-release.yml)及[准备说明](../examples/ci-demo/README.md#联合发布示例)。
 
 ## Jenkins
 

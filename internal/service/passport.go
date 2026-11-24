@@ -130,7 +130,7 @@ func (s *Service) IssuePassport(changeID, actorID string, ttlSeconds int) (model
 	}
 	passport := model.Passport{
 		ID: passportID, OrganizationID: change.OrganizationID, ChangeID: change.ID,
-		ArtifactSHA256: change.ArtifactSHA256, Environment: change.Environment, RuleSetVersion: change.RuleSetVersion,
+		ArtifactSHA256: change.ArtifactSHA256, ArtifactVersion: change.MaterialVersion(), Environment: change.Environment, RuleSetVersion: change.RuleSetVersion,
 		ApproverID: change.ReviewerID, ApproverName: change.ReviewerName, Status: model.PassportActive,
 		TokenSHA256: changegate.TokenSHA256(token), IssuedAt: now, ExpiresAt: expiresAt,
 	}
@@ -147,6 +147,12 @@ func (s *Service) IssuePassport(changeID, actorID string, ttlSeconds int) (model
 }
 
 func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateResult, error) {
+	return s.VerifyGateForJob(input, consume, nil)
+}
+
+// VerifyGateForJob accepts only an independently authenticated GitLab job.
+// The signed passport identifies the change; the store discovers the plan.
+func (s *Service) VerifyGateForJob(input model.GateRequest, consume bool, job *model.GitLabJob) (model.GateResult, error) {
 	if s.passportSigner == nil {
 		return model.GateResult{}, ErrPassportUnavailable
 	}
@@ -161,44 +167,11 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 	if !strings.EqualFold(strings.TrimSpace(input.Environment), strings.TrimSpace(claims.Environment)) {
 		return model.GateResult{}, ErrEnvironmentMismatch
 	}
-	passport, err := s.store.Passport(claims.PassportID)
-	if err != nil {
-		return model.GateResult{}, ErrPassportInvalid
-	}
-	switch passport.Status {
-	case model.PassportRevoked:
-		return model.GateResult{}, ErrPassportRevoked
-	case model.PassportExpired:
-		return model.GateResult{}, ErrPassportExpired
-	case model.PassportConsumed:
-		if !consume {
-			return model.GateResult{}, ErrPassportReplay
-		}
-	}
-	if passport.OrganizationID != claims.OrganizationID || passport.ChangeID != claims.ChangeID || passport.ArtifactSHA256 != claims.ArtifactSHA256 || passport.Environment != claims.Environment || passport.RuleSetVersion != claims.RuleSetVersion || passport.ApproverID != claims.ApproverID {
-		return model.GateResult{}, ErrPassportInvalid
-	}
 	issuedAt, expiresAt := changegate.ClaimsTimes(claims)
-	if !passport.IssuedAt.Equal(issuedAt) || !passport.ExpiresAt.Equal(expiresAt) {
-		return model.GateResult{}, ErrPassportInvalid
-	}
-	change, err := s.store.Change(passport.ChangeID)
-	if err != nil {
-		return model.GateResult{}, ErrPassportInvalid
-	}
-	if change.OrganizationID != passport.OrganizationID || change.ArtifactSHA256 != passport.ArtifactSHA256 || change.Environment != passport.Environment || change.RuleSetVersion != passport.RuleSetVersion {
-		return model.GateResult{}, ErrPassportInvalid
-	}
-	replayCandidate := consume && passport.Status == model.PassportConsumed
-	if replayCandidate {
-		if change.Status != model.StatusCompleted {
-			return model.GateResult{}, ErrPassportInvalid
-		}
-	} else if change.Status != model.StatusApproved {
-		return model.GateResult{}, ErrPassportInvalid
-	}
-	if changegate.RuleSetVersion(s.store.PoliciesByOrganization(change.OrganizationID)) != passport.RuleSetVersion {
-		return model.GateResult{}, ErrRuleSetChanged
+	passport := model.Passport{
+		ID: claims.PassportID, OrganizationID: claims.OrganizationID, ChangeID: claims.ChangeID,
+		ArtifactSHA256: claims.ArtifactSHA256, Environment: claims.Environment, RuleSetVersion: claims.RuleSetVersion,
+		ApproverID: claims.ApproverID, IssuedAt: issuedAt, ExpiresAt: expiresAt,
 	}
 	consumer := strings.TrimSpace(input.Consumer)
 	if consumer == "" {
@@ -207,7 +180,6 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 	if len(consumer) > 200 {
 		return model.GateResult{}, fmt.Errorf("%w：consumer 不能超过 200 个字符", ErrValidation)
 	}
-	now := time.Now().UTC()
 	action := "PASSPORT_VERIFIED"
 	if consume {
 		action = "PASSPORT_CONSUMED"
@@ -215,30 +187,29 @@ func (s *Service) VerifyGate(input model.GateRequest, consume bool) (model.GateR
 	gateActor := model.User{ID: "ci:" + consumer, OrganizationID: passport.OrganizationID, Name: consumer, Role: "CI", Active: true}
 	gateAudit := auditPassport(audit(gateActor, passport.ChangeID, action, fmt.Sprintf("CI 校验通行证 %s，制品与环境匹配", passport.ID)), passport.ID)
 	gateAudit.RequestDigest = input.ArtifactSHA256
-	validated, err := s.store.UsePassport(passport.ID, changegate.TokenSHA256(token), consumer, now, consume, gateAudit)
+	validated, replayed, err := s.store.UsePassportForJob(passport.ID, changegate.TokenSHA256(token), consumer, time.Time{}, consume, gateAudit, &passport, job)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrPassportExpired):
 			return model.GateResult{}, ErrPassportExpired
 		case errors.Is(err, store.ErrPassportReplay):
 			return model.GateResult{}, ErrPassportReplay
+		case errors.Is(err, store.ErrPassportRevoked):
+			return model.GateResult{}, ErrPassportRevoked
+		case errors.Is(err, store.ErrPassportRuleSet):
+			return model.GateResult{}, ErrRuleSetChanged
 		case errors.Is(err, store.ErrPassportInactive):
 			if consume {
 				return model.GateResult{}, ErrPassportReplay
 			}
 			return model.GateResult{}, ErrPassportRevoked
-		case errors.Is(err, store.ErrPassportTokenMismatch), errors.Is(err, store.ErrPassportChangeInvalid):
+		case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrPassportTokenMismatch), errors.Is(err, store.ErrPassportChangeInvalid):
 			return model.GateResult{}, ErrPassportInvalid
 		default:
 			return model.GateResult{}, err
 		}
 	}
-	replayed := consume && passport.Status == model.PassportConsumed
-	if !consume {
-		verifyAudit := auditPassport(audit(gateActor, passport.ChangeID, action, fmt.Sprintf("CI 验签通过：%s", passport.ID)), passport.ID)
-		verifyAudit.RequestDigest = input.ArtifactSHA256
-		_ = s.store.RecordAudit(verifyAudit)
-	} else if !replayed {
+	if consume && !replayed {
 		if completed, changeErr := s.store.Change(passport.ChangeID); changeErr == nil {
 			s.publish(completed, "CI 通行证已消费，生产变更自动完成")
 		}

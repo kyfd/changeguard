@@ -31,6 +31,9 @@ type Config struct {
 	GitLabSigningToken     string
 	GitLabSecretToken      string
 	GitLabOrganization     string
+	GitLabReleaseOrigin    string
+	GitLabReleaseProjects  string
+	GitLabReadAPIToken     string
 	JenkinsToken           string
 	JenkinsOrganization    string
 	OperationsToken        string
@@ -49,6 +52,9 @@ func FromEnvironment() Config {
 		GitLabSigningToken:     strings.TrimSpace(os.Getenv("CHANGEGUARD_GITLAB_SIGNING_TOKEN")),
 		GitLabSecretToken:      strings.TrimSpace(os.Getenv("CHANGEGUARD_GITLAB_WEBHOOK_SECRET")),
 		GitLabOrganization:     envOr("CHANGEGUARD_GITLAB_ORGANIZATION_ID", "org_demo"),
+		GitLabReleaseOrigin:    strings.TrimSpace(os.Getenv("CHANGEGUARD_GITLAB_RELEASE_ORIGIN")),
+		GitLabReleaseProjects:  strings.TrimSpace(os.Getenv("CHANGEGUARD_GITLAB_RELEASE_PROJECTS")),
+		GitLabReadAPIToken:     strings.TrimSpace(os.Getenv("CHANGEGUARD_GITLAB_READ_API_TOKEN")),
 		JenkinsToken:           strings.TrimSpace(os.Getenv("CHANGEGUARD_JENKINS_WEBHOOK_TOKEN")),
 		JenkinsOrganization:    envOr("CHANGEGUARD_JENKINS_ORGANIZATION_ID", "org_demo"),
 		OperationsToken:        strings.TrimSpace(os.Getenv("CHANGEGUARD_OPERATIONS_WEBHOOK_TOKEN")),

@@ -35,14 +35,16 @@ func (s *Store) BeginIdempotency(record model.IdempotencyRecord) (model.Idempote
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		claimed, created, payload, version, err := backend.beginIdempotency(ctx, record)
+		claimed, created, err := backend.beginIdempotency(ctx, record)
 		if err != nil {
+			if claimed.Key != "" {
+				s.upsertIdempotencyLocked(claimed)
+			}
 			return claimed, created, err
 		}
+		s.upsertIdempotencyLocked(claimed)
 		if created {
-			if err := s.installPostgresSnapshot(payload, version); err != nil {
-				return model.IdempotencyRecord{}, false, err
-			}
+			s.localMutationSeq.Add(1)
 		}
 		return claimed, created, nil
 	}
@@ -89,15 +91,12 @@ func (s *Store) CompleteIdempotency(record model.IdempotencyRecord, result any, 
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		completed, payload, version, err := backend.completeIdempotency(ctx, record, encoded, responseRef, status, resultDigest)
+		completed, stored, err := backend.completeIdempotency(ctx, record, encoded, responseRef, status, resultDigest)
 		if err != nil {
 			return model.IdempotencyRecord{}, err
 		}
-		if len(payload) > 0 {
-			if err := s.installPostgresSnapshot(payload, version); err != nil {
-				return model.IdempotencyRecord{}, err
-			}
-		}
+		s.upsertIdempotencyLocked(stored)
+		s.localMutationSeq.Add(1)
 		return completed, nil
 	}
 	for index := range s.data.IdempotencyRecords {
@@ -141,11 +140,12 @@ func (s *Store) AbortIdempotency(record model.IdempotencyRecord) error {
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		payload, version, err := backend.abortIdempotency(ctx, record)
-		if err != nil {
+		if err := backend.abortIdempotency(ctx, record); err != nil {
 			return err
 		}
-		return s.installPostgresSnapshot(payload, version)
+		s.removeIdempotencyLocked(record)
+		s.localMutationSeq.Add(1)
+		return nil
 	}
 	for index := range s.data.IdempotencyRecords {
 		item := s.data.IdempotencyRecords[index]
@@ -175,13 +175,12 @@ func (s *Store) TakeoverIdempotency(observed model.IdempotencyRecord) (model.Ide
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		taken, payload, version, err := backend.takeoverIdempotency(ctx, observed)
+		taken, err := backend.takeoverIdempotency(ctx, observed)
 		if err != nil {
 			return model.IdempotencyRecord{}, err
 		}
-		if err := s.installPostgresSnapshot(payload, version); err != nil {
-			return model.IdempotencyRecord{}, err
-		}
+		s.upsertIdempotencyLocked(taken)
+		s.localMutationSeq.Add(1)
 		return taken, nil
 	}
 	for index := range s.data.IdempotencyRecords {
@@ -213,6 +212,28 @@ func (s *Store) CleanupExpiredIdempotency(organizationID string, at time.Time, l
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		removed, err := backend.cleanupExpiredIdempotency(ctx, organizationID, at, limit)
+		if err != nil {
+			return 0, err
+		}
+		if removed > 0 {
+			kept := make([]model.IdempotencyRecord, 0, len(s.data.IdempotencyRecords))
+			left := removed
+			for _, item := range s.data.IdempotencyRecords {
+				if left > 0 && item.OrganizationID == organizationID && item.Status == IdempotencySucceeded && item.ExpiresAt != nil && !at.Before(*item.ExpiresAt) {
+					left--
+					continue
+				}
+				kept = append(kept, item)
+			}
+			s.data.IdempotencyRecords = kept
+			s.localMutationSeq.Add(1)
+		}
+		return removed, nil
+	}
 	removed := 0
 	kept := make([]model.IdempotencyRecord, 0, len(s.data.IdempotencyRecords))
 	for _, item := range s.data.IdempotencyRecords {

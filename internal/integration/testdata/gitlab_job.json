@@ -1,0 +1,12 @@
+{
+  "id": 796,
+  "name": "migrate_orders",
+  "status": "running",
+  "stage": "deploy",
+  "started_at": "2026-11-24T12:00:00.001Z",
+  "finished_at": null,
+  "commit": { "id": "279484c09fbe69ededfced8c1bb6e6d24616b468", "short_id": "279484c0" },
+  "pipeline": { "id": 142, "project_id": 30, "sha": "279484c09fbe69ededfced8c1bb6e6d24616b468", "status": "running" },
+  "project": { "ci_job_token_scope_enabled": true },
+  "web_url": "https://gitlab.example.com/root/test-deployment-webhooks/-/jobs/796"
+}

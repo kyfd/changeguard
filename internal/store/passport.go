@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/kyfd/changeguard/internal/changegate"
 	"github.com/kyfd/changeguard/internal/model"
 )
 
@@ -18,11 +18,28 @@ var (
 	ErrPassportTokenMismatch = errors.New("passport token mismatch")
 	ErrPassportChangeInvalid = errors.New("passport change is not approved")
 	ErrPassportReplay        = errors.New("passport already consumed by another consumer")
+	ErrPassportRevoked       = errors.New("passport revoked")
+	ErrPassportRuleSet       = fmt.Errorf("%w: rule set changed", ErrPassportChangeInvalid)
 )
 
 func (s *Store) CreatePassport(passport model.Passport, audit model.AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		stored, expired, linked, err := backend.createPassport(ctx, passport, audit)
+		if err != nil {
+			return err
+		}
+		for _, item := range expired {
+			s.upsertPassportLocked(item)
+		}
+		s.upsertPassportLocked(stored)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return nil
+	}
 	now := time.Now().UTC()
 	for _, item := range s.data.Passports {
 		if item.ID == passport.ID {
@@ -108,40 +125,39 @@ func (s *Store) PassportsByOrganization(organizationID string) []model.Passport 
 // consume=true performs one logical consume. A later call with the same token
 // hash and consumer returns the first public snapshot without writing again.
 func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, consume bool, audit model.AuditEvent) (model.Passport, error) {
+	pass, _, err := s.UsePassportForJob(id, tokenSHA256, consumer, at, consume, audit, nil, nil)
+	return pass, err
+}
+
+// UsePassportForJob makes Gate validation, release membership discovery, and
+// the optional passport/change/job transition one atomic store operation.
+// expected holds the signed fields, not a cached copy of the passport row.
+func (s *Store) UsePassportForJob(id, tokenSHA256, consumer string, at time.Time, consume bool, audit model.AuditEvent, expected *model.Passport, job *model.GitLabJob) (model.Passport, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		passport, payload, version, err := backend.usePassport(ctx, id, tokenSHA256, consumer, at, consume, audit)
-		if len(payload) > 0 {
-			if installErr := s.installPostgresSnapshot(payload, version); installErr != nil {
-				return model.Passport{}, installErr
-			}
+		passport, delta, err := backend.usePassport(ctx, id, tokenSHA256, consumer, at, consume, audit, expected, job)
+		if delta.Passport != nil || delta.Change != nil || len(delta.NewAudits) > 0 || len(delta.ChangeAudits) > 0 {
+			s.applyPassportDeltaLocked(delta)
+			s.localMutationSeq.Add(1)
 		}
-		return passport, err
+		return passport, delta.Replayed, err
+	}
+	if at.IsZero() {
+		at = s.clock().UTC()
 	}
 	for index := range s.data.Passports {
 		item := &s.data.Passports[index]
 		if item.ID != id {
 			continue
 		}
-		if subtle.ConstantTimeCompare([]byte(item.TokenSHA256Stored), []byte(tokenSHA256)) != 1 {
-			return model.Passport{}, ErrPassportTokenMismatch
+		replayed, err := validatePassportUse(*item, expected, tokenSHA256, consumer, consume)
+		if err != nil {
+			return model.Passport{}, false, err
 		}
-		if item.Status == model.PassportExpired {
-			return model.Passport{}, ErrPassportExpired
-		}
-		if consume && item.Status == model.PassportConsumed {
-			if sameConsumerReplay(*item, tokenSHA256, consumer) {
-				return publicPassport(*item, false), nil
-			}
-			return model.Passport{}, ErrPassportReplay
-		}
-		if item.Status != model.PassportActive {
-			return model.Passport{}, ErrPassportInactive
-		}
-		if !at.Before(item.ExpiresAt) {
+		if !replayed && !at.Before(item.ExpiresAt) {
 			oldItem := *item
 			oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
 			item.Status = model.PassportExpired
@@ -150,9 +166,9 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 			if err := s.saveLocked(); err != nil {
 				s.data.Passports[index] = oldItem
 				s.data.Audits = oldAudits
-				return model.Passport{}, err
+				return model.Passport{}, false, err
 			}
-			return model.Passport{}, ErrPassportExpired
+			return model.Passport{}, false, ErrPassportExpired
 		}
 		changeIndex := -1
 		for candidate := range s.data.Changes {
@@ -163,27 +179,47 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 			}
 		}
 		if changeIndex < 0 {
-			return model.Passport{}, ErrPassportChangeInvalid
+			return model.Passport{}, false, ErrPassportChangeInvalid
 		}
 		boundChange := s.data.Changes[changeIndex]
-		currentPolicies := make([]model.RiskPolicy, 0)
-		for _, policy := range s.data.Policies {
-			if policy.OrganizationID == item.OrganizationID {
-				currentPolicies = append(currentPolicies, policy)
+		snapshot := releaseSnapshot{data: s.data, plans: s.data.JointReleases}
+		if err := validatePassportChange(*item, boundChange, snapshot.rules(item.OrganizationID), replayed); err != nil {
+			return model.Passport{}, false, err
+		}
+		plan, position := snapshot.membership(item.OrganizationID, item.ChangeID)
+		updatedPlan := plan
+		if position >= 0 {
+			updatedPlan, err = snapshot.gate(plan, position, *item, job, at, consume)
+			if err != nil {
+				return model.Passport{}, false, err
 			}
 		}
-		if boundChange.Status != model.StatusApproved ||
-			boundChange.ArtifactSHA256 != item.ArtifactSHA256 ||
-			boundChange.Environment != item.Environment ||
-			boundChange.RuleSetVersion != item.RuleSetVersion ||
-			changegate.RuleSetVersion(currentPolicies) != item.RuleSetVersion {
-			return model.Passport{}, ErrPassportChangeInvalid
+		var existing deploymentJobBinding
+		if consume || job != nil {
+			for _, binding := range s.data.DeploymentJobs {
+				if binding.PassportID == id || job != nil && binding.Source == job.Source && binding.JobID == job.JobID {
+					existing = binding
+					break
+				}
+			}
+			if err := validateJobBinding(existing, *item, plan, job, replayed); err != nil {
+				return model.Passport{}, false, err
+			}
 		}
-		if consume {
+		if !consume && expected != nil {
+			oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
+			s.appendAuditsLocked(audit)
+			if err := s.saveLocked(); err != nil {
+				s.data.Audits = oldAudits
+				return model.Passport{}, false, err
+			}
+		}
+		if consume && !replayed {
 			oldItem := *item
 			oldChange := s.data.Changes[changeIndex]
 			oldChange.Timeline = append([]model.TimelineEntry(nil), oldChange.Timeline...)
 			oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
+			oldBindings := s.data.DeploymentJobs
 
 			item.Status = model.PassportConsumed
 			item.ConsumedAt = &at
@@ -199,16 +235,85 @@ func (s *Store) UsePassport(id, tokenSHA256, consumer string, at time.Time, cons
 			audit.Action = "PASSPORT_CONSUMED_AND_CHANGE_COMPLETED"
 			audit.Detail += "；变更状态已原子更新为 COMPLETED"
 			s.appendAuditsLocked(audit)
+			if job != nil {
+				s.data.DeploymentJobs = append(s.data.DeploymentJobs, bindJob(job, *item, plan))
+			}
+			if position >= 0 {
+				s.replaceReleaseLocked(updatedPlan)
+			}
 			if err := s.saveLocked(); err != nil {
 				s.data.Passports[index] = oldItem
 				s.data.Changes[changeIndex] = oldChange
 				s.data.Audits = oldAudits
-				return model.Passport{}, err
+				s.data.DeploymentJobs = oldBindings
+				if position >= 0 {
+					s.replaceReleaseLocked(plan)
+				}
+				return model.Passport{}, false, err
 			}
 		}
-		return publicPassport(*item, false), nil
+		return publicPassport(*item, false), replayed, nil
 	}
-	return model.Passport{}, ErrNotFound
+	return model.Passport{}, false, ErrNotFound
+}
+
+func validatePassportUse(item model.StoredPassport, expected *model.Passport, hash, consumer string, consume bool) (bool, error) {
+	if subtle.ConstantTimeCompare([]byte(item.TokenSHA256Stored), []byte(hash)) != 1 {
+		return false, ErrPassportTokenMismatch
+	}
+	if expected != nil && (item.ID != expected.ID || item.OrganizationID != expected.OrganizationID ||
+		item.ChangeID != expected.ChangeID || item.ArtifactSHA256 != expected.ArtifactSHA256 ||
+		item.Environment != expected.Environment || item.RuleSetVersion != expected.RuleSetVersion ||
+		item.ApproverID != expected.ApproverID || !item.IssuedAt.Equal(expected.IssuedAt) || !item.ExpiresAt.Equal(expected.ExpiresAt)) {
+		return false, ErrPassportTokenMismatch
+	}
+	switch item.Status {
+	case model.PassportActive:
+		return false, nil
+	case model.PassportExpired:
+		return false, ErrPassportExpired
+	case model.PassportConsumed:
+		if consume && sameConsumerReplay(item, hash, consumer) {
+			return true, nil
+		}
+		return false, ErrPassportReplay
+	case model.PassportRevoked:
+		if expected != nil {
+			return false, ErrPassportRevoked
+		}
+	}
+	return false, ErrPassportInactive
+}
+
+func validatePassportChange(item model.StoredPassport, bound model.ChangeRequest, rules string, replayed bool) error {
+	status := model.StatusApproved
+	if replayed {
+		status = model.StatusCompleted
+	}
+	if bound.Status != status || bound.ArtifactSHA256 != item.ArtifactSHA256 || bound.Environment != item.Environment ||
+		bound.RuleSetVersion != item.RuleSetVersion || item.ArtifactVersion > 0 && bound.MaterialVersion() != item.ArtifactVersion {
+		return ErrPassportChangeInvalid
+	}
+	if rules != item.RuleSetVersion {
+		return ErrPassportRuleSet
+	}
+	return nil
+}
+
+func validateJobBinding(existing deploymentJobBinding, item model.StoredPassport, plan model.JointRelease, job *model.GitLabJob, replayed bool) error {
+	if replayed {
+		if existing.PassportID == "" && job == nil && plan.ID == "" || existing.matchesJob(job, item, plan) {
+			return nil
+		}
+		return ErrPassportReplay
+	}
+	if job != nil && !validJob(job, item.OrganizationID) {
+		return ErrReleaseJob
+	}
+	if existing.PassportID != "" {
+		return ErrPassportReplay
+	}
+	return nil
 }
 
 func sameConsumerReplay(item model.StoredPassport, tokenSHA256, consumer string) bool {
@@ -227,6 +332,18 @@ func sameConsumerReplay(item model.StoredPassport, tokenSHA256, consumer string)
 func (s *Store) RevokePassport(organizationID, id, actorID string, at time.Time, audit model.AuditEvent) (model.Passport, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		pub, stored, linked, err := backend.revokePassport(ctx, organizationID, id, actorID, at, audit)
+		if err != nil {
+			return model.Passport{}, err
+		}
+		s.upsertPassportLocked(stored)
+		s.mergeAuditsLocked(linked...)
+		s.localMutationSeq.Add(1)
+		return pub, nil
+	}
 	for index := range s.data.Passports {
 		item := &s.data.Passports[index]
 		if item.ID != id || item.OrganizationID != organizationID {
@@ -254,6 +371,22 @@ func (s *Store) RevokePassport(organizationID, id, actorID string, at time.Time,
 func (s *Store) RevokePassportsByChange(organizationID, changeID, actorID string, at time.Time, audit model.AuditEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if backend, ok := s.backend.(*postgresBackend); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		revoked, linked, err := backend.revokePassportsByChange(ctx, organizationID, changeID, actorID, at, audit)
+		if err != nil {
+			return err
+		}
+		for _, item := range revoked {
+			s.upsertPassportLocked(item)
+		}
+		s.mergeAuditsLocked(linked...)
+		if len(revoked) > 0 {
+			s.localMutationSeq.Add(1)
+		}
+		return nil
+	}
 	changed := false
 	oldPassports := append([]model.StoredPassport(nil), s.data.Passports...)
 	oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
@@ -285,11 +418,13 @@ func (s *Store) RecordAudit(audit model.AuditEvent) error {
 	if backend, ok := s.backend.(*postgresBackend); ok {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_, payload, version, err := backend.appendAudit(ctx, audit)
+		linked, err := backend.appendAudit(ctx, audit)
 		if err != nil {
 			return err
 		}
-		return s.installPostgresSnapshot(payload, version)
+		s.mergeAuditsLocked(linked)
+		s.localMutationSeq.Add(1)
+		return nil
 	}
 	oldAudits := append([]model.AuditEvent(nil), s.data.Audits...)
 	s.appendAuditsLocked(audit)
@@ -302,6 +437,14 @@ func (s *Store) RecordAudit(audit model.AuditEvent) error {
 
 func publicPassport(item model.StoredPassport, includeTokenHash bool) model.Passport {
 	passport := item.Passport
+	if passport.ConsumedAt != nil {
+		at := *passport.ConsumedAt
+		passport.ConsumedAt = &at
+	}
+	if passport.RevokedAt != nil {
+		at := *passport.RevokedAt
+		passport.RevokedAt = &at
+	}
 	if includeTokenHash {
 		passport.TokenSHA256 = item.TokenSHA256Stored
 	} else {

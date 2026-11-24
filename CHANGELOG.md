@@ -1,5 +1,22 @@
 # Changelog
 
+## 5.0.0 - 2026-11-24
+
+### 新增
+
+- 多变更联合发布：按依赖顺序串联数据库与应用部署，每项变更独立审批、签发并消费通行证。Gate 核验实际 GitLab 部署作业身份；只有与已消费作业匹配的可信部署成功证据才能解锁下一步，流水线成功不算部署成功。
+- 纳入 4.1 基线：PostgreSQL 核心数据归一化及迁移 `003_core_authority_v41.sql`，整理 SQL 检查规则并拆分领域职责。
+
+### 升级
+
+- PostgreSQL 新增 `changeguard_joint_releases`、`changeguard_joint_release_members`、`changeguard_deployment_jobs`；文件后端新增可选的 `joint_releases`、`deployment_jobs` 字段。升级前备份数据库及适用的文件状态。
+- 启用联合发布前，先升级所有处理 Gate 请求的实例。旧版 Gate 忽略计划成员关系；有活跃受管计划时不得直接回滚，须先暂停相关部署并处置计划。
+- 按 [CI 集成文档](docs/ci-integration.md#50-联合发布串联数据库与应用部署)配置服务端的组织、GitLab HTTPS 源和项目白名单（`CHANGEGUARD_GITLAB_ORGANIZATION_ID`、`CHANGEGUARD_GITLAB_RELEASE_ORIGIN`、`CHANGEGUARD_GITLAB_RELEASE_PROJECTS`），以及 `CHANGEGUARD_GITLAB_READ_API_TOKEN`（`read_api`）和 Webhook 凭据 `CHANGEGUARD_GITLAB_SIGNING_TOKEN`（或兼容的 `CHANGEGUARD_GITLAB_WEBHOOK_SECRET`）。部署作业的凭据由 GitLab 注入 `CI_JOB_TOKEN`。
+
+### 已知限制
+
+- 已通过 Go 测试、vet、构建和竞态测试，PostgreSQL 16.16 与 HTTP 测试夹具验证，以及 51 项 Web 单元测试和 7 项浏览器测试；真实 GitLab 联调与生产部署未验证。
+
 ## 4.0.2 - 2026-10-29
 
 修复升级 watcher 把不健康的 Agent 记成升级成功的问题。4.0 起包内带 Agent 组件且系统装有该 unit 时，watcher 会和核心一起重启 Agent，但重启返回后直接记成功，不再探活；Agent 进程起来却不响应时，状态仍是 `success`，也不会回滚。

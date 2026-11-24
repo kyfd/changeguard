@@ -1,0 +1,63 @@
+# Include from the root .gitlab-ci.yml in this repository. Use deployment
+# credentials only after replacing the illustrative image with your own.
+stages: [build_gate, migrate, deploy]
+
+.joint_job:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"'
+
+build_changeguard_gate:
+  extends: .joint_job
+  stage: build_gate
+  image: golang:1.25-alpine
+  script:
+    - CGO_ENABLED=0 go build -trimpath -o .ci-bin/changeguard-gate ./cmd/changeguard-gate
+  artifacts:
+    paths: [.ci-bin/changeguard-gate]
+    expire_in: 1 hour
+
+migrate_orders:
+  extends: .joint_job
+  stage: migrate
+  image: alpine:3.22
+  dependencies: [build_changeguard_gate]
+  environment: { name: production }
+  script:
+    - apk add --no-cache ca-certificates postgresql-client
+    - ': "${PGHOST:?configure PGHOST}" "${PGDATABASE:?configure PGDATABASE}" "${PGUSER:?configure PGUSER}"'
+    - export PGSSLMODE=verify-full
+    - export CHANGEGUARD_TOKEN="$MIGRATION_PASSPORT"
+    - .ci-bin/changeguard-gate consume -gitlab-job -manifest examples/ci-demo/.changeguard.migration.json
+    - psql -X -v ON_ERROR_STOP=1 -f examples/ci-demo/migrations/20260804_add_orders_index.sql
+
+deploy_orders:
+  extends: .joint_job
+  stage: deploy
+  image: alpine:3.22
+  dependencies: [build_changeguard_gate]
+  environment: { name: production }
+  script:
+    - apk add --no-cache ca-certificates kubectl
+    - ': "${KUBECONFIG:?configure KUBECONFIG}" "${KUBE_CONTEXT:?configure KUBE_CONTEXT}"'
+    - export CHANGEGUARD_TOKEN="$APPLICATION_PASSPORT"
+    - |
+      # GitLab schedules this stage before a deployment webhook is guaranteed
+      # to have arrived. Poll read-only Gate; never deploy on a timeout.
+      manifest=examples/ci-demo/.changeguard.application.json
+      for attempt in $(seq 1 24); do
+        if gate_result=$(.ci-bin/changeguard-gate verify -manifest "$manifest" 2>&1); then
+          break
+        fi
+        case "$gate_result" in
+          *'HTTP 409: RELEASE_BLOCKED:'*) ;;
+          *) printf '%s\n' "$gate_result" >&2; exit 1 ;;
+        esac
+        if [ "$attempt" -eq 24 ]; then
+          printf '%s\n' "$gate_result" >&2
+          exit 1
+        fi
+        sleep 5
+      done
+      .ci-bin/changeguard-gate consume -gitlab-job -manifest "$manifest"
+    - kubectl --context "$KUBE_CONTEXT" apply -f examples/ci-demo/deploy/orders.yaml
+    - kubectl --context "$KUBE_CONTEXT" rollout status -n production deployment/orders --timeout=5m
