@@ -6,8 +6,11 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/dbguard ./cmd/dbguard
 
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates postgresql-client tzdata && addgroup -S dbguard && adduser -S dbguard -G dbguard
+FROM alpine:3.24
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates postgresql-client tzdata \
+    && addgroup -S dbguard \
+    && adduser -S dbguard -G dbguard
 WORKDIR /app
 COPY --from=builder /out/dbguard /app/dbguard
 RUN mkdir -p /app/data && chown -R dbguard:dbguard /app
